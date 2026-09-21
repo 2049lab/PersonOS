@@ -1,0 +1,84 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "personos"
+version = "0.1.0.dev0"
+description = "Layered long-term memory for agents: evidence to episodes to retrievable atoms, with video and person identity"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [{ name = "PersonOS contributors" }]
+keywords = ["memory", "llm", "agent", "rag", "multimodal", "long-term-memory"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# NOTE (phase 1 of the open-sourcing plan): this is still the *pre-shaping* dependency
+# set, kept deliberately close to the internal requirements.txt so that `pip install -e .`
+# and the existing test suite keep working while the package is being reshaped.
+# Phase 7 trims this to a <=10 package core and moves everything else behind extras.
+# Until then, do not treat this list as the intended public surface.
+dependencies = [
+    "pydantic>=2.6",
+    "httpx>=0.27",
+    "numpy>=1.26",
+    "SQLAlchemy>=2.0",
+    "loguru>=0.7",
+    "python-ulid>=2.2",
+    "python-dotenv>=1.0",
+    # --- to be moved into extras in phase 7 ---
+    "PyMySQL>=1.1",
+    "redis>=5.0",
+    "langchain>=1.0",
+    "langchain-classic>=1.0",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "pillow>=11.0",
+]
+
+[project.optional-dependencies]
+oss = ["oss2>=2.19"]
+anthropic = ["anthropic>=0.40"]
+observability = ["langfuse>=3,<4"]
+# Video identity. Heavy (~2GB with torch) and split fine-grained on purpose so that
+# nobody installing the text-only memory core pays for CUDA-capable wheels.
+video = ["av>=13.0", "soundfile>=0.12"]
+identity-face = [
+    "insightface>=0.7",
+    "onnxruntime>=1.17",
+    "onnx>=1.13",
+    "opencv-python-headless>=4.9",
+    "scikit-image>=0.22",
+    "scipy>=1.11",
+    "tqdm>=4.66",
+    "requests>=2.31",
+]
+identity-voice = ["speechbrain>=1.0", "torch>=2.0", "torchaudio>=2.0", "scipy>=1.11"]
+identity = ["personos[video,identity-face,identity-voice]"]
+dev = ["pytest>=8.0", "pytest-cov", "ruff", "pre-commit"]
+
+[project.urls]
+Homepage = "https://github.com/personos/personos"
+Issues = "https://github.com/personos/personos/issues"
+
+[tool.hatch.build.targets.wheel]
+# Only the library ships. `server/` is a sibling deployable with its own requirements.
+packages = ["personos"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]

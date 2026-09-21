@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push: { branches: [main] }
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install ruff
+      - run: ruff check .
+      # 开源泄漏闸。改造期间预期为红,发布前必须绿。
+      - name: No internal references
+        run: python scripts/check_no_internal_refs.py
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ matrix.python-version }}" }
+      - run: pip install -e ".[dev]"
+      # 冷启动闸:空环境下代表性模块必须都能 import。挡的是"导入期求值"这类会让
+      # 零配置承诺落空的回归。注意不能只测 `import personos`——__init__ 近乎空文件时
+      # 那样恒绿、零判别力(实测踩过)。
+      - name: Cold start with an empty environment
+        run: python scripts/check_cold_start.py
+      - run: pytest -q

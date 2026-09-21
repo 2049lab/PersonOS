@@ -1,0 +1,24 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.0
+    hooks:
+      - id: ruff
+        args: [--fix]
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+      - id: detect-private-key
+
+  - repo: local
+    hooks:
+      # 开源是不可逆的:推上去被爬了就收不回来。这道闸挡的是散落在 docstring、
+      # 注释、依赖名、env 名里的内部标识——人工 review 必然漏。
+      - id: no-internal-refs
+        name: 仓库不得残留公司内部标识
+        entry: python scripts/check_no_internal_refs.py
+        language: system
+        pass_filenames: false

@@ -1,0 +1,66 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2.6
+httpx>=0.27
+python-dotenv>=1.0
+loguru>=0.7
+python-ulid>=2.2
+numpy>=1.26
+langchain>=1.0
+langchain-classic>=1.0
+anthropic>=0.40
+pytest>=8.0
+PyMySQL>=1.1
+SQLAlchemy>=2.0
+oss2>=2.19             # 图片输入:原图存阿里云 OSS(media_store);缺它 pod 内 import oss2 失败→存图静默降级
+pillow>=11.0           # 图片输入:图片格式魔数校验/尺寸处理(media_store)
+# —— 公司 Redis(redinfra) ——
+# 框架本体仅在内部 pypi,且必须 --no-deps 装(见 Dockerfile):它钉死 thriftpy2==0.5.2,
+# 而该版无 linux wheel、要现场编 C 扩展。我们只用服务发现 + Redis,thrift RPC 一行不用
+# (thriftpy2 只被 redinfra/thrift/ 子包 import),实测卸掉后 Redis 读写与 pytest 全通。
+# 因此框架依赖在下方显式列出——漏了会在启动时 ImportError,不要随手删。
+redis>=6.0,<7            # 必须 6.x:redinfra 0.1.19 与 8.x 握手不兼容
+redenv>=0.0.5
+redmetrics>=0.1.0
+hyx>=0.0.2,<0.0.3
+optional>=0.0.1,<0.0.2
+cachetools>=6.2.4,<7.0.0
+grpcio>=1.76.0,<2.0.0
+gunicorn>=20.1.0
+aiohttp>3.12.3
+nest-asyncio>=1.6.0
+psutil>=7.0.0
+uvloop>=0.19.0
+importlib-metadata>=8.7.0,<9.0.0
+langfuse>=3,<4
+redkms>=1.0.5             # KMS 密钥读取(config.get_secret 兜底);env 优先时不 import,本地/CI 无需真连
+# —— 视频记忆(多模态写入)——
+# 实测事故:SIT 首次部署时这一段一个包都没有 —— 视频消息全军覆没,却只在 pod 日志里留一行
+# `ModuleNotFoundError: No module named 'av'`:队列 cursor 照常推进、接口照常 202、
+# iddraft 留着不清,从外部看完全像"消费成功了但没产出"。漏装这段 = 视频链路静默失效。
+#
+# av 是**门槛**:只要走视频就必需(时长探测 + 抽帧 + 抽 16k 音频),与后端 profile 无关。
+# 其余是 PERSONOS_VIDEO_BACKEND=real 的真识别后端所需 —— 而 real 是缺省值,别指望跑 mock
+# 顶一顶:MockOmni 会编造剧本、MockFaceDetector 会生成假人脸向量,那是往真库写垃圾。
+av>=13.0                  # PyAV:clip 时长/抽帧/抽音频(video_ingest._duration + harvest)
+speechbrain>=1.0          # ECAPA 声纹;连带 torch/torchaudio/soundfile/scipy
+soundfile>=0.12           # 音频段读取(harvest._wav_at);speechbrain 也依赖,显式列出
+# insightface **不在这里**:它声明依赖 opencv-python(带 GUI 的那版),在 slim 基础镜像里
+# `import cv2` 直接 ImportError: libxcb.so.1 —— 那是桌面图形库,服务器镜像不会有,
+# 补全 libGL/libxcb/libSM 这一串又把镜像撑大且脆。
+# 改为 Dockerfile 里 `--no-deps` 装本体,依赖在下面显式列出并把 opencv 换成 headless 版
+# (同一个 cv2 模块,只是不链 GUI)。这与本文件上面 python-infra-framework 的处置同法。
+# 代价:漏列一个会在**构建期**的 import 自检当场炸(不会带到线上),所以别随手删。
+onnxruntime>=1.17         # InsightFace 推理运行时
+onnx>=1.13                # insightface 声明依赖
+opencv-python-headless>=4.9   # 替代 opencv-python:同 cv2,不链 libGL/libxcb
+scikit-image>=0.22        # insightface 声明依赖
+scipy>=1.11               # insightface / speechbrain 共同依赖
+tqdm>=4.66                # insightface 声明依赖
+requests>=2.31            # insightface 下载权重用;别靠 speechbrain 传递带进来——
+                          # --no-deps 装的包再依赖"别人的传递依赖"是最容易断的一环
+# torch/torchaudio **故意不写在这里**:它们由 Dockerfile 以 `==X+cpu` 精确钉死、
+# 与本文件在同一次 pip 解析里从 CPU 源装(见那里的注释:分两步装会被换成 CUDA 版,
+# 让 pip 自选版本会装出 torch/torchaudio 不匹配的一对)。
+# 不写进本文件是因为 `+cpu` 本地版本只有 linux 有,写死会让 macOS 上的本地开发装不上;
+# 本地开发用 conda 环境自己装(见 CLAUDE.md 的 Python 环境约定)。

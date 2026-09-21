@@ -1,0 +1,1157 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>personos-mem 记忆服务接口文档</title>
+<style>
+  :root { --fg:#1f2328; --muted:#656d76; --border:#d0d7de; --bg:#fff;
+           --code-bg:#f6f8fa; --accent:#0969da; --sidebar:#f6f8fa; }
+  * { box-sizing:border-box; }
+  body { margin:0; color:var(--fg); background:var(--bg);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    line-height:1.65; font-size:15px; }
+  .layout { display:flex; max-width:1180px; margin:0 auto; }
+  nav.toc { width:250px; flex:none; padding:24px 16px; border-right:1px solid var(--border);
+    height:100vh; position:sticky; top:0; overflow-y:auto; background:var(--sidebar); font-size:13.5px; }
+  nav.toc .brand { font-weight:700; font-size:15px; margin-bottom:12px; color:var(--fg); }
+  nav.toc ul { list-style:none; padding-left:0; margin:0; }
+  nav.toc li { margin:2px 0; }
+  nav.toc a { color:var(--muted); text-decoration:none; display:block; padding:3px 8px; border-radius:6px; }
+  nav.toc a:hover { background:#eaeef2; color:var(--fg); }
+  main { flex:1; min-width:0; padding:32px 40px 80px; }
+  main h1 { font-size:28px; padding-bottom:.3em; border-bottom:1px solid var(--border); }
+  main h2 { font-size:21px; margin-top:2em; padding-bottom:.3em; border-bottom:1px solid var(--border); scroll-margin-top:16px; }
+  main h3 { font-size:16px; margin-top:1.6em; }
+  code { background:var(--code-bg); padding:.15em .4em; border-radius:6px; font-size:85%;
+    font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace; }
+  pre { background:var(--code-bg); padding:14px 16px; border-radius:8px; overflow-x:auto; line-height:1.5; }
+  pre code { background:none; padding:0; font-size:13px; }
+  table { border-collapse:collapse; width:100%; margin:1em 0; display:block; overflow-x:auto; }
+  th,td { border:1px solid var(--border); padding:7px 12px; text-align:left; vertical-align:top; }
+  th { background:var(--code-bg); font-weight:600; }
+  blockquote { margin:1em 0; padding:10px 16px; border-left:4px solid var(--accent);
+    background:#f6f8fa; border-radius:0 6px 6px 0; color:var(--fg); }
+  blockquote p { margin:.3em 0; }
+  a { color:var(--accent); }
+  hr { border:none; border-top:1px solid var(--border); margin:2em 0; }
+  .banner { background:linear-gradient(90deg,#0969da,#218bff); color:#fff; padding:10px 40px; font-size:13.5px; }
+  .banner code { background:rgba(255,255,255,.2); color:#fff; }
+  @media (max-width:820px) { nav.toc { display:none; } main { padding:20px; } }
+</style>
+</head>
+<body>
+<div class="banner">📖 personos-mem 记忆服务 · SIT: <code>https://personos.devops.sit.xiaohongshu.com</code> · 本页即最新接口文档,可直接访问阅读</div>
+<div class="layout">
+<nav class="toc"><div class="brand">personos-mem 记忆服务接口文档</div><div class="toc">
+<ul>
+<li><a href="#_1">环境与域名</a></li>
+<li><a href="#_2">鉴权(两层)</a></li>
+<li><a href="#_3">统一响应信封</a></li>
+<li><a href="#_4">调用示意图</a></li>
+<li><a href="#_5">快速开始(复制即跑)</a></li>
+<li><a href="#post-usersregister">POST /users/register — 注册用户</a></li>
+<li><a href="#post-ingest">POST /ingest — 喂一批消息(异步)</a></li>
+<li><a href="#post-sessionend">POST /session/end — 会话收尾(异步)</a></li>
+<li><a href="#get-queuestatus">GET /queue/status — 查会话消费进度</a></li>
+<li><a href="#post-recall">POST /recall — 检索 + 作答(同步)</a></li>
+<li><a href="#get-profile">GET /profile — 取用户画像</a></li>
+<li><a href="#get-episodes">GET /episodes — 查情景记忆(分页)</a></li>
+<li><a href="#get-tracenode_id">GET /trace/:node_id — 溯源(双向)</a></li>
+<li><a href="#_8">附:鉴权失败示例</a></li>
+</ul>
+</div>
+</nav>
+<main><h1 id="personos-mem">personos-mem 记忆服务接口文档</h1>
+<p>personos-mem 是一个<strong>分层记忆服务</strong>:调用方(你的 App / Agent)把用户对话喂进来,它自动切分话题、抽取事实、连成记忆;需要时按问题检索并给出<strong>一段标准事实陈述</strong>作为作答依据,同时沉淀一份<strong>用户画像</strong>。本服务只负责「记忆」,对话的组织由调用方完成。</p>
+<p><strong>多模态</strong>:写入支持 文本 / 图片 / <strong>视频 clip</strong>(见 <code>/ingest</code> 下的「视频 clip」一节);召回支持 文本 / <strong>图片</strong>(见 <code>/recall</code> 下的「带图提问」一节)。视频会被看懂画面与对话、认出其中的人物并跨会话延续,之后用普通的文字提问就能召回;带图提问则能把"他""这家店"这类指代落成具体的人和事物。</p>
+<h2 id="_1">环境与域名</h2>
+<table>
+<thead>
+<tr>
+<th>环境</th>
+<th>Base URL</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SIT</td>
+<td><code>https://personos.devops.sit.xiaohongshu.com</code></td>
+</tr>
+<tr>
+<td>Staging</td>
+<td><code>https://personos.devops.beta.xiaohongshu.com</code></td>
+</tr>
+<tr>
+<td>Prod</td>
+<td><code>https://personos.devops.xiaohongshu.com</code></td>
+</tr>
+</tbody>
+</table>
+<p>所有业务接口前缀 <code>/api/v1</code>。下文路径均省略该前缀(如 <code>/ingest</code> = <code>POST /api/v1/ingest</code>)。</p>
+<h2 id="_2">鉴权(两层)</h2>
+<p>调用本服务有<strong>两层身份</strong>,叠加使用:</p>
+<ol>
+<li><strong>调用方签名(AK/SK)——服务级鉴权,所有 <code>/api/v1/*</code> 请求必带</strong>。你会拿到一对 <code>AK</code>(公开标识)+ <code>SK</code>(私密,只你侧保存、绝不上网/入库)。每次请求用 SK 对「方法+路径+参数+body+时间戳+nonce」算 HMAC-SHA256 签名,带 5 个头;服务端验签防篡改与重放。</li>
+<li><strong>用户身份(<code>X-User-Token</code>)——用户级隔离</strong>。先 <code>POST /api/v1/users/register</code> 拿 <code>token</code>,记忆读写带 <code>X-User-Token: &lt;token&gt;</code>;同一 user 跨会话共享,跨 user 物理隔离。register 本身也要签名(第 1 层)。</li>
+</ol>
+<h3 id="apiv1">签名头(每个 <code>/api/v1</code> 请求都带)</h3>
+<table>
+<thead>
+<tr>
+<th>头</th>
+<th>值</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>X-Access-Key</code></td>
+<td>你的 AK</td>
+</tr>
+<tr>
+<td><code>X-Timestamp</code></td>
+<td>当前 unix 秒(与服务端偏差需 ≤ 300s)</td>
+</tr>
+<tr>
+<td><code>X-Nonce</code></td>
+<td>每次请求唯一随机串(300s 内不可重复,防重放)</td>
+</tr>
+<tr>
+<td><code>X-Signature</code></td>
+<td><code>HMAC-SHA256(SK, 规范串)</code> 的 hex</td>
+</tr>
+<tr>
+<td><code>X-Signed-Headers</code></td>
+<td>实际纳入签名的头名(逗号分隔、小写、升序;无则空)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="7-n">规范串(待签字符串,7 行 <code>\n</code> 连接,顺序固定)</h3>
+<pre><code>&lt;METHOD 大写&gt;
+&lt;path,如 /api/v1/ingest&gt;
+&lt;排序后 query,k=v 用 &amp; 连;无则空行&gt;
+&lt;应签头,每行 name:value(值去首尾空格);无则空行&gt;
+&lt;body 的 SHA-256 hex(空 body 也算)&gt;
+&lt;X-Timestamp&gt;
+&lt;X-Nonce&gt;
+</code></pre>
+<p><strong>应签头最小集</strong>:<code>content-type</code>、<code>x-user-token</code> —— 请求带了(非空)就必须纳入签名(否则 401)。</p>
+<h3 id="bash-openssl">可复制的签名示例(bash + openssl)</h3>
+<pre><code class="language-bash">BASE=https://personos.devops.sit.xiaohongshu.com     # 换成对应环境
+AK=rokid; SK='&lt;你的SK&gt;'; PATH_=/api/v1/health
+TS=$(date +%s); NONCE=$(openssl rand -hex 16)
+BODY_HASH=$(printf '' | openssl dgst -sha256 -hex | awk '{print $NF}')   # GET 空 body
+CANON=$(printf 'GET\n%s\n%s\n%s\n%s\n%s\n%s' &quot;$PATH_&quot; &quot;&quot; &quot;&quot; &quot;$BODY_HASH&quot; &quot;$TS&quot; &quot;$NONCE&quot;)
+SIG=$(printf '%s' &quot;$CANON&quot; | openssl dgst -sha256 -hmac &quot;$SK&quot; -hex | awk '{print $NF}')
+curl -s &quot;$BASE$PATH_&quot; -H &quot;X-Access-Key: $AK&quot; -H &quot;X-Timestamp: $TS&quot; \
+  -H &quot;X-Nonce: $NONCE&quot; -H &quot;X-Signature: $SIG&quot; -H &quot;X-Signed-Headers: &quot;
+</code></pre>
+<p>带 body/用户 token 的完整示例(POST /recall)、Python 版签名函数、常见失败排查,见 <strong><a href="aksk-signing.md">AK/SK 验签接入</a></strong>。未签名/签名错/超时/重放一律返回 <code>401 {"code":401,"msg":"认证失败"}</code>。探针 <code>/healthz</code>、<code>/readyz</code> 与本文档页不需签名。</p>
+<h2 id="_3">统一响应信封</h2>
+<p>所有 <code>/api/v1</code> 接口的响应体统一为 <code>{code, data, msg}</code>:</p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>code</code></td>
+<td>业务码。<code>0</code> = 成功;非 0 = 失败(取值 = HTTP 状态号,见下表)</td>
+</tr>
+<tr>
+<td><code>data</code></td>
+<td>成功时的业务载荷;失败时为 <code>null</code></td>
+</tr>
+<tr>
+<td><code>msg</code></td>
+<td><code>"ok"</code> 或人可读的失败原因</td>
+</tr>
+</tbody>
+</table>
+<p>HTTP 状态码保留 REST 语义(可用于网关/重试判断),与 <code>code</code> 同步:</p>
+<table>
+<thead>
+<tr>
+<th>HTTP / code</th>
+<th>含义</th>
+<th>处理建议</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>200 / 0</td>
+<td>成功</td>
+<td>—</td>
+</tr>
+<tr>
+<td>201 / 0</td>
+<td>创建成功(注册)</td>
+<td>—</td>
+</tr>
+<tr>
+<td>202 / 0</td>
+<td>已受理(异步写入已入队)</td>
+<td>无需等待,继续</td>
+</tr>
+<tr>
+<td>400</td>
+<td>请求参数不合法</td>
+<td>修正参数</td>
+</tr>
+<tr>
+<td>401</td>
+<td>token 缺失或无效</td>
+<td>重新注册 / 检查请求头</td>
+</tr>
+<tr>
+<td>404</td>
+<td>资源不存在</td>
+<td>—</td>
+</tr>
+<tr>
+<td>413</td>
+<td>图片过大(&gt; 5MB)</td>
+<td>压缩后重传</td>
+</tr>
+<tr>
+<td>422</td>
+<td>请求体结构校验失败</td>
+<td>按 <code>msg</code> 修正字段</td>
+</tr>
+<tr>
+<td>429</td>
+<td>上游模型限流</td>
+<td>按 <code>Retry-After</code> 退避重试</td>
+</tr>
+<tr>
+<td>503</td>
+<td>背压 / 繁忙(队列积压或并发已满)</td>
+<td>按 <code>Retry-After</code> 降速重试</td>
+</tr>
+<tr>
+<td>502</td>
+<td>上游模型/向量服务故障</td>
+<td>稍后重试</td>
+</tr>
+</tbody>
+</table>
+<p>平台探针 <code>GET /healthz</code>、<code>GET /readyz</code> 在 <code>/api/v1</code> 之外,不套信封(仅供 k8s 探活)。</p>
+<h2 id="_4">调用示意图</h2>
+<pre><code class="language-text">①  注册        POST /users/register         → 拿 token(一次性,持久保存)
+                     │
+②  会话开始    GET  /profile                → 拉用户画像,拼进系统提示词
+                     │
+       ┌─────────────┴──────────────┐   每轮对话循环
+       │                            │
+③  检索作答    POST /recall          │      → 拿记忆作答依据,Agent 组织回复
+       │                            │
+④  存储        POST /ingest ────────&gt;┘      → 存本轮 QA 对(异步,不阻塞用户)
+                     │
+⑤  会话结束    POST /session/end            → 闭合尚未收口的段落(必调)
+                     │
+⑥  后台异步:队列消费 → 建记忆 → 画像整理     (无需调用;可用 /queue/status 查进度)
+</code></pre>
+<p><strong>接入回路(推荐)</strong>:</p>
+<ol>
+<li><strong>一次性</strong>:<code>POST /users/register</code> 拿 <code>token</code> 并持久保存。</li>
+<li><strong>会话开始</strong>:<code>GET /profile</code> 拉一次用户画像,拼进你的系统提示词。</li>
+<li><strong>每轮对话</strong>:先 <code>POST /recall</code>(拿记忆作答依据,你的 Agent 组织回复)→ 再 <code>POST /ingest</code>(把这轮的 QA 对存进记忆,异步不阻塞用户)。</li>
+<li><strong>会话结束</strong>:<code>POST /session/end</code> 闭合尚未收口的段落(<strong>必调</strong>)。</li>
+<li>写入是<strong>异步</strong>的:<code>/ingest</code>、<code>/session/end</code> 入队即返回 202,后台按会话顺序消费、建记忆、并触发画像整理。可用 <code>GET /queue/status</code> 查消费进度。</li>
+</ol>
+<h2 id="_5">快速开始(复制即跑)</h2>
+<blockquote>
+<p>⚠️ 下文各 curl <strong>为可读性省略了签名头</strong>。实际所有 <code>/api/v1</code> 请求都要带 <code>X-Access-Key/X-Timestamp/X-Nonce/X-Signature/X-Signed-Headers</code>(见上方「鉴权(两层)」一节),否则返回 401。生产接入建议用 <a href="aksk-signing.md">AK/SK 验签接入</a> 里的签名函数包一层再发。</p>
+</blockquote>
+<p>先注册拿 token 存进环境变量,后续所有命令直接复用:</p>
+<pre><code class="language-bash">export BASE=https://personos.devops.sit.xiaohongshu.com/api/v1
+
+# 注册并把 token 存进 $TOKEN
+export TOKEN=$(curl -s $BASE/users/register \
+  -H 'Content-Type: application/json' \
+  -d '{&quot;user_id&quot;: &quot;my_app_user_001&quot;}' \
+  | python3 -c &quot;import sys,json; print(json.load(sys.stdin)['data']['token'])&quot;)
+
+echo &quot;TOKEN=$TOKEN&quot;
+</code></pre>
+<p>下文各接口的 curl 均假设已执行上面两行(<code>$BASE</code>、<code>$TOKEN</code> 已就绪)。</p>
+<hr />
+<h2 id="post-usersregister">POST /users/register — 注册用户</h2>
+<p>签发唯一 <code>token</code> 代表 user 身份。支持两种用法:传 <code>user_id</code> 用你自己的 id 注册;不传则系统自动生成一个。<strong>token 只在此响应完整返回一次,请持久保存</strong>,后续所有读写都用它。免鉴权。</p>
+<p><strong>请求体</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>必填</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>user_id</code></td>
+<td>string</td>
+<td>否</td>
+<td>你的用户 id(仅字母/数字/下划线/连字符,≤128)。不传则自动生成</td>
+</tr>
+</tbody>
+</table>
+<p><strong>curl —— 用自定义 user_id 注册</strong></p>
+<pre><code class="language-bash">curl -s https://personos.devops.sit.xiaohongshu.com/api/v1/users/register \
+  -H 'Content-Type: application/json' \
+  -d '{&quot;user_id&quot;: &quot;my_app_user_001&quot;}'
+</code></pre>
+<p><strong>响应 201</strong></p>
+<pre><code class="language-json">{
+  &quot;code&quot;: 0,
+  &quot;data&quot;: {
+    &quot;user_id&quot;: &quot;doccap_1789461393&quot;,
+    &quot;token&quot;: &quot;KjVUV7nb35JpiH7lrfoP3R_eE-HVYeE9&quot;
+  },
+  &quot;msg&quot;: &quot;ok&quot;
+}
+</code></pre>
+<p><strong>curl —— 不传 user_id,系统自动生成</strong></p>
+<pre><code class="language-bash">curl -s https://personos.devops.sit.xiaohongshu.com/api/v1/users/register \
+  -H 'Content-Type: application/json' -d '{}'
+</code></pre>
+<pre><code class="language-json">// 201
+{
+  &quot;code&quot;: 0,
+  &quot;data&quot;: {
+    &quot;user_id&quot;: &quot;u_01M2J3BWWZRQN7290MNVK81E27&quot;,
+    &quot;token&quot;: &quot;3uh80oI7Ccg3akKGkT-zAHw4CbQ8bR-a&quot;
+  },
+  &quot;msg&quot;: &quot;ok&quot;
+}
+</code></pre>
+<blockquote>
+<p>user_id 已存在 → <code>409</code>;字符非法 → <code>400</code>。</p>
+</blockquote>
+<hr />
+<h2 id="post-ingest">POST /ingest — 喂一批消息(异步)</h2>
+<p>把对话存进记忆。<strong>建议一次只传一个 QA 对</strong>(一问一答),这样话题边界最干净、抽取质量最好。入队即返回 202,后台按会话 FIFO 顺序消费,你<strong>无需等上一批完成再发下一批</strong>。</p>
+<p><strong>请求体</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>必填</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>session_id</code></td>
+<td>string</td>
+<td>是</td>
+<td>会话 id(仅字母/数字/下划线/连字符/点,≤95,禁冒号)</td>
+</tr>
+<tr>
+<td><code>caller</code></td>
+<td>string</td>
+<td>否</td>
+<td>调用方标识;非空时服务端把会话隔离为 <code>caller:session_id</code>。<strong>recall/session_end 须传一致的 caller</strong></td>
+</tr>
+<tr>
+<td><code>messages</code></td>
+<td>array</td>
+<td>是</td>
+<td>一批消息(1–20 条)。<strong>建议就放一个 QA 对</strong>。批内是原子:整批一起进同一段落,一对 QA 永不被切开</td>
+</tr>
+<tr>
+<td><code>messages[].speaker</code></td>
+<td>string</td>
+<td>是</td>
+<td>说话人。与助手对话的本人固定用 <code>"user"</code>;多人对话用对话里的名字</td>
+</tr>
+<tr>
+<td><code>messages[].text</code></td>
+<td>string</td>
+<td>否</td>
+<td>文本(图片消息可空)</td>
+</tr>
+<tr>
+<td><code>messages[].image_b64</code></td>
+<td>string</td>
+<td>否</td>
+<td>base64 图片(带 <code>data:image/...;base64,</code> 前缀或纯 base64)</td>
+</tr>
+<tr>
+<td><code>messages[].video_url</code></td>
+<td>string</td>
+<td>否</td>
+<td><strong>视频 clip 的 http(s) 地址</strong>(含你自己桶的预签名 URL)。见「视频 clip」</td>
+</tr>
+<tr>
+<td><code>messages[].video_oss_key</code></td>
+<td>string</td>
+<td>否</td>
+<td>视频 clip 已在我方 OSS 时的快捷路径(与 <code>video_url</code> 二选一)</td>
+</tr>
+<tr>
+<td><code>messages[].clip_index</code></td>
+<td>int</td>
+<td>否</td>
+<td>你自己的 clip 编号(仅作元数据;真实顺序由服务端按到达次序定)</td>
+</tr>
+<tr>
+<td><code>messages[].duration_sec</code></td>
+<td>float</td>
+<td>否</td>
+<td>clip 时长;填了可在入口就拦下超长的,省一次无谓的处理</td>
+</tr>
+<tr>
+<td><code>context</code></td>
+<td>object</td>
+<td>否</td>
+<td>业务方上下文,见下</td>
+</tr>
+<tr>
+<td><code>context.scenario</code></td>
+<td>string</td>
+<td>否</td>
+<td><strong>业务场景描述</strong>(自由文本),让记忆更贴合你的场景。见「scenario 规范」</td>
+</tr>
+<tr>
+<td><code>context.task_type</code></td>
+<td>array</td>
+<td>否</td>
+<td>episode 分类候选词表(闭合段落时给情景记忆打类型标,供 <code>/episodes</code> 按类型筛)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>curl —— 一个 QA 对</strong></p>
+<pre><code class="language-bash">curl -s $BASE/ingest \
+  -H &quot;Content-Type: application/json&quot; -H &quot;X-User-Token: $TOKEN&quot; \
+  -d '{
+    &quot;caller&quot;: &quot;fitness-app&quot;,
+    &quot;session_id&quot;: &quot;demo-session-001&quot;,
+    &quot;messages&quot;: [
+      {&quot;speaker&quot;: &quot;user&quot;, &quot;text&quot;: &quot;我最近开始练力量,每周一三五去健身房&quot;},
+      {&quot;speaker&quot;: &quot;assistant&quot;, &quot;text&quot;: &quot;很棒!主要练哪些动作?&quot;}
+    ],
+    &quot;context&quot;: {
+      &quot;scenario&quot;: &quot;健身健康助手 App:用户记录训练、饮食与身体反馈,并咨询自己的习惯与目标。重点记住:训练项目与频率、饮食偏好与忌口、身体指标与目标;对话通常较短、口语化。&quot;,
+      &quot;task_type&quot;: [&quot;training&quot;, &quot;diet&quot;, &quot;body&quot;]
+    }
+  }'
+</code></pre>
+<p><strong>响应 202</strong></p>
+<pre><code class="language-json">{
+  &quot;code&quot;: 0,
+  &quot;data&quot;: {
+    &quot;accepted&quot;: true,
+    &quot;msg_id&quot;: &quot;815f52aede164c7285b7e2e3b8aee57e&quot;,
+    &quot;seq&quot;: 1,
+    &quot;queue_depth&quot;: 1,
+    &quot;xrayTraceId&quot;: &quot;7888d8a7f2ee4850a592a249756d30e8&quot;
+  },
+  &quot;msg&quot;: &quot;ok&quot;
+}
+</code></pre>
+<ul>
+<li><code>seq</code>:该消息在会话队列里的序号;<code>queue_depth</code>:当前积压条数;<code>xrayTraceId</code>:排障用的链路 id(有问题把它给我们即可定位)。</li>
+</ul>
+<h3 id="clip">视频 clip(多模态写入)</h3>
+<p>把一段录像喂进记忆。服务端会<strong>看懂画面与对话</strong>、<strong>认出里面的人</strong>(跨会话延续同一人),再把它变成和文本同构的记忆——之后用普通的 <code>/recall</code> 就能问"视频里发生了什么""他做了什么"。</p>
+<p><strong>怎么传</strong></p>
+<table>
+<thead>
+<tr>
+<th>方式</th>
+<th>字段</th>
+<th>适用</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>外链</strong>(推荐)</td>
+<td><code>video_url</code></td>
+<td>你的 clip 在自己的存储里。传任意 http(s) 可下载地址(含预签名 URL),<strong>不要求传到我们桶里</strong></td>
+</tr>
+<tr>
+<td>我方 key</td>
+<td><code>video_oss_key</code></td>
+<td>clip 已经在我方 OSS,跳过下载转存</td>
+</tr>
+</tbody>
+</table>
+<p><strong>一条消息 = 一个 clip。</strong> 一批可以放多个 clip(1–20),按你给的顺序处理。</p>
+<p><strong>约束(务必看)</strong></p>
+<table>
+<thead>
+<tr>
+<th>约束</th>
+<th>上限</th>
+<th>超了会怎样</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>单 clip 时长</td>
+<td><strong>150 秒</strong></td>
+<td><code>400</code>(填了 <code>duration_sec</code> 时入口就拒;否则消费时拒并留痕)</td>
+</tr>
+<tr>
+<td>单 clip 体积</td>
+<td><strong>64 MB</strong></td>
+<td><code>400</code>,提示「请降低码率或切成更短的 clip」</td>
+</tr>
+<tr>
+<td>同一条消息混内容</td>
+<td>—</td>
+<td>视频<strong>不能</strong>和 <code>text</code>/<code>image_b64</code> 放在同一条消息 → <code>400</code></td>
+</tr>
+<tr>
+<td>同一批混内容</td>
+<td>—</td>
+<td>一批要么全视频、要么全文本/图片 → <code>400</code></td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>⚠️ <strong>64MB 不是我们存不下,是上游模型服务拉不动。</strong> 剧本理解是把地址交给模型服务、由它自己下载整段视频的,它那边有下载窗口。实测 106MB(2 分钟 @7.3Mbps)必然超时失败,55MB 长期稳定。<strong>建议 720p / ≤2 分钟 / 码率压到 2Mbps 以内</strong>(约 30MB)。</p>
+</blockquote>
+<p><strong>时序:视频记忆在 <code>session/end</code> 之后才可召回</strong></p>
+<p>逐个 clip 处理时只在内部累积"这段录像里有谁、谁说了什么";<strong>必须调 <code>POST /session/end</code></strong>,服务端才会做身份终审并把整段录像落成一条情景记忆。没调 session/end 的话,这段视频不会进记忆(会话草稿 24 小时后自然作废)。</p>
+<p><strong>处理耗时(参考)</strong></p>
+<p>SIT 实测:60 秒的 clip 约 90 秒处理完(约 1.5× 实时),3 个 clip + 会话收尾约 405 秒。<strong>同一会话内的 clip 是串行的</strong>,所以单个会话跟不上实时视频流;不同会话之间并行。用 <code>GET /queue/status</code> 看消费进度,别靠猜。</p>
+<p><strong>curl</strong></p>
+<pre><code class="language-bash"># 1) 灌 clip(可一次多个;这里用外链)
+curl -s $BASE/ingest \
+  -H &quot;Content-Type: application/json&quot; -H &quot;X-User-Token: $TOKEN&quot; \
+  -d '{
+    &quot;caller&quot;: &quot;glasses-app&quot;,
+    &quot;session_id&quot;: &quot;living-room-0919&quot;,
+    &quot;messages&quot;: [
+      {&quot;speaker&quot;: &quot;user&quot;, &quot;video_url&quot;: &quot;https://your-bucket/clip000.mp4?sign=...&quot;, &quot;clip_index&quot;: 0},
+      {&quot;speaker&quot;: &quot;user&quot;, &quot;video_url&quot;: &quot;https://your-bucket/clip001.mp4?sign=...&quot;, &quot;clip_index&quot;: 1}
+    ]
+  }'
+
+# 2) 收尾(必须):身份终审 + 落记忆
+curl -s $BASE/session/end \
+  -H &quot;Content-Type: application/json&quot; -H &quot;X-User-Token: $TOKEN&quot; \
+  -d '{&quot;caller&quot;:&quot;glasses-app&quot;,&quot;session_id&quot;:&quot;living-room-0919&quot;}'
+</code></pre>
+<p><strong>失败不静默</strong>:某个 clip 因地址失效/超大/超长被拒时,<strong>整批其余 clip 继续处理</strong>,被拒的那条会留一条 task 记录(<code>kind=video_clip_rejected</code>),可凭它查到"哪条 clip 没进记忆"。</p>
+<h3 id="callercontext-scenario">callerContext / scenario 规范</h3>
+<p><code>scenario</code> 是<strong>说给记忆引擎听的一段业务背景</strong>,它会注入切段、抽取事实、召回、作答、画像整理等环节,让记忆更贴合你的场景。<strong>铁律:它只调「关注度 / 详略」,不改事实、不编造、不遗漏</strong>——最坏情况是没效果,不会让记忆失真。建议覆盖四要素:</p>
+<ol>
+<li><strong>业务是什么</strong>:一句话点明 App/Agent 定位(如「健身健康助手」)。</li>
+<li><strong>重点记什么</strong>:你最在意被记住/召回的领域(如「训练项目与频率、饮食忌口、身体指标」)。</li>
+<li><strong>对话形态</strong>(可选):短口语 / 长而信息密集 / 有无频繁打断——影响切段松紧。</li>
+<li><strong>弱化什么</strong>(可选):此场景基本不用记的内容。</li>
+</ol>
+<blockquote>
+<p>✅ <strong>Good</strong>:「饮食健康 App:用户记录三餐并咨询饮食习惯。重点记住饮食偏好与忌口、每餐时间与热量目标;对话较短、口语化。与饮食无关的闲聊可弱化。」——业务清晰、重点领域具体、点明形态。</p>
+<p>❌ <strong>Bad</strong>:「重要的都记下来」(空泛无重点)/「只记饮食,其它全忽略」(scenario 不是过滤器,不会丢事实)/「没提到就默认过敏花生」(要求编造,不会照做)/ 把用户档案塞进来(那是画像,靠对话自然沉淀)。</p>
+<p>建议 ingest 与 recall 用<strong>同一段</strong> scenario,写入侧重与召回侧重才对齐。<code>task_type</code> 召回时忽略。</p>
+</blockquote>
+<h3 id="_6">背压与限流(务必处理)</h3>
+<table>
+<thead>
+<tr>
+<th>场景</th>
+<th>响应</th>
+<th>处理</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>单会话积压 &gt; 15 条</td>
+<td><code>503</code> + <code>Retry-After</code></td>
+<td>降速,稍后重发</td>
+</tr>
+<tr>
+<td>入队争用繁忙</td>
+<td><code>503</code> + <code>Retry-After</code></td>
+<td>同上</td>
+</tr>
+<tr>
+<td>图片 &gt; 5MB</td>
+<td><code>413</code></td>
+<td>压缩后重传</td>
+</tr>
+<tr>
+<td>消息数不在 1–20</td>
+<td><code>400</code></td>
+<td>修正</td>
+</tr>
+<tr>
+<td>视频 clip &gt; 64MB</td>
+<td><code>400</code></td>
+<td>降码率或切更短的 clip</td>
+</tr>
+<tr>
+<td>视频 clip 时长 &gt; 150s</td>
+<td><code>400</code></td>
+<td>切成更短的 clip</td>
+</tr>
+<tr>
+<td>视频地址不可访问(4xx/5xx)</td>
+<td><code>400</code></td>
+<td>检查地址是否失效/签名是否过期</td>
+</tr>
+<tr>
+<td>视频与文本/图片混在同一条消息或同一批</td>
+<td><code>400</code></td>
+<td>拆成两条/两批分别发送</td>
+</tr>
+</tbody>
+</table>
+<p>背压响应体(真实格式):</p>
+<pre><code class="language-json">// 503   Header: Retry-After: 1
+{ &quot;code&quot;: 503, &quot;data&quot;: null, &quot;msg&quot;: &quot;该会话消息积压过多,请降速后重试&quot; }
+</code></pre>
+<hr />
+<h2 id="post-sessionend">POST /session/end — 会话收尾(异步)</h2>
+<p><strong>会话结束时必须调用</strong>。它闭合当前会话中尚未收口的段落——未闭合的段落不会形成记忆(靠 24h 兜底作废),不调则会话尾部的对话可能进不了长期记忆。走同一条有序队列,排在该会话所有消息之后消费。</p>
+<blockquote>
+<p>🎬 <strong>灌过视频的会话尤其不能漏</strong>:逐个 clip 处理时只在内部累积"这段录像里有谁、谁说了什么",<strong>身份终审与记忆落库都发生在这一步</strong>。不调 session/end 的话整段录像都不会进记忆(会话草稿 24 小时后作废)。这一步耗时也更长(要复核每个人物、再把整段录像织成一条情景记忆),用 <code>GET /queue/status</code> 等它消费完再去召回。</p>
+</blockquote>
+<p><strong>请求体</strong>:<code>session_id</code>(必填)、<code>caller</code>(与 ingest 一致)、<code>context</code>(可选,同 ingest)。</p>
+<p><strong>curl</strong></p>
+<pre><code class="language-bash">curl -s $BASE/session/end \
+  -H &quot;Content-Type: application/json&quot; -H &quot;X-User-Token: $TOKEN&quot; \
+  -d '{
+    &quot;caller&quot;: &quot;fitness-app&quot;,
+    &quot;session_id&quot;: &quot;demo-session-001&quot;,
+    &quot;context&quot;: {&quot;task_type&quot;: [&quot;training&quot;, &quot;diet&quot;, &quot;body&quot;]}
+  }'
+</code></pre>
+<p><strong>响应 202</strong></p>
+<pre><code class="language-json">{
+  &quot;code&quot;: 0,
+  &quot;data&quot;: {
+    &quot;accepted&quot;: true,
+    &quot;msg_id&quot;: &quot;8cd1cb7f330e44a29f8e67b9247a79cd&quot;,
+    &quot;seq&quot;: 4,
+    &quot;session_id&quot;: &quot;demo-session-001&quot;,
+    &quot;xrayTraceId&quot;: &quot;d12a60ca289f49d0ab948d82d9ebb036&quot;
+  },
+  &quot;msg&quot;: &quot;ok&quot;
+}
+</code></pre>
+<hr />
+<h2 id="get-queuestatus">GET /queue/status — 查会话消费进度</h2>
+<p>写入是异步的,用此接口确认「我发的消息消费到哪了」。<code>cursor</code> = 已消费到的最大 <code>seq</code>;<code>depth</code> = 待消费积压。</p>
+<p><strong>curl</strong></p>
+<pre><code class="language-bash">curl -s &quot;$BASE/queue/status?caller=fitness-app&amp;session_id=demo-session-001&quot; \
+  -H &quot;X-User-Token: $TOKEN&quot;
+</code></pre>
+<p><strong>响应 200</strong></p>
+<pre><code class="language-json">{
+  &quot;code&quot;: 0,
+  &quot;data&quot;: { &quot;session_id&quot;: &quot;demo-session-001&quot;, &quot;depth&quot;: 0, &quot;cursor&quot;: 4 },
+  &quot;msg&quot;: &quot;ok&quot;
+}
+</code></pre>
+<hr />
+<h2 id="post-recall">POST /recall — 检索 + 作答(同步)</h2>
+<p>按问题从记忆里检索,返回<strong>一段标准事实陈述</strong>(第三人称、中立、带绝对日期)作为作答依据,以及支撑它的记忆条目(每条内联原始证据可溯源)。answer 是事实输出,由你的 Agent 组织成最终对话。</p>
+<p><strong>请求体</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>必填</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>session_id</code></td>
+<td>string</td>
+<td>是</td>
+<td>与写入一致(用于补全指代等会话上下文)</td>
+</tr>
+<tr>
+<td><code>caller</code></td>
+<td>string</td>
+<td>否</td>
+<td>与写入一致</td>
+</tr>
+<tr>
+<td><code>query</code></td>
+<td>string</td>
+<td>是</td>
+<td>用户问题</td>
+</tr>
+<tr>
+<td><code>image_b64</code></td>
+<td>string</td>
+<td>否</td>
+<td><strong>随问题带一张图</strong>(带 <code>data:image/...;base64,</code> 前缀或纯 base64)。见「带图提问」</td>
+</tr>
+<tr>
+<td><code>image_content_type</code></td>
+<td>string</td>
+<td>否</td>
+<td>图片 MIME,默认 <code>image/jpeg</code></td>
+</tr>
+<tr>
+<td><code>mode</code></td>
+<td>string</td>
+<td>否</td>
+<td><code>fast</code> / <code>auto</code> / <code>deep</code>,默认 <code>auto</code>。见下</td>
+</tr>
+<tr>
+<td><code>top_k</code></td>
+<td>int</td>
+<td>否</td>
+<td>检索池上限,默认 30,一般不调</td>
+</tr>
+<tr>
+<td><code>context.scenario</code></td>
+<td>string</td>
+<td>否</td>
+<td>同 ingest,调优召回方向与作答详略(只调侧重,不改事实)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="_7">带图提问(多模态召回)</h3>
+<p>用户发一张照片问"<strong>他</strong>和我上周干嘛去了?"——纯文字链路既看不到图,也不知道"他"是谁。传了 <code>image_b64</code> 后,服务端会在检索之前先<strong>看图</strong>:从图里检测人脸、和你这个 user 已知的人物比对,再结合会话上下文把问题补全成能检索的形式:</p>
+<pre><code>&quot;他和我上周干嘛去了?&quot;   ──[图 + 已知人物 + 会话上下文]──▶   &quot;李四和我上周干嘛去了?&quot;
+</code></pre>
+<p>补全后的问题再走正常的检索作答流程,所以<strong>你拿到的响应结构完全不变</strong>。</p>
+<table>
+<thead>
+<tr>
+<th>项</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>数量</td>
+<td><strong>一次一张</strong>。多模态召回目前只支持文字 + 图片,<strong>不支持视频</strong></td>
+</tr>
+<tr>
+<td>体积</td>
+<td>≤ 5MB;超了 <code>413</code>,坏 base64 <code>400</code></td>
+</tr>
+<tr>
+<td>格式</td>
+<td>jpeg / png / webp / gif / heic(按魔数识别,不认声明);认不出 → <code>400</code>。<strong>查询图比 ingest 的图片更严</strong>:它是查询输入,认不出格式则整个视觉理解无从谈起,与其回 200 + 一个没用上图的答案,不如当场告诉你</td>
+</tr>
+<tr>
+<td>认不出人</td>
+<td><strong>不会瞎编名字</strong>,改用外观描述("照片里那个穿蓝夹克的男生"),检索照常</td>
+</tr>
+<tr>
+<td>图里没人</td>
+<td>照样看图:地点、招牌文字、物体也能把"这家店""这个东西"落成具体词</td>
+</tr>
+<tr>
+<td>看图失败</td>
+<td><strong>绝不阻塞召回</strong>——解码失败/模型不可用时按原问题检索,只是少一层理解</td>
+</tr>
+<tr>
+<td>不传图</td>
+<td>链路与纯文本召回逐字节一致,无额外开销</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>前提:要认出人,得先有这个人的记忆——即之前灌过包含他的<strong>视频</strong>(见 ingest 的「视频 clip」)。新用户库里没人时,只会用场景信息改写,不会认人。</p>
+</blockquote>
+<p><strong>怎么知道图被读懂了没</strong> —— 带图时响应会多一个 <code>visual</code> 块:</p>
+<pre><code class="language-json">&quot;visual&quot;: {
+  &quot;faces&quot;: 1,
+  &quot;matched&quot;: [{&quot;character_id&quot;: &quot;char_01M2YPYP9SAZS78X5F4DX7B1G8&quot;, &quot;name&quot;: &quot;Bob&quot;}],
+  &quot;resolved_query&quot;: &quot;Bob 做了什么惹人生气的事?&quot;
+}
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>含义</th>
+<th>你可以据此做什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>faces</code></td>
+<td>图里检测到几张人脸</td>
+<td><code>0</code> → 提示用户「照片里没看到人,要不要换一张?」</td>
+</tr>
+<tr>
+<td><code>matched</code></td>
+<td>认出来的人(库里的 character_id + 名字);认不出则为 <code>[]</code></td>
+<td>有人 → UI 上可显示「关于 Bob 的记忆」;<code>faces&gt;0</code> 但为空 → 「这个人我还不认识」</td>
+</tr>
+<tr>
+<td><code>resolved_query</code></td>
+<td>问题被改写成了什么(与原问题相同 = 图没能补全任何指代)</td>
+<td>展示给用户看系统怎么理解他的问题</td>
+</tr>
+</tbody>
+</table>
+<p><strong>没有它你分不清两件事</strong>:「认出了人但记忆里确实没有」和「根本没认出人,按原问题检索」——
+两者答案都可能是"材料中没有相关信息",但前者该让用户换个问法,后者该让用户换张清楚的照片。</p>
+<p>不带图时<strong>不会</strong>出现 <code>visual</code> 块(纯增量,老调用方不受影响)。</p>
+<p><strong>curl</strong></p>
+<pre><code class="language-bash">curl -s $BASE/recall \
+  -H &quot;Content-Type: application/json&quot; -H &quot;X-User-Token: $TOKEN&quot; \
+  -d '{
+    &quot;caller&quot;: &quot;glasses-app&quot;,
+    &quot;session_id&quot;: &quot;living-room-0919&quot;,
+    &quot;query&quot;: &quot;他做了什么惹人生气的事?&quot;,
+    &quot;mode&quot;: &quot;fast&quot;,
+    &quot;image_b64&quot;: &quot;'&quot;$(base64 -i ./photo.jpg | tr -d '\n')&quot;'&quot;
+  }'
+</code></pre>
+<p><strong>三种模式</strong></p>
+<table>
+<thead>
+<tr>
+<th>mode</th>
+<th>说明</th>
+<th>时延(参考)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>fast</code></td>
+<td>只走快链(检索→作答→核判),快而稳</td>
+<td>~2–6s</td>
+</tr>
+<tr>
+<td><code>auto</code></td>
+<td>快链为主,核判不过时<strong>自动升级</strong>到深轨多步翻阅</td>
+<td>~4–20s</td>
+</tr>
+<tr>
+<td><code>deep</code></td>
+<td>直接走深轨 agent 多步检索,最全但最慢</td>
+<td>~15–20s</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>💡 <strong>建议先只用 <code>fast</code> 模式</strong>:绝大多数问题快链已能答好,时延最低、成本最省。待发现某类问题快链答不全,再对该类问题改用 <code>auto</code>(让它按需自动升深轨)。</p>
+</blockquote>
+<p><strong>curl(fast)</strong></p>
+<pre><code class="language-bash">curl -s $BASE/recall \
+  -H &quot;Content-Type: application/json&quot; -H &quot;X-User-Token: $TOKEN&quot; \
+  -d '{
+    &quot;caller&quot;: &quot;fitness-app&quot;,
+    &quot;session_id&quot;: &quot;demo-session-001&quot;,
+    &quot;query&quot;: &quot;我健身练什么?教练是谁?&quot;,
+    &quot;mode&quot;: &quot;fast&quot;
+  }'
+</code></pre>
+<p><strong>响应 200</strong>(<code>memories</code> 共 9 条,此处示前 2 条)</p>
+<pre><code class="language-json">{
+  &quot;code&quot;: 0,
+  &quot;data&quot;: {
+    &quot;query&quot;: &quot;我健身练什么?教练是谁?&quot;,
+    &quot;mode&quot;: &quot;fast&quot;,
+    &quot;verdict&quot;: &quot;ok&quot;,
+    &quot;critique&quot;: &quot;&quot;,
+    &quot;retried&quot;: false,
+    &quot;answer&quot;: &quot;用户每周一、周三、周五去健身房进行力量训练，主要训练动作为深蹲、硬拉和卧推。教练是Mike。这些信息均记录于2026年9月15日。&quot;,
+    &quot;cited_cells&quot;: [&quot;cell_01M2J3C1Q82S35V2SFGE2K81ES&quot;],
+    &quot;memories&quot;: [
+      {
+        &quot;atom_id&quot;: &quot;atom_01M2J3C8TE2K09Z9603YNRJE8K&quot;,
+        &quot;cell_id&quot;: &quot;cell_01M2J3C1Q82S35V2SFGE2K81ES&quot;,
+        &quot;text&quot;: &quot;用户的力量训练教练是Mike (as of 2026-09-15)&quot;,
+        &quot;type&quot;: &quot;事实&quot;,
+        &quot;holder&quot;: &quot;user&quot;,
+        &quot;domains&quot;: [&quot;D05&quot;, &quot;D07&quot;],
+        &quot;kind&quot;: &quot;K02&quot;,
+        &quot;occurred_at&quot;: &quot;2026-09-15T16:36:34.534353+08:00&quot;,
+        &quot;evidence_refs&quot;: [&quot;ev_01M2J3BX3N4W8Z5YDETWDNEFX9&quot;],
+        &quot;evidence&quot;: [
+          { &quot;id&quot;: &quot;ev_01M2J3BX3N4W8Z5YDETWDNEFX9&quot;, &quot;holder&quot;: &quot;user&quot;,
+            &quot;content&quot;: &quot;深蹲硬拉卧推,教练是 Mike&quot;, &quot;captured_at&quot;: &quot;2026-09-15T16:36:34.548811+08:00&quot; }
+        ]
+      },
+      {
+        &quot;atom_id&quot;: &quot;atom_01M2J3C8TE2K09Z9603YNRJE8F&quot;,
+        &quot;cell_id&quot;: &quot;cell_01M2J3C1Q82S35V2SFGE2K81ES&quot;,
+        &quot;text&quot;: &quot;用户每周一、周三、周五去健身房练力量 (as of 2026-09-15)&quot;,
+        &quot;type&quot;: &quot;事实&quot;,
+        &quot;holder&quot;: &quot;user&quot;,
+        &quot;domains&quot;: [&quot;D05&quot;, &quot;D11&quot;],
+        &quot;kind&quot;: &quot;K05&quot;,
+        &quot;occurred_at&quot;: &quot;2026-09-15T16:36:34.534353+08:00&quot;,
+        &quot;evidence_refs&quot;: [&quot;ev_01M2J3BX3632D261ZFDT6YC65B&quot;],
+        &quot;evidence&quot;: [
+          { &quot;id&quot;: &quot;ev_01M2J3BX3632D261ZFDT6YC65B&quot;, &quot;holder&quot;: &quot;user&quot;,
+            &quot;content&quot;: &quot;我最近开始练力量,每周一三五去健身房&quot;, &quot;captured_at&quot;: &quot;2026-09-15T16:36:34.534353+08:00&quot; }
+        ]
+      }
+    ],
+    &quot;xrayTraceId&quot;: &quot;6e6c51c52d744943b14049385be9d49a&quot;
+  },
+  &quot;msg&quot;: &quot;ok&quot;
+}
+</code></pre>
+<p><strong>响应字段</strong></p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>answer</code></td>
+<td>事实陈述(空串 = 无相关记忆,此时会客观交代查了什么/为何答不出)</td>
+</tr>
+<tr>
+<td><code>verdict</code></td>
+<td>核判结论:<code>ok</code> / <code>answer_defect</code>(重答后仍缺陷) / <code>insufficient_material</code>(材料不足)</td>
+</tr>
+<tr>
+<td><code>critique</code></td>
+<td>核判指正(可据此追问或换问法)</td>
+</tr>
+<tr>
+<td><code>retried</code></td>
+<td>是否重答过一次</td>
+</tr>
+<tr>
+<td><code>cited_cells</code></td>
+<td>作答引用的记忆段 id</td>
+</tr>
+<tr>
+<td><code>memories</code></td>
+<td>依据记忆条目;每条:<code>atom_id</code>/<code>cell_id</code>、<code>text</code>(事实文本)、<code>type</code>(事实/说法/经历)、<code>holder</code>(归属人)、<code>domains</code>+<code>kind</code>(内部分类编码,可忽略)、<code>occurred_at</code>(事实发生时间)、<code>evidence</code>(原始对话原话,溯源用)</td>
+</tr>
+<tr>
+<td><code>xrayTraceId</code></td>
+<td>排障链路 id</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><code>mode: "auto"</code> 只改 <code>mode</code> 字段即可;缺 token → <code>401</code>;mode 非法 → <code>400</code>;上游限流 → <code>429</code>;上游故障 → <code>502</code>。</p>
+</blockquote>
+<hr />
+<h2 id="get-profile">GET /profile — 取用户画像</h2>
+<p><strong>建议在会话开始时拉一次</strong>,把画像拼进你的系统提示词,让对话更懂用户。画像是服务端从历史对话自动整理的,分 <code>traits</code>(稳定画像)与 <code>facts</code>(近况,按时间分档)。调用方读字段自行组织成自然语言即可。</p>
+<p><strong>traits — 稳定画像(PMO-16 域,键名固定,每个域一句话;无对应对话的域不出现)</strong></p>
+<table>
+<thead>
+<tr>
+<th>层</th>
+<th>域键</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>禀性</td>
+<td><code>personality</code> / <code>communication_style</code> / <code>social_style</code></td>
+<td>性格 / 沟通风格 / 社交风格</td>
+</tr>
+<tr>
+<td>特征适应</td>
+<td><code>occupation</code> / <code>goals</code> / <code>values</code></td>
+<td>职业 / 目标 / 价值观</td>
+</tr>
+<tr>
+<td></td>
+<td><code>work_style</code> / <code>learning_style</code> / <code>tech_environment</code></td>
+<td>工作方式 / 学习方式 / 技术环境</td>
+</tr>
+<tr>
+<td></td>
+<td><code>lifestyle</code> / <code>health</code> / <code>finance</code></td>
+<td>生活方式 / 健康 / 财务</td>
+</tr>
+<tr>
+<td>叙事身份</td>
+<td><code>identity</code> / <code>location</code> / <code>family</code> / <code>interests</code></td>
+<td>身份认同 / 常驻地 / 家庭 / 兴趣</td>
+</tr>
+</tbody>
+</table>
+<p>每个 trait:<code>text</code>(一句话)、<code>status</code>(<code>confirmed</code> 用户明说 / <code>inferred</code> 推断)、<code>last_confirmed</code>(最近确认日期)。</p>
+<p><strong>facts — 近况(按时间分档,越近越靠前)</strong></p>
+<table>
+<thead>
+<tr>
+<th>档</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>today</code></td>
+<td>今天的事(整合为 1 条)</td>
+</tr>
+<tr>
+<td><code>week</code></td>
+<td>近 7 天(≤3 条)</td>
+</tr>
+<tr>
+<td><code>month</code></td>
+<td>近 30 天(≤5 条)</td>
+</tr>
+<tr>
+<td><code>long</code></td>
+<td>持久事实(身份、长期偏好、稳定关系等,≤21 条)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>curl</strong></p>
+<pre><code class="language-bash">curl -s $BASE/profile -H &quot;X-User-Token: $TOKEN&quot;
+</code></pre>
+<p><strong>响应 200</strong></p>
+<pre><code class="language-json">{
+  &quot;code&quot;: 0,
+  &quot;data&quot;: {
+    &quot;exists&quot;: true,
+    &quot;version&quot;: 1,
+    &quot;updated_at&quot;: &quot;2026-09-15T16:36:59&quot;,
+    &quot;traits&quot;: {
+      &quot;health&quot;: {
+        &quot;text&quot;: &quot;有乳糖不耐受，不能喝牛奶，平时喝燕麦奶作为替代饮品&quot;,
+        &quot;status&quot;: &quot;confirmed&quot;, &quot;last_confirmed&quot;: &quot;2026-09-15&quot;
+      },
+      &quot;lifestyle&quot;: {
+        &quot;text&quot;: &quot;每周一、周三、周五去健身房练力量，主要做深蹲、硬拉和卧推，教练是Mike&quot;,
+        &quot;status&quot;: &quot;confirmed&quot;, &quot;last_confirmed&quot;: &quot;2026-09-15&quot;
+      }
+    },
+    &quot;facts&quot;: {
+      &quot;today&quot;: [
+        { &quot;text&quot;: &quot;2026年9月15日告知自己最近开始练力量，每周一三五去健身房做深蹲、硬拉和卧推，教练是Mike；并告知有乳糖不耐受，不能喝牛奶，平时喝燕麦奶&quot;,
+          &quot;last_confirmed&quot;: &quot;2026-09-15&quot; }
+      ],
+      &quot;week&quot;: [], &quot;month&quot;: [], &quot;long&quot;: []
+    }
+  },
+  &quot;msg&quot;: &quot;ok&quot;
+}
+</code></pre>
+<blockquote>
+<p>新用户尚无画像 → <code>data.exists = false</code>(非错误,<code>200</code>)。画像是<strong>异步</strong>整理的,ingest 后需要几秒到十几秒才更新。</p>
+</blockquote>
+<hr />
+<h2 id="get-episodes">GET /episodes — 查情景记忆(分页)</h2>
+<p>按 <code>task_type</code> + 时间等条件查询最近会话的<strong>情景记忆</strong>(每段一条叙事)。<strong>按会话时间倒序</strong>(最近在前),分页返回。适合做「最近聊了什么」的回顾。</p>
+<p><strong>Query 参数</strong></p>
+<table>
+<thead>
+<tr>
+<th>参数</th>
+<th>类型</th>
+<th>必填</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>episode_type</code></td>
+<td>string</td>
+<td>否</td>
+<td>按类型筛(取值来自你 ingest 时传的 <code>task_type</code>);不传=全部</td>
+</tr>
+<tr>
+<td><code>start</code> / <code>end</code></td>
+<td>string(ISO)</td>
+<td>否</td>
+<td>按段落起始时间过滤(含端点)</td>
+</tr>
+<tr>
+<td><code>page</code></td>
+<td>int</td>
+<td>否</td>
+<td>页码,默认 1</td>
+</tr>
+<tr>
+<td><code>page_size</code></td>
+<td>int</td>
+<td>否</td>
+<td>每页条数,默认 20,上限 100</td>
+</tr>
+</tbody>
+</table>
+<p>每条 episode:<code>memcell_id</code>、<code>session_id</code>、<code>start_time</code>/<code>end_time</code>、<code>topic</code>(一句话主题)、<code>episode</code>(段落叙事)、<code>episode_type</code>(分类)。</p>
+<p><strong>curl —— 全量(时间倒序)</strong></p>
+<pre><code class="language-bash">curl -s &quot;$BASE/episodes?page=1&amp;page_size=20&quot; -H &quot;X-User-Token: $TOKEN&quot;
+</code></pre>
+<p><strong>curl —— 按类型过滤</strong></p>
+<pre><code class="language-bash">curl -s &quot;$BASE/episodes?episode_type=training&quot; -H &quot;X-User-Token: $TOKEN&quot;
+</code></pre>
+<p><strong>响应 200</strong></p>
+<pre><code class="language-json">{
+  &quot;code&quot;: 0,
+  &quot;data&quot;: {
+    &quot;items&quot;: [
+      {
+        &quot;memcell_id&quot;: &quot;cell_01M2J3CCPCEM9VVR57XYE260CM&quot;,
+        &quot;session_id&quot;: &quot;fitness-app:demo-session-001&quot;,
+        &quot;start_time&quot;: &quot;2026-09-15T16:36:35.659716+08:00&quot;,
+        &quot;end_time&quot;: &quot;2026-09-15T16:36:35.659716+08:00&quot;,
+        &quot;topic&quot;: &quot;用户告知自己有乳糖不耐受,不能喝牛奶,平时喝燕麦奶&quot;,
+        &quot;episode&quot;: &quot;2026年9月15日16:36,用户告知助手自己有乳糖不耐受,不能喝牛奶,平时以燕麦奶作为替代饮品。&quot;,
+        &quot;episode_type&quot;: &quot;diet&quot;
+      },
+      {
+        &quot;memcell_id&quot;: &quot;cell_01M2J3C1Q82S35V2SFGE2K81ES&quot;,
+        &quot;session_id&quot;: &quot;fitness-app:demo-session-001&quot;,
+        &quot;start_time&quot;: &quot;2026-09-15T16:36:34.534353+08:00&quot;,
+        &quot;end_time&quot;: &quot;2026-09-15T16:36:34.548811+08:00&quot;,
+        &quot;topic&quot;: &quot;用户每周一三五去健身房练深蹲、硬拉和卧推，教练是Mike&quot;,
+        &quot;episode&quot;: &quot;2026年9月15日，用户告诉助手，自己最近开始练力量，每周一、周三、周五去健身房。主要训练动作为深蹲、硬拉和卧推，教练是Mike。&quot;,
+        &quot;episode_type&quot;: &quot;training&quot;
+      }
+    ],
+    &quot;total&quot;: 2, &quot;page&quot;: 1, &quot;page_size&quot;: 20
+  },
+  &quot;msg&quot;: &quot;ok&quot;
+}
+</code></pre>
+<hr />
+<h2 id="get-tracenode_id">GET /trace/:node_id — 溯源(双向)</h2>
+<p>按 id 溯源,只在本 user 记忆内。传 <code>atom_id</code> → 正向:记忆全文 + 归属 + 下钻到原始证据(当时的对话原话);传 <code>evidence_id</code> → 反向:证据原文 + 被哪些记忆引用。都查不到 → <code>404</code>。</p>
+<p><strong>curl</strong></p>
+<pre><code class="language-bash">curl -s $BASE/trace/atom_01M2J3C8TE2K09Z9603YNRJE8K -H &quot;X-User-Token: $TOKEN&quot;
+</code></pre>
+<p><strong>响应 200</strong></p>
+<pre><code class="language-json">{
+  &quot;code&quot;: 0,
+  &quot;data&quot;: {
+    &quot;node&quot;: &quot;memory&quot;,
+    &quot;atom_id&quot;: &quot;atom_01M2J3C8TE2K09Z9603YNRJE8K&quot;,
+    &quot;text&quot;: &quot;用户的力量训练教练是Mike (as of 2026-09-15)&quot;,
+    &quot;cell_id&quot;: &quot;cell_01M2J3C1Q82S35V2SFGE2K81ES&quot;,
+    &quot;object_type&quot;: &quot;fact&quot;, &quot;holder&quot;: &quot;user&quot;,
+    &quot;domains&quot;: [&quot;D05&quot;, &quot;D07&quot;], &quot;kind&quot;: &quot;K02&quot;,
+    &quot;evidence&quot;: [
+      { &quot;id&quot;: &quot;ev_01M2J3BX3N4W8Z5YDETWDNEFX9&quot;, &quot;holder&quot;: &quot;user&quot;,
+        &quot;content&quot;: &quot;深蹲硬拉卧推,教练是 Mike&quot;, &quot;captured_at&quot;: &quot;2026-09-15T16:36:34.548811+08:00&quot; }
+    ],
+    &quot;evidence_count&quot;: 1
+  },
+  &quot;msg&quot;: &quot;ok&quot;
+}
+</code></pre>
+<hr />
+<h2 id="_8">附:鉴权失败示例</h2>
+<p>未带 <code>X-User-Token</code> 请求任意业务接口:</p>
+<pre><code class="language-bash">curl -s $BASE/recall -H &quot;Content-Type: application/json&quot; \
+  -d '{&quot;session_id&quot;: &quot;demo-session-001&quot;, &quot;query&quot;: &quot;x&quot;}'
+</code></pre>
+<pre><code class="language-json">// 401
+{ &quot;code&quot;: 401, &quot;data&quot;: null, &quot;msg&quot;: &quot;X-User-Token 缺失或无效,请先 POST /api/v1/users/register&quot; }
+</code></pre></main>
+</div>
+</body>
+</html>
