@@ -18,7 +18,7 @@ def test_unpinned_database_is_read_only():
     other = Database()
     try:
         assert other.fetch_one("SELECT 1 AS v")["v"] == 1   # 读不受限
-        with pytest.raises(RuntimeError, match="未回退域的写"):
+        with pytest.raises(RuntimeError, match="outside a rollback scope"):
             other.execute(
                 "INSERT INTO users(token, user_id, created_at) VALUES(%s,%s,%s)",
                 ("tok_guard", "guard-probe", "2026-09-02T00:00:00+00:00"),
@@ -36,11 +36,11 @@ def test_destructive_sql_blocked_even_inside_scope(db: Database):
         "INSERT INTO users(token, user_id, created_at) VALUES(%s,%s,%s)",
         ("tok_in_scope", "guard-in-scope", "2026-09-02T00:00:00+00:00"),
     )
-    with pytest.raises(RuntimeError, match="破坏性 SQL"):
+    with pytest.raises(RuntimeError, match="destructive statement"):
         db.execute("DROP TABLE atoms")
-    with pytest.raises(RuntimeError, match="破坏性 SQL"):
+    with pytest.raises(RuntimeError, match="destructive statement"):
         db.execute("TRUNCATE TABLE atoms")
-    with pytest.raises(RuntimeError, match="破坏性 SQL"):
+    with pytest.raises(RuntimeError, match="destructive statement"):
         db.execute("DELETE FROM atoms")           # 无 WHERE 全表 DELETE
     db.execute("DELETE FROM users WHERE token=%s", ("tok_in_scope",))  # 带 WHERE 的删不受限
 

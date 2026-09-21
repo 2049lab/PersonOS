@@ -1,50 +1,63 @@
-"""测试夹具:共享 SIT 库 + 原子回退(零污染)。
+"""Test fixtures: an in-memory database, one atomic scope per test.
 
-规范由机制强制(personos/storage/db.py 的 PERSONOS_TEST_GUARD 护栏),不靠自觉:
-1. 每个测试被 autouse 的 `db` fixture 包进 Database.rollback_scope()——
-   测试内所有写退出时无条件回退,库不留痕迹。固定 id / 固定 user_id 都安全。
-   新写测试无需任何 opt-in,天然原子。
-2. 自建 Database() 在测试进程里【只读】:未进回退域的 INSERT/UPDATE/DELETE/
-   transaction() 一律 RuntimeError(写不进共享库,静默污染变成响亮报错)。
-3. DROP/TRUNCATE/无 WHERE 全表 DELETE 在任何路径下都 RuntimeError——
-   就算进了回退域也不放行。
+Every test used to require a real MySQL instance. The session fixture connected
+on construction and the `db` fixture is autouse, so even a test that never
+touches storage dragged a database connection along. For an open-source project
+that means nobody outside the original network can run the suite — which means
+nobody can contribute.
+
+Now it is SQLite in memory: no network, no credentials, milliseconds to build.
+
+The guard rails are kept, because they cost nothing and still protect anyone who
+points the suite at a real database through PERSONOS_DB_URL:
+1. Each test is wrapped in Database.rollback_scope(), so writes never persist.
+   Fixed ids and fixed user_ids are therefore safe, and new tests are atomic
+   without opting in.
+2. A hand-built Database() is read-only under pytest: writes outside a rollback
+   scope raise, turning silent pollution into a loud error.
+3. DROP/TRUNCATE/unqualified DELETE raise on every path, rollback scope or not.
 """
 
 import os
 
-# 必须在 import personos 之前设好(护栏作用于 Database.execute/_Tx.execute)
+# Must be set before importing personos: the guard hooks Database.execute.
 os.environ["PERSONOS_TEST_GUARD"] = "1"
-# 测试强制关 langfuse:置空 pk/sk(load_dotenv override=False,不覆盖已存在的 env)——
-# 否则 .env 里的密钥会让单测真连 SIT langfuse 上报,污染平台 + 拖慢。
+# Force tracing off. load_dotenv does not override existing variables, so a
+# developer's .env would otherwise make unit tests report to a real Langfuse
+# project — slow, and noise in someone else's dashboard.
 os.environ["LANGFUSE_PUBLIC_KEY"] = ""
 os.environ["LANGFUSE_SECRET_KEY"] = ""
-# 单测钉死假身份后端:PERSONOS_VIDEO_BACKEND 的**缺省值是 real**(生产正确优先——缺依赖
-# 当场炸,好过静默写假数据),但单测既不该下模型权重也不该吃 CPU 推理。
-# 测试自己定环境,不继承生产缺省,也别指望跑测试的人记得在命令行传。
+# Pin the fake identity backends. The default is "none" (see backends/factory),
+# but tests should neither download model weights nor burn CPU on inference.
+# Tests set their own environment rather than inheriting a production default,
+# or relying on whoever runs pytest to remember a flag.
 os.environ["PERSONOS_VIDEO_BACKEND"] = "mock"
 
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
 from personos.storage.atom_store import AtomStore  # noqa: E402
-from personos.storage.db import Database  # noqa: E402
+from personos.storage.db import Database, SQLiteDatabase  # noqa: E402
 from personos.storage.evidence_store import EvidenceStore  # noqa: E402
 
 
 @pytest.fixture(scope="session")
 def _db() -> Database:
-    """整个测试进程共用一个 engine(建表只发生一次;连接由池复用)。"""
-    d = Database()
+    """One engine for the whole run; the schema is created once.
+
+    SQLite unless PERSONOS_TEST_BACKEND=mysql. Running this identical suite
+    against both backends is what proves the dialect translation preserves
+    behaviour, so that path stays one environment variable away.
+    """
+    use_mysql = os.environ.get("PERSONOS_TEST_BACKEND", "").lower() == "mysql"
+    d = Database() if use_mysql else SQLiteDatabase(":memory:")
     yield d
     d.close()
 
 
 @pytest.fixture(autouse=True)
 def db(_db: Database):
-    """autouse:每个测试一个原子作用域——结束无条件 rollback,共享库零污染。
-
-    即使测试不需要 db,也被包进回退域;将来新写的测试无需显式 opt-in 即天然原子。
-    """
+    """autouse: one atomic scope per test — unconditional rollback on exit."""
     with _db.rollback_scope():
         yield _db
 
@@ -61,7 +74,7 @@ def evidence_store(db):
 
 @pytest.fixture
 def rng_vec():
-    """生成固定维度的伪向量(测试用,不调远端 embedding)。"""
+    """Deterministic pseudo-vectors, so tests never call a real embedder."""
     def _make(seed: int, dim: int = 8) -> np.ndarray:
         r = np.random.default_rng(seed)
         return r.standard_normal(dim).astype(np.float32)

@@ -64,6 +64,9 @@ identity-voice = ["speechbrain>=1.0", "torch>=2.0", "torchaudio>=2.0", "scipy>=1
 identity = ["personos[video,identity-face,identity-voice]"]
 dev = ["pytest>=8.0", "pytest-cov", "ruff", "pre-commit"]
 
+[project.scripts]
+personos = "personos.cli:main"
+
 [project.urls]
 Homepage = "https://github.com/personos/personos"
 Issues = "https://github.com/personos/personos/issues"
