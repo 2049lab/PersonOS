@@ -102,6 +102,35 @@ class AddReceipt:
                 f"seq={self.seq}, queue_depth={self.queue_depth})")
 
 
+class _LazyBackends(dict):
+    """Dict facade over Memory.video_backends() that resolves on first use.
+
+    finalize_video runs at every session end and returns early when the session
+    has no pending video draft — with video identity disabled (the default)
+    eagerly resolving the backends would raise on every plain text session.
+    When a real video path does touch the backends, the gate error surfaces
+    there, exactly as before."""
+
+    def __init__(self, resolve):
+        super().__init__()
+        self._resolve = resolve
+
+    def __getitem__(self, key):
+        return self._resolve()[key]
+
+    def get(self, key, default=None):
+        return self._resolve().get(key, default)
+
+    def __contains__(self, key):
+        return key in self._resolve()
+
+    def __iter__(self):
+        return iter(self._resolve())
+
+    def __len__(self):
+        return len(self._resolve())
+
+
 class Memory:
     """Layered long-term memory. See the module docstring for a quickstart."""
 
@@ -300,7 +329,9 @@ class Memory:
 
     def video_deps(self, user_id: str):
         """Assemble the full dependency set for video consumption (VideoDeps): backends
-        is the process-wide singleton, everything else is per user."""
+        resolves lazily on first access — finalize_video runs at every session end and
+        is a no-op without a pending video draft, so assembling deps must not require
+        the (gated, heavy) identity backends to exist. Everything else is per user."""
         from .identity.cloud import CloudEngine
         from .identity.store import CharacterStore
         from .online.video_ingest import VideoDeps
@@ -308,7 +339,7 @@ class Memory:
         store = CharacterStore(self.db, user_id)
         return VideoDeps(
             store=store, cloud=CloudEngine(store), draft=self._draft_for(user_id),
-            backends=self.video_backends(), media_store=self._media(),
+            backends=_LazyBackends(self.video_backends), media_store=self._media(),
             llm=self.llm, embedder=self.embedder,
             evidence=ctx.evidence, cells=ctx.cells, atoms=ctx.atoms, chains=ctx.chains)
 

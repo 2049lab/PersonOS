@@ -158,16 +158,21 @@ def test_backpressure_raises_queue_busy(live, tmp_path, monkeypatch):
     live.add("fine", user_id="u1", session_id="s2")
 
 
-def test_a_poison_message_is_skipped_and_recorded(live, tmp_path):
+def test_a_poison_message_is_skipped_and_recorded(live, tmp_path, monkeypatch):
     """A batch whose write keeps failing is retried, then skipped as poison —
     the queue keeps moving and the loss is queryable in the tasks table."""
     set_config(Config(data_dir=tmp_path, log_dir=tmp_path / "logs",
                       max_ingest_retries=1, dispatcher_tick_s=0.02,
                       dispatcher_idle_tick_s=0.05))
 
-    def explode(messages, **kw):
-        raise RuntimeError("the model gateway is down")
-    live.llm.chat = explode
+    # Note: an exploding *model* is not poison — W1/W2 degrade by design (raw
+    # transcript episode + backstop atom) and never raise. Poison is for an
+    # infrastructure failure inside the write itself, simulated here.
+    from personos.online.write_path import SessionWriter
+
+    def boom(self, *args, **kw):
+        raise RuntimeError("database is locked")
+    monkeypatch.setattr(SessionWriter, "feed_batch", boom)
 
     live.add("first is doomed", user_id="u1", session_id="s1")
     live.end_session(user_id="u1", session_id="s1")
@@ -182,6 +187,20 @@ def test_a_poison_message_is_skipped_and_recorded(live, tmp_path):
         "SELECT kind FROM tasks WHERE user_id=%s ORDER BY created_at DESC LIMIT 20", ("u1",))
     kinds = {r["kind"] for r in rows}
     assert any(k.startswith("poisoned_") for k in kinds), f"no poison record in {kinds}"
+
+
+def test_end_session_with_video_identity_disabled_completes(live, monkeypatch):
+    """Default config has no video identity (PERSONOS_VIDEO_BACKEND=none).
+    Session end still runs finalize_video as a no-op draft check — assembling
+    the deps must not resolve the gated backends, or every plain text session
+    end would crash the consumer and be poisoned."""
+    monkeypatch.setenv("PERSONOS_VIDEO_BACKEND", "none")
+    live.add("just text, no video anywhere", user_id="u1", session_id="s1")
+    live.end_session(user_id="u1", session_id="s1", sync=True, timeout_s=30)
+
+    assert live.for_user("u1").cells.iter_all()
+    rows = live.db.fetch_all("SELECT kind FROM tasks WHERE user_id=%s", ("u1",))
+    assert not any(r["kind"].startswith("poisoned_") for r in rows), rows
 
 
 # ── entry-level warnings ride on the receipt ────────────────────────────
