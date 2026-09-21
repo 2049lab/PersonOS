@@ -23,10 +23,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 
-ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(ROOT / ".env")
+# Where the package lives. Only used for repository-relative development paths,
+# never for user data: once installed this points into site-packages.
+PACKAGE_ROOT = Path(__file__).resolve().parent.parent
+
+# Look for .env from the current working directory upward, which is where a
+# user keeps it. Resolving it relative to the package would work for an
+# editable install and then quietly stop working once installed from PyPI —
+# the worst kind of difference between development and production.
+load_dotenv(find_dotenv(usecwd=True), override=False)
 
 
 def _env(name: str, default: str = "") -> str:
@@ -136,7 +143,9 @@ class Config:
     langfuse_environment: str = "local"
     langfuse_release: str = ""
 
-    log_dir: Path = field(default_factory=lambda: ROOT / "logs")
+    # Logs go under the data directory, not next to the installed package:
+    # site-packages is often read-only, and writing there would be rude anyway.
+    log_dir: Path = field(default_factory=lambda: Path.home() / ".personos" / "logs")
 
     # ── Anthropic-protocol provider (Anthropic itself, or anything that
     #    speaks the same wire format, e.g. MiniMax, via base_url) ──────────
@@ -170,7 +179,7 @@ def _path(value: str, default: Path) -> Path:
     if not value:
         return default
     p = Path(value).expanduser()
-    return p if p.is_absolute() else ROOT / p
+    return p if p.is_absolute() else Path.cwd() / p
 
 
 def load_config() -> Config:
@@ -233,7 +242,7 @@ def load_config() -> Config:
         langfuse_host=_env("LANGFUSE_HOST", "https://cloud.langfuse.com"),
         langfuse_environment=_env("LANGFUSE_ENVIRONMENT", _env("PERSONOS_ENV", "local")),
         langfuse_release=_env("LANGFUSE_RELEASE"),
-        log_dir=_path(_env("PERSONOS_LOG_DIR"), ROOT / "logs"),
+        log_dir=_path(_env("PERSONOS_LOG_DIR"), data_dir / "logs"),
         anthropic_base_url=_env("ANTHROPIC_BASE_URL"),
         anthropic_api_key=_env("ANTHROPIC_API_KEY"),
         anthropic_model=_env("ANTHROPIC_MODEL", "claude-sonnet-4-20250514"),

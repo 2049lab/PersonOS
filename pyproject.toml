@@ -20,36 +20,34 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
-# NOTE (phase 1 of the open-sourcing plan): this is still the *pre-shaping* dependency
-# set, kept deliberately close to the internal requirements.txt so that `pip install -e .`
-# and the existing test suite keep working while the package is being reshaped.
-# Phase 7 trims this to a <=10 package core and moves everything else behind extras.
-# Until then, do not treat this list as the intended public surface.
+# The core stays small on purpose. Everything here is needed to write and read
+# text memory against an OpenAI-compatible endpoint with local SQLite storage —
+# nothing else. In particular there is no torch, no langchain, no web framework
+# and no database driver beyond what SQLite gives us for free, because a memory
+# library should not decide those things for the application embedding it.
 dependencies = [
-    "pydantic>=2.6",
-    "httpx>=0.27",
-    "numpy>=1.26",
-    "SQLAlchemy>=2.0",
-    "loguru>=0.7",
-    "python-ulid>=2.2",
-    "python-dotenv>=1.0",
-    # --- to be moved into extras in phase 7 ---
-    "PyMySQL>=1.1",
-    "redis>=5.0",
-    "langchain>=1.0",
-    "langchain-classic>=1.0",
-    "fastapi>=0.110",
-    "uvicorn[standard]>=0.29",
-    "pillow>=11.0",
+    "pydantic>=2.6",          # configuration schemas
+    "httpx>=0.27",            # provider transport
+    "numpy>=1.26",            # vector maths; retrieval is a scan plus cosine
+    "SQLAlchemy>=2.0",        # storage engine (SQLite needs no driver)
+    "loguru>=0.7",            # structured logging
+    "python-ulid>=2.2",       # sortable ids
+    "python-dotenv>=1.0",     # .env support
 ]
 
 [project.optional-dependencies]
-oss = ["oss2>=2.19"]
-anthropic = ["anthropic>=0.40"]
-observability = ["langfuse>=3,<4"]
-# Video identity. Heavy (~2GB with torch) and split fine-grained on purpose so that
-# nobody installing the text-only memory core pays for CUDA-capable wheels.
-video = ["av>=13.0", "soundfile>=0.12"]
+# Deep recall: a multi-step agent over the memory store. Recommended, but a
+# large dependency, and the fast path answers most questions without it.
+deep = ["langchain>=1.0", "langchain-classic>=1.0"]
+mysql = ["PyMySQL>=1.1"]                 # several workers sharing one database
+redis = ["redis>=5.0"]                   # several workers sharing session state
+oss = ["oss2>=2.19"]                     # object storage instead of local files
+image = ["pillow>=11.0"]                 # image handling helpers
+anthropic = ["anthropic>=0.40"]          # Anthropic-protocol chat provider
+observability = ["langfuse>=3,<4"]       # tracing; unset means every call is a no-op
+# Video identity. Heavy and split fine-grained on purpose, so that nobody
+# installing the text-only core pays for it.
+video = ["av>=13.0", "soundfile>=0.12"]   # demux, frames, 16k audio
 identity-face = [
     "insightface>=0.7",
     "onnxruntime>=1.17",
@@ -60,9 +58,14 @@ identity-face = [
     "tqdm>=4.66",
     "requests>=2.31",
 ]
+# Voiceprints pull in torch. That is roughly 2 GB, which is why identity is
+# split this finely: taking faces without voices is a reasonable choice.
 identity-voice = ["speechbrain>=1.0", "torch>=2.0", "torchaudio>=2.0", "scipy>=1.11"]
 identity = ["personos[video,identity-face,identity-voice]"]
-dev = ["pytest>=8.0", "pytest-cov", "ruff", "pre-commit"]
+all = ["personos[deep,mysql,redis,oss,image,anthropic,observability,identity]"]
+dev = ["pytest>=8.0", "pytest-cov", "ruff", "pre-commit", "fastapi>=0.110",
+       "uvicorn[standard]>=0.29", "PyMySQL>=1.1", "redis>=5.0", "pillow>=11.0",
+       "langchain>=1.0", "langchain-classic>=1.0"]
 
 [project.scripts]
 personos = "personos.cli:main"

@@ -22,7 +22,6 @@ from loguru import logger
 
 from .arbitrate import ReviewResult, review_answer
 from .chain_face import UnitAssembly, assemble_units
-from .deep_recall import DeepOutcome, run_deep
 from .rerank import NoopReranker, Reranker, rerank_cells
 from .retrieval import (
     AtomHit, CellHit, MemoryAnswer, QueryRewrite, answer_from_cells, rewrite_query, search_atoms,
@@ -92,7 +91,7 @@ class RecallOutcome:
     retried: bool = False                    # 判 answer_defect 后重答过一次
     ans: MemoryAnswer | None = None          # 终答(ok 草稿/重答案/auto 升级时=深轨作答)
     escalated: bool = False                  # auto 且核判仍缺陷或材料不足 → 升了深轨
-    deep: DeepOutcome | None = None          # 深轨产物(轨迹/写回数;未跑深轨为 None)
+    deep: "DeepOutcome | None" = None          # 深轨产物(轨迹/写回数;未跑深轨为 None)
     asm: UnitAssembly | None = None          # 单元组装透视(池/链/织写/普通计数 + 残缺提示)
     vis: VisualRewrite | None = None       # 视觉改写(仅当调用方带了图片;None=纯文本召回)
     secs: dict[str, float] = field(default_factory=dict)   # 各工位耗时(汇总日志/评测统计用)
@@ -202,14 +201,34 @@ def run_recall(
               if rewrite else QueryRewrite(original=q0, resolved=q0))
     mark("R0")
 
-    def run_deep_safe(**kw) -> DeepOutcome | None:
-        """深轨包装:崩溃不拖垮主链路(回退快链作答),escalated 如实保留。"""
+    def run_deep_safe(**kw):
+        """Deep track wrapper: a crash here falls back to the fast answer,
+        and ``escalated`` still records that escalation was attempted.
+
+        The import is deferred on purpose. The deep track is an agent built on
+        langchain, which is a large dependency that most users of a memory
+        library do not want; deferring it keeps `pip install personos` small
+        and lets the feature be an extra. A missing dependency is reported as
+        such rather than being swallowed as "the deep track crashed", which
+        would be true but useless.
+        """
+        try:
+            from .deep_recall import run_deep
+        except ImportError:
+            from ..errors import deep_track_skipped
+
+            note = deep_track_skipped()
+            if note not in out.warnings:
+                out.warnings.append(note)
+            logger.warning(note)
+            return None
         try:
             return run_deep(llm, embedder, atoms, cells, evidence, reranker=reranker,
                             media_store=media_store, mllm=mllm, profile=profile_full,
                             scenario=scenario, **kw)
         except Exception as e:   # noqa: BLE001
-            logger.exception(f"深轨失败,回退快链结果 q={query!r}: {e}")
+            logger.exception(f"deep track failed, falling back to the fast answer "
+                             f"q={query!r}: {e}")
             return None
 
     if mode == "deep":

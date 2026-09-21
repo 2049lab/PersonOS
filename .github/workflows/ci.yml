@@ -33,3 +33,14 @@ jobs:
       - name: Cold start with an empty environment
         run: python scripts/check_cold_start.py
       - run: pytest -q
+
+  clean-install:
+    # Declaring a small core is easy; keeping it true is not. One module-level
+    # import of an optional package silently makes an extra mandatory, and only
+    # the minimal installer ever sees the failure.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: python scripts/check_clean_install.py
