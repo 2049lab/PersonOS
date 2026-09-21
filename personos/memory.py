@@ -28,6 +28,7 @@ import os
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
@@ -533,10 +534,20 @@ class Memory:
         if any(m.image for m in msgs) and not getattr(self.mllm, "available", False):
             warn = [image_not_understood()]
 
-        writer = self.writer_for(user_id, session_id)
-        out = writer.feed_batch(msgs, now_dt=now_dt, source_extra=source_extra,
-                                task_type=task_type, scenario=scenario)
+        # The same session lock the server takes around a write. Segment state
+        # is shared, so two threads adding to one session would interleave it;
+        # different sessions stay fully parallel.
+        with self._session_scope(user_id, session_id):
+            writer = self.writer_for(user_id, session_id)
+            out = writer.feed_batch(msgs, now_dt=now_dt, source_extra=source_extra,
+                                    task_type=task_type, scenario=scenario)
         out.warnings.extend(warn)
+        # A closed segment is new material for the profile. Checking here rather
+        # than only at end_session is what makes the profile fill in as someone
+        # talks: a long session closes many segments, and waiting for the end
+        # would leave the profile stale for the whole conversation.
+        if out.closed_cell is not None:
+            self.trigger_profile(user_id, session_id, scenario)
         return out
 
     def _add_videos(self, videos: list, *, user_id: str, session_id: str):
@@ -573,7 +584,8 @@ class Memory:
         return out
 
     def end_session(self, *, user_id: str = "default", session_id: str,
-                    task_type: list[str] | None = None, scenario: str = ""):
+                    task_type: list[str] | None = None, scenario: str = "",
+                    update_profile: bool = True):
         """Close the trailing segment so its memories are built now.
 
         Without this the last segment stays open until enough turns accumulate,
@@ -581,15 +593,59 @@ class Memory:
         written. Returns the cells built by the close.
         """
         self._require_core()
-        cells = self.writer_for(user_id, session_id).end_session(
-            task_type=task_type, scenario=scenario)
+        with self._session_scope(user_id, session_id):
+            cells = self.writer_for(user_id, session_id).end_session(
+                task_type=task_type, scenario=scenario)
         # If clips were fed into this session, identity is adjudicated now and
         # the attributed dialogue becomes memory through the same build_cell
         # path as text. Sessions with no video simply skip it.
         video_cell = self._finalize_video(user_id, session_id)
         if video_cell is not None:
             cells = [*cells, video_cell]
+        # Closing a session always produces new material, so check again here —
+        # the final segment of a conversation has no later write to catch it.
+        # Threshold-gated and run off the caller's thread, so this does not add
+        # latency to end_session; pass update_profile=False to schedule it
+        # yourself instead.
+        if update_profile:
+            self.trigger_profile(user_id, session_id, scenario)
         return cells
+
+    def consolidate_profile(self, *, user_id: str = "default", scenario: str = "",
+                            force: bool = True) -> int | None:
+        """Refresh the distilled profile from everything written since the last one.
+
+        Returns the new version number, or None when nothing was due. With
+        ``force=False`` the threshold decides — which is how end_session calls it.
+
+        Idempotent by construction: it reads "the cells since the last published
+        version", so a skipped or failed run is healed by the next one rather
+        than leaving a gap.
+        """
+        from .online.profile_consolidate import run_user_consolidation, should_consolidate
+        from .storage.profile_store import ProfileStore
+
+        self._require_core()
+        ctx = self.for_user(user_id)
+        profiles = ProfileStore(self.db, user_id)
+        current = profiles.current()
+        if not force:
+            pending = ctx.cells.cells_after(current.up_to_cell_id if current else "")
+            if not pending:
+                return None
+            if not should_consolidate(
+                    n_new=len(pending),
+                    ep_chars=sum(len(c.episode or "") for c in pending),
+                    version_count=current.version if current else 0,
+                    ep_chars_trigger=settings.profile_ep_chars_trigger):
+                return None
+        try:
+            return run_user_consolidation(
+                self.llm, cells_store=ctx.cells, atoms_store=ctx.atoms,
+                profile_store=profiles, today=now().date(), scenario=scenario)
+        except Exception:  # noqa: BLE001  a profile is an enhancement; never fail a write for it
+            logger.exception(f"profile consolidation failed user={user_id}")
+            return None
 
     def _finalize_video(self, user_id: str, session_id: str):
         try:
@@ -646,19 +702,37 @@ class Memory:
         out.warnings.extend(warn)
         return out
 
-    def profile(self, *, user_id: str = "default") -> dict | None:
-        """The distilled user profile, or None if not built yet."""
-        prof = ProfileStore(self.db, user_id).current()
-        return prof.to_dict() if prof and hasattr(prof, "to_dict") else prof
+    def profile(self, *, user_id: str = "default") -> dict:
+        """The distilled profile as a plain dict.
 
-    def trace(self, node_id: str, *, user_id: str = "default") -> dict:
-        """Follow provenance from an atom forward, or from evidence backward."""
+        Same renderer the HTTP API uses, so both describe a profile the same
+        way. Never built yet yields ``{"exists": False, ...}`` rather than None:
+        callers read it unconditionally, and an empty profile is a normal
+        state.
+        """
+        from .online.views import profile_view
+
+        return profile_view(ProfileStore(self.db, user_id).current())
+
+    def trace(self, node_id: str, *, user_id: str = "default") -> dict | None:
+        """Follow provenance in whichever direction the id implies.
+
+        An atom id yields the forward chain — the evidence it was drawn from.
+        An evidence id yields the backward chain — the original turn plus the
+        memories that cite it. The kind is discovered by trying, rather than by
+        parsing the id, so the caller does not have to know which it holds.
+
+        Returns None when the id belongs to neither.
+        """
         from .online.trust import build_trust_chain, trace_evidence
 
         ctx = self.for_user(user_id)
-        if node_id.startswith("ev_"):
-            return trace_evidence(node_id, ctx.evidence, ctx.atoms, ctx.cells)
-        return build_trust_chain(node_id, ctx.atoms, ctx.cells, ctx.evidence)
+        media = self._media()
+        chain = build_trust_chain([node_id], ctx.atoms, ctx.evidence, media)
+        node = chain[0] if chain else None
+        if node is not None and not node.get("missing"):
+            return {"node": "memory", **node}
+        return trace_evidence(node_id, ctx.evidence, ctx.atoms, media)
 
     def capabilities(self) -> list:
         """What this configuration can do. Same data as ``personos doctor``."""
@@ -667,13 +741,25 @@ class Memory:
         return inspect()
 
     def reset(self, *, user_id: str) -> None:
-        """Delete everything belonging to one user. Irreversible."""
+        """Delete everything belonging to one user. Irreversible.
+
+        Session state goes too, not just the stored rows: an unclosed segment
+        or a half-built identity draft outlives the database wipe otherwise,
+        and the next add() would resume into memories that no longer exist.
+        """
         from .storage.db.ddl import TABLE_NAMES
 
         for table in TABLE_NAMES:
             if table == "users":
                 continue
             self.db.execute(f"DELETE FROM {table} WHERE user_id=%s", (user_id,))
+        for clear, what in ((getattr(self._seg(), "clear_user", None), "segments"),
+                            (getattr(self._draft_for(user_id), "clear_user", None), "drafts")):
+            if callable(clear):
+                try:
+                    clear(user_id)
+                except Exception:  # noqa: BLE001
+                    logger.warning(f"could not clear {what} for {user_id}")
         self.close_user(user_id)
 
     def __enter__(self):
@@ -683,9 +769,33 @@ class Memory:
         self.close()
 
     def close(self) -> None:
+        """Release the database and the background pools.
+
+        A library must not leave non-daemon threads behind: an application that
+        finishes its work should exit, not hang waiting for a profile job.
+        """
+        for pool in (getattr(self, "profile_exec", None), getattr(self, "ingest_exec", None),
+                     getattr(self, "video_exec", None)):
+            if pool is not None:
+                pool.shutdown(wait=False, cancel_futures=True)
         self.db.close()
 
     # —— internals ——
+
+    @contextmanager
+    def _session_scope(self, user_id: str, session_id: str):
+        """Hold the session lock for a write, when one is configured.
+
+        Without Redis the lock is process-local, which is the right scope for a
+        single-process library. The point is the same either way: one writer
+        per session at a time.
+        """
+        lock = self.session_lock(user_id, session_id)
+        if lock is None:
+            yield
+            return
+        with lock:
+            yield
 
     def _require_core(self) -> None:
         """Required capabilities are checked here, not at construction.
@@ -705,15 +815,46 @@ class Memory:
         from .online.profile_render import render as render_profile
 
         try:
-            prof = ProfileStore(self.db, user_id).current()
+            version = ProfileStore(self.db, user_id).current()
+            if not version:
+                return "", ""
+            # render() takes the profile itself, not the version wrapper.
+            return (render_profile(version.profile, mode="full"),
+                    render_profile(version.profile, mode="traits"))
         except Exception:  # noqa: BLE001  a profile is an enhancement, never a blocker
+            logger.exception(f"profile rendering failed user={user_id}; recalling without it")
             return "", ""
-        if not prof:
-            return "", ""
+
+
+def _as_image_bytes(image):
+    """Accept raw bytes, a filesystem path, a data URL, or bare base64.
+
+    All four are things people reasonably pass, and the HTTP API takes base64
+    for the same field — so treating a base64 string as a filename (which is
+    what a naive path check does) fails in a thoroughly confusing way.
+    """
+    import base64
+    import binascii
+
+    if image is None or isinstance(image, (bytes, bytearray)):
+        return image
+    if isinstance(image, Path):
+        return image.read_bytes()
+    if isinstance(image, str):
+        if image.startswith("data:"):
+            return base64.b64decode(image.split(",", 1)[-1])
+        candidate = Path(image)
+        # A path is short and exists; base64 is long and does not. Check
+        # existence first so a filename that happens to be valid base64 still
+        # reads as a file.
+        if len(image) < 4096 and candidate.exists():
+            return candidate.read_bytes()
         try:
-            return render_profile(prof), render_profile(prof, traits_only=True)
-        except TypeError:
-            return render_profile(prof), ""
+            return base64.b64decode(image, validate=True)
+        except (binascii.Error, ValueError) as e:
+            raise ValueError(
+                f"image is neither an existing path nor valid base64: {image[:60]!r}") from e
+    raise TypeError(f"unsupported image type: {type(image).__name__}")
 
 
 def _deep_available() -> bool:
@@ -746,9 +887,7 @@ def _normalise_messages(messages) -> tuple[list, list]:
             continue
         speaker = raw.get("speaker") or raw.get("role") or "user"
         text = raw.get("text") or raw.get("content") or ""
-        image = raw.get("image")
-        if isinstance(image, (str, Path)):
-            image = Path(image).read_bytes()
+        image = _as_image_bytes(raw.get("image"))
         out.append(FeedMsg(speaker=speaker, text=text, image=image,
                            image_content_type=raw.get("image_content_type", "image/jpeg")))
     return out, videos

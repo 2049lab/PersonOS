@@ -34,3 +34,34 @@ def memory_view(a, evidence_store=None, media_store=None) -> dict:
         "evidence": (evidence_entries(a, evidence_store, media_store)
                      if evidence_store is not None else []),
     }
+
+
+def profile_view(current) -> dict:
+    """A profile version -> the public structured view.
+
+    Shared by the library and the HTTP API so the two cannot describe the same
+    profile differently. Internal quantities (fact ids, the cell ids behind
+    each claim) are stripped: they are how the profile is maintained, not what
+    it means.
+
+    No profile yields ``{"exists": False}`` rather than None or a 404 — callers
+    fetch it unconditionally at the start of a session, and "nothing learned
+    yet" is a normal state, not an error.
+    """
+    from ..storage.profile_store import BANDS
+
+    if current is None:
+        return {"exists": False, "version": 0, "traits": {},
+                "facts": {b: [] for b in BANDS}}
+    p = current.profile
+    updated = current.created_at
+    return {
+        "exists": True,
+        "version": current.version,
+        "updated_at": updated.isoformat() if hasattr(updated, "isoformat") else str(updated),
+        "traits": {k: {"text": v.text, "status": v.status,
+                       "last_confirmed": v.last_confirmed}
+                   for k, v in p.traits.items() if v},
+        "facts": {b: [{"text": f.text, "last_confirmed": f.last_confirmed}
+                      for f in p.facts.get(b, [])] for b in BANDS},
+    }

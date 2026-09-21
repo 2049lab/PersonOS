@@ -38,7 +38,7 @@ from .response import EnvelopeRoute
 from server.runtime import UserContext, rt
 from personos.session_scope import scoped_session, valid_user_id
 from .signing import verify_signature
-from personos.online.views import memory_view as _memory_view
+from personos.online.views import memory_view as _memory_view, profile_view
 
 # route_class: centrally wraps whatever each handler returns into {code, data, msg}, so
 # no endpoint body has to be changed.
@@ -542,34 +542,11 @@ def recall(body: RecallBody, ctx: UserContext = Depends(_ctx)):
     return payload
 
 
-def _public_profile(cur) -> dict:
-    """The current profile -> the public structured view (a pure function, easy to unit
-    test): internal quantities (f_id, sources=cell_id) are stripped and nothing is
-    consolidated here.
-
-    No profile (cur=None) -> {"exists": false} (callers fetch it unconditionally at the
-    start of a session, and an empty profile is not an error, so it isn't a 404).
-    """
-    if cur is None:
-        return {"exists": False, "version": 0, "traits": {}, "facts": {b: [] for b in BANDS}}
-    p = cur.profile
-    traits = {k: {"text": v.text, "status": v.status, "last_confirmed": v.last_confirmed}
-              for k, v in p.traits.items() if v}
-    facts = {b: [{"text": f.text, "last_confirmed": f.last_confirmed} for f in p.facts.get(b, [])]
-             for b in BANDS}
-    updated = cur.created_at
-    return {
-        "exists": True, "version": cur.version,
-        "updated_at": updated.isoformat() if hasattr(updated, "isoformat") else str(updated),
-        "traits": traits, "facts": facts,
-    }
-
-
 @router.get("/profile")
 def get_profile(ctx: UserContext = Depends(_ctx)):
     """Get this user's current profile (structured, not consolidated; ownership comes
     from token -> user)."""
-    return _public_profile(ProfileStore(rt.db, ctx.user_id).current())
+    return profile_view(ProfileStore(rt.db, ctx.user_id).current())
 
 
 def _episode_vo(cell) -> dict:

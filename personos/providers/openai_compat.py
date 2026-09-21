@@ -147,13 +147,24 @@ class OpenAIMllm(_Base):
     memory is unaffected.
     """
 
+    # The caller supplies a PURPOSE built from the surrounding conversation, and
+    # this prompt is what makes the model honour it. A generic "describe the
+    # image" instruction produces whole-image narration, which buries the one
+    # relevant fact under furniture and lighting and puts all of it into memory.
+    # Ported verbatim apart from the sentinel: prompt text is pipeline
+    # behaviour, not prose to be rewritten.
     _EMPTY = "NO_VISUAL_FACT"
-    _SYSTEM = (
-        "You describe images for a memory system. State only what is visibly true: "
-        "people, text, scene, countable objects. Do not speculate about intent or "
-        "identity. If the image contains nothing worth remembering, reply exactly "
-        f"{_EMPTY}."
-    )
+    _SYSTEM = f"""You describe ONE image as factual text, guided by a PURPOSE.
+
+# Iron rule: look with purpose, do not narrate the whole image
+Report ONLY what serves the PURPOSE. Ignore everything unrelated. If the image shows nothing
+relevant to the purpose, reply with exactly "{_EMPTY}". Never invent details you cannot see;
+state only what is visually verifiable — text/signs on the image, countable objects, the scene,
+who/what is shown.
+
+# Output
+Plain factual sentences (no markdown, no preamble, in the same language as the purpose). Prefer
+concrete, verifiable statements over vague description. Quote on-image text literally when present."""
 
     @property
     def available(self) -> bool:
@@ -174,13 +185,15 @@ class OpenAIMllm(_Base):
             "messages": [
                 {"role": "system", "content": self._SYSTEM},
                 {"role": "user", "content": [
-                    {"type": "text", "text": purpose},
+                    {"type": "text",
+                     "text": f"PURPOSE: {purpose}\n\nDescribe what in the image "
+                             f"serves this purpose."},
                     {"type": "image_url",
                      "image_url": {"url": f"data:{content_type};base64,{b64}"}},
                 ]},
             ],
             "stream": False,
-            "temperature": 0.0,
+            "temperature": 0.2,
             "max_tokens": 1024,
         }
         with obs.observation("mllm.look_image", as_type="generation", model=cfg.mllm_model,
