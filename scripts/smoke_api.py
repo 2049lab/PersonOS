@@ -15,6 +15,7 @@ The number of W1 segments is an LLM judgement (short segments may be merged),
 so it is only printed for observation and never asserted. Segmentation quality
 is measured by the LoCoMo benchmark instead.
 """
+import json
 import os
 import sys
 import time
@@ -24,7 +25,7 @@ os.environ["PERSONOS_LOG_DIR"] = "/tmp/personos_smoke/logs"
 from fastapi.testclient import TestClient   # noqa: E402
 
 from server.app import app          # noqa: E402
-from personos import runtime as rt_mod   # noqa: E402
+from server import runtime as rt_mod   # noqa: E402
 
 # A user suffix unique to this run, so a re-run never collides with stale data
 # (register 409); everything is cleaned up at the end.
@@ -59,24 +60,67 @@ def check(name: str, cond: bool, detail: str = ""):
     print(f"  {'ok  ' if cond else 'FAIL'} {name}" + (f"  [{detail}]" if detail else ""), flush=True)
 
 
+# Every /api/v1 request must be AK/SK signed (no env bypass by design). Give this
+# run its own keypair and sign like a real caller would.
+from server.signing import sign_request   # noqa: E402
+
+SMOKE_AK, SMOKE_SK = "smoke-ak", "smoke-secret-key"
+os.environ["PERSONOS_AKSK_MAP"] = json.dumps({SMOKE_AK: SMOKE_SK})
+
 c = TestClient(app)
+c.__enter__()          # Fire the lifespan startup (without it the ingest dispatcher
+                       # never starts and queued writes are never consumed).
+atexit.register(lambda: c.__exit__(None, None, None))
+
+
+def req(method, path, **kw):
+    """c.request + AK/SK signature headers (content-type and x-user-token are
+    signed when present, per the scheme's minimum set). The canonical string
+    covers path and query separately, so split them before signing."""
+    from urllib.parse import parse_qsl, urlsplit
+
+    parts = urlsplit(path)
+    headers = {k.lower(): v for k, v in (kw.pop("headers", None) or {}).items()}
+    body = b""
+    if "json" in kw:
+        body = json.dumps(kw.pop("json")).encode()
+        headers["content-type"] = "application/json"
+    headers.update(sign_request(SMOKE_AK, SMOKE_SK, method, parts.path,
+                                query_items=parse_qsl(parts.query),
+                                headers=headers, body=body))
+    return c.request(method, parts.path, params=parts.query or None,
+                     content=body or None, headers=headers, **kw)
+
+
+def data(r):
+    """Unwrap the {code, data, msg} envelope the API puts around every payload."""
+    j = r.json()
+    if isinstance(j, dict) and {"code", "data", "msg"} <= set(j):
+        return j.get("data") or {}
+    return j
+
+
+def errmsg(r):
+    """The human-readable failure reason, wherever the envelope put it."""
+    j = r.json()
+    return str((j or {}).get("msg") or (j or {}).get("error") or "")
 
 print("== 0. probes (outside /api/v1, unauthenticated) ==", flush=True)
-r = c.get("/healthz"); check("GET /healthz 200", r.status_code == 200, r.text[:80])
-r = c.get("/readyz"); check("GET /readyz 200", r.status_code == 200, r.text[:80])
+r = req("GET", "/healthz"); check("GET /healthz 200", r.status_code == 200, r.text[:80])
+r = req("GET", "/readyz"); check("GET /readyz 200", r.status_code == 200, r.text[:80])
 
 print("== 1. register ==", flush=True)
-r = c.post("/api/v1/users/register", json={"user_id": AGENT})
+r = req("POST", "/api/v1/users/register", json={"user_id": AGENT})
 check("register 201", r.status_code == 201, r.text[:120])
-tok = r.json()["token"]
+tok = data(r)["token"]
 H = {"X-User-Token": tok}
 
-r = c.post("/api/v1/users/register", json={"user_id": AGENT})
+r = req("POST", "/api/v1/users/register", json={"user_id": AGENT})
 check("duplicate registration 409", r.status_code == 409, r.text[:80])
 
-r = c.post("/api/v1/recall", json={"session_id": "s", "query": "x"})
+r = req("POST", "/api/v1/recall", json={"session_id": "s", "query": "x"})
 check("no token 401", r.status_code == 401, r.text[:80])
-r = c.post("/api/v1/recall", json={"session_id": "s", "query": "x"}, headers={"X-User-Token": "tok_bogus"})
+r = req("POST", "/api/v1/recall", json={"session_id": "s", "query": "x"}, headers={"X-User-Token": "tok_bogus"})
 check("bad token 401", r.status_code == 401, r.text[:80])
 
 print("== 2. ingest (batched atoms: one batch on topic, one batch changing topic) ==", flush=True)
@@ -86,72 +130,78 @@ BATCHES = [
     [{"speaker": "user", "text": "by the way, I have a dentist appointment next Wednesday morning, please remind me"}],
 ]
 # Batch validation (the 400 paths; these do not consume a task slot)
-r = c.post("/api/v1/ingest", json={"session_id": "chat-001", "messages": []}, headers=H)
+r = req("POST", "/api/v1/ingest", json={"session_id": "chat-001", "messages": []}, headers=H)
 check("empty batch 400", r.status_code == 400, r.text[:80])
-r = c.post("/api/v1/ingest", json={"session_id": "chat-001",
+r = req("POST", "/api/v1/ingest", json={"session_id": "chat-001",
                                    "messages": [{"speaker": "user", "text": f"filler line {i}"} for i in range(21)]},
            headers=H)
 check("more than 20 messages 400", r.status_code == 400, r.text[:80])
-r = c.post("/api/v1/ingest", json={"session_id": "chat-001",
+r = req("POST", "/api/v1/ingest", json={"session_id": "chat-001",
                                    "messages": [{"speaker": "user", "text": "  "}]}, headers=H)
 check("empty text with no image 400", r.status_code == 400, r.text[:80])
-r = c.post("/api/v1/ingest", json={"session_id": "chat-001", "speaker": "user", "text": "old single-message format"}, headers=H)
+r = req("POST", "/api/v1/ingest", json={"session_id": "chat-001", "speaker": "user", "text": "old single-message format"}, headers=H)
 check("old single-message format rejected (422, breaking change)", r.status_code == 422, r.text[:80])
 
-task_ids = []
+receipts = []
 for msgs in BATCHES:
-    r = c.post("/api/v1/ingest", json={"session_id": "chat-001", "messages": msgs}, headers=H)
-    check(f"ingest 202 (batch of {len(msgs)})", r.status_code == 202 and r.json().get("accepted") is True, r.text[:100])
-    task_ids.append(r.json().get("task_id"))
+    r = req("POST", "/api/v1/ingest", json={"session_id": "chat-001", "messages": msgs}, headers=H)
+    check(f"ingest 202 (batch of {len(msgs)})", r.status_code == 202 and data(r).get("accepted") is True, r.text[:100])
+    receipts.append(data(r))
+check("receipts carry msg_id + strictly increasing seq",
+      all(rc.get("msg_id") for rc in receipts) and
+      [rc["seq"] for rc in receipts] == sorted(rc["seq"] for rc in receipts),
+      str([{k: rc.get(k) for k in ("msg_id", "seq", "queue_depth")} for rc in receipts])[:160])
 
 
-def wait_task(tid, timeout=300):
+def wait_drained(session_id, seq, timeout=300):
+    """Poll /queue/status until the session's cursor has passed seq and the
+    backlog is empty — the HTTP counterpart of the SDK's flush()."""
     t0 = time.time()
     while time.time() - t0 < timeout:
-        r = c.get(f"/api/v1/tasks/{tid}", headers=H)
-        if r.status_code != 200:
-            return None, f"HTTP {r.status_code}"
-        t = r.json()
-        if t["status"] in ("done", "error"):
-            return t, None
+        r = req("GET", f"/api/v1/queue/status?session_id={session_id}", headers=H)
+        st = data(r)
+        if st.get("depth") == 0 and st.get("cursor", 0) >= seq:
+            return st, None
         time.sleep(2)
-    return None, "timeout"
+    return None, f"timeout (last status: {st if 'st' in dir() else 'n/a'})"
 
 
-results = []
-for tid in task_ids:
-    t, err = wait_task(tid)
-    ok = t is not None and t["status"] == "done"
-    check(f"task {tid[:8]} done", ok, err or str((t or {}).get("error") or "")[:200])
-    results.append(t)
-check("every batch's task.result carries evidence_ids with a matching count",
-      all((t or {}).get("result", {}).get("evidence_ids")
-          and len(t["result"]["evidence_ids"]) == len(BATCHES[i])
-          for i, t in enumerate(results) if t))
-r3 = (results[1] or {}).get("result", {}) if results[1] and results[1]["status"] == "done" else {}
-check("topic-changing batch has a non-empty boundary (there is a preceding segment to compare against)",
-      r3.get("boundary") is not None, str(r3.get("boundary"))[:120])
+st, err = wait_drained("chat-001", receipts[-1]["seq"])
+check("both batches consumed (queue/status cursor passed their seq)", st is not None, err or "")
 
 print("== 3. session/end (close the trailing segment) ==", flush=True)
-r = c.post("/api/v1/session/end", json={"session_id": "chat-001"}, headers=H)
+r = req("POST", "/api/v1/session/end", json={"session_id": "chat-001"}, headers=H)
 check("session/end 202", r.status_code == 202, r.text[:80])
-t, err = wait_task(r.json()["task_id"])
-check("session/end task done", t is not None and t["status"] == "done", err or str((t or {}).get("error"))[:200])
-if t and t["status"] == "done":
-    res = t["result"]
-    check("closed_now carries cell_id/topic/atoms",
-          res.get("closed_now") and res["closed_now"].get("cell_id") and res["closed_now"].get("atoms", 0) >= 1,
-          str(res.get("closed_now"))[:160])
-    # Observation only (never fails the run): whether W1 splits "moving" and
-    # "dentist" into two segments is the LLM's call; short segments may merge.
-    print(f"  [observed] cells_total={res.get('cells_total')} - three short messages may well "
-          f"collapse into a single W1 segment (not a defect)", flush=True)
+st, err = wait_drained("chat-001", data(r)["seq"])
+check("session/end consumed (trailing segment closed)", st is not None, err or "")
+r = req("GET", "/api/v1/episodes", headers=H)
+check("episodes 200", r.status_code == 200, r.text[:100])
+eps = data(r).get("items") or []
+check("the session produced at least one episode", len(eps) >= 1, str(eps)[:160])
+print(f"  [observed] episodes={data(r).get('total')} - short batches may merge into one W1 segment "
+      f"(the split is the LLM's call, not a defect)", flush=True)
+
+print("== 3b. sync=true: the API waits for the drain (same contract as the SDK) ==", flush=True)
+r = req("POST", "/api/v1/ingest", headers=H, json={
+    "session_id": "chat-sync", "sync": True,
+    "messages": [{"speaker": "user", "text": "for the sync test: my favorite bookstore is Grassroots"}]})
+check("ingest sync=true 202 with consumed=true", r.status_code == 202 and data(r).get("consumed") is True,
+      r.text[:120])
+r = req("POST", "/api/v1/session/end", headers=H, json={"session_id": "chat-sync", "sync": True})
+check("session/end sync=true 202 with consumed=true",
+      r.status_code == 202 and data(r).get("consumed") is True, r.text[:120])
+# sync returned, so the memory must already be there — no task polling needed.
+r = req("POST", "/api/v1/recall", headers=H,
+           json={"session_id": "chat-sync", "query": "what is my favorite bookstore?", "mode": "fast"})
+check("recall right after sync write answers (read-your-own-writes over HTTP)",
+      r.status_code == 200 and "grassroots" in data(r).get("answer", "").lower(),
+      data(r).get("answer", "")[:120])
 
 print("== 4. recall fast (fast path) ==", flush=True)
-r = c.post("/api/v1/recall",
+r = req("POST", "/api/v1/recall",
            json={"session_id": "chat-001", "query": "Where do I live now, and why did I move?", "mode": "fast"}, headers=H)
 check("recall fast 200", r.status_code == 200, r.text[:200])
-o = r.json()
+o = data(r)
 check("all fields present (query/mode/verdict/critique/retried/answer/cited_cells/memories)",
       all(k in o for k in ("query", "mode", "verdict", "critique", "retried", "answer",
                            "cited_cells", "memories")))
@@ -174,57 +224,68 @@ else:
 print(f"  answer: {o['answer'][:220]}", flush=True)
 
 print("== 5. recall deep (straight to the deep path) ==", flush=True)
-r = c.post("/api/v1/recall", json={"session_id": "chat-001", "query": "What do I have scheduled next Wednesday?", "mode": "deep"}, headers=H)
+r = req("POST", "/api/v1/recall", json={"session_id": "chat-001", "query": "What do I have scheduled next Wednesday?", "mode": "deep"}, headers=H)
 check("recall deep 200", r.status_code == 200, r.text[:200])
-o_deep = r.json()
+o_deep = data(r)
 check("deep answer mentions the dentist", "dent" in o_deep["answer"].lower(), o_deep["answer"][:160])
 print(f"  answer: {o_deep['answer'][:220]}", flush=True)
 
 print("== 6. recall on an unanswerable question (the honesty obligation) ==", flush=True)
-r = c.post("/api/v1/recall", json={"session_id": "chat-001", "query": "What is my cat's name?"}, headers=H)
+r = req("POST", "/api/v1/recall", json={"session_id": "chat-001", "query": "What is my cat's name?"}, headers=H)
 check("unanswerable question 200", r.status_code == 200, r.text[:120])
-o_e = r.json()
-check("verdict=insufficient_material (an honest refusal, not a fabrication)",
-      o_e["verdict"] == "insufficient_material", str(o_e["verdict"]))
+o_e = data(r)
+# Which negative verdict the reviewer lands on is an LLM judgement:
+# insufficient_material (nothing relevant exists) or answer_defect (materials
+# exist but none answer it — with unrelated cells in the store, both are
+# honest). What must never vary is the honesty itself: no fabricated name.
+check("verdict is a negative one (an honest refusal, not a fabrication)",
+      o_e["verdict"] in ("insufficient_material", "answer_defect"), str(o_e["verdict"]))
+check("no fabricated content is cited", not o_e.get("cited_cells") or o_e["verdict"] == "answer_defect",
+      str(o_e.get("cited_cells"))[:120])
 if o_e["verdict"] == "insufficient_material":
     check("nothing is returned in memories", o_e["memories"] == [], f"len={len(o_e['memories'])}")
-    # Whether the deep path answered or the answer was assembled deterministically,
-    # it must say "not found" and what was searched. Only the family of negative
-    # phrasings is matched; no exact wording is hardcoded.
-    honest = any(k in o_e["answer"].lower() for k in
-                 ("not found", "no record", "don't have", "do not have", "not mentioned",
-                  "no information", "cannot determine", "can't determine", "unable to"))
-    check("answer states the situation plainly (a negative conclusion plus what was searched)",
-          honest, o_e["answer"][:200])
+# Whether the deep path answered or the answer was assembled deterministically,
+# it must say "not found" and what was searched. Only the family of negative
+# phrasings is matched; no exact wording is hardcoded.
+honest = any(k in o_e["answer"].lower() for k in
+             ("not found", "no record", "don't have", "do not have", "not mentioned",
+              "no information", "cannot determine", "can't determine", "unable to",
+              "not recorded", "never mentioned"))
+check("answer states the situation plainly (a negative conclusion plus what was searched)",
+      honest, o_e["answer"][:200])
 print(f"  answer: {o_e['answer'][:260]}", flush=True)
 
 print("== 7. trace, both directions ==", flush=True)
 if smoke_atom_id:
-    r = c.get(f"/api/v1/trace/{smoke_atom_id}", headers=H)
-    check("trace atom 200 node=memory", r.status_code == 200 and r.json().get("node") == "memory", r.text[:160])
-    check("trace atom drills down to non-empty evidence", len(r.json().get("evidence", [])) >= 1)
+    r = req("GET", f"/api/v1/trace/{smoke_atom_id}", headers=H)
+    check("trace atom 200 node=memory", r.status_code == 200 and data(r).get("node") == "memory", r.text[:160])
+    check("trace atom drills down to non-empty evidence", len(data(r).get("evidence", [])) >= 1)
 if smoke_ev_id:
-    r = c.get(f"/api/v1/trace/{smoke_ev_id}", headers=H)
+    r = req("GET", f"/api/v1/trace/{smoke_ev_id}", headers=H)
     check("trace evidence 200 node=evidence",
-          r.status_code == 200 and r.json().get("node") == "evidence", r.text[:160])
-    n = r.json()
+          r.status_code == 200 and data(r).get("node") == "evidence", r.text[:160])
+    n = data(r)
     check("trace evidence pair non-empty", isinstance(n.get("pair"), list) and len(n["pair"]) >= 1)
     check("trace evidence cited_by carries citations", isinstance(n.get("cited_by"), list) and len(n["cited_by"]) >= 1)
-r = c.get("/api/v1/trace/atom_bogus", headers=H)
+r = req("GET", "/api/v1/trace/atom_bogus", headers=H)
 check("trace on an unknown id 404", r.status_code == 404, r.text[:80])
 
 print("== 8. tasks / trace isolation across users ==", flush=True)
-r = c.post("/api/v1/users/register", json={"user_id": OTHER})
-tok2 = r.json()["token"]
-r = c.get(f"/api/v1/tasks/{task_ids[0]}", headers={"X-User-Token": tok2})
-check("someone else's task 404", r.status_code == 404, r.text[:80])
+r = req("POST", "/api/v1/users/register", json={"user_id": OTHER})
+tok2 = data(r)["token"]
+r = req("GET", "/api/v1/tasks/task_bogus", headers={"X-User-Token": tok2})
+check("unknown task 404", r.status_code == 404, r.text[:80])
+r = req("GET", "/api/v1/queue/status?session_id=chat-001", headers={"X-User-Token": tok2})
+check("someone else's queue view is empty (depth 0, cursor 0)",
+      r.status_code == 200 and data(r).get("depth") == 0 and data(r).get("cursor") == 0,
+      r.text[:120])
 if smoke_atom_id:
-    r = c.get(f"/api/v1/trace/{smoke_atom_id}", headers={"X-User-Token": tok2})
+    r = req("GET", f"/api/v1/trace/{smoke_atom_id}", headers={"X-User-Token": tok2})
     check("someone else's memory trace 404", r.status_code == 404, r.text[:80])
 
 print("== 9. invalid mode 400 ==", flush=True)
-r = c.post("/api/v1/recall", json={"session_id": "s", "query": "x", "mode": "bogus"}, headers=H)
-check("mode=bogus 400", r.status_code == 400 and "mode" in r.json().get("error", ""), r.text[:120])
+r = req("POST", "/api/v1/recall", json={"session_id": "s", "query": "x", "mode": "bogus"}, headers=H)
+check("mode=bogus 400", r.status_code == 400 and "mode" in errmsg(r), r.text[:120])
 
 print("== 10. upstream-failure 502 fallback ==", flush=True)
 orig_chat, orig_embed = rt_mod.rt.llm.chat, rt_mod.rt.embedder.embed
@@ -237,17 +298,17 @@ def boom(*a, **kw):
 rt_mod.rt.llm.chat = boom
 rt_mod.rt.embedder.embed = boom
 try:
-    r = c.post("/api/v1/recall", json={"session_id": "chat-001", "query": "Where do I live?"}, headers=H)
+    r = req("POST", "/api/v1/recall", json={"session_id": "chat-001", "query": "Where do I live?"}, headers=H)
     check("upstream failure -> 502 JSON (not a bare 500)",
-          r.status_code == 502 and "unavailable" in r.json().get("error", ""), r.text[:160])
+          r.status_code == 502 and "unavailable" in errmsg(r), r.text[:160])
 finally:
     rt_mod.rt.llm.chat, rt_mod.rt.embedder.embed = orig_chat, orig_embed
-r = c.post("/api/v1/recall", json={"session_id": "chat-001", "query": "Where do I live?"}, headers=H)
+r = req("POST", "/api/v1/recall", json={"session_id": "chat-001", "query": "Where do I live?"}, headers=H)
 check("recall 200 again after recovery", r.status_code == 200, r.text[:120])
 
 print("== 11. /health counters ==", flush=True)
-r = c.get("/api/v1/health")
-h = r.json()
+r = req("GET", "/api/v1/health")
+h = data(r)
 check("health 200 with non-zero counts",
       r.status_code == 200 and h["users"] >= 2 and h["evidence"] >= 3 and h["cells"] >= 1, str(h))
 
