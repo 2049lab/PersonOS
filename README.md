@@ -1,62 +1,21 @@
 # PersonOS
 
-Layered long-term memory for agents — and the only one that watches video and
-remembers *who* was in it.
-
-> **Status: pre-release (0.1.0.dev0).** This repository is being reshaped from an
-> internal service into a standalone library. The public API below is the target,
-> not yet the shipped surface. See [the roadmap](#roadmap) for what still moves.
-
-## Why another memory library
-
-Most memory libraries store a flat list of facts and search it. PersonOS keeps a
-**layered, append-only record** and never resolves contradictions at write time:
-
-```
-evidence  ──►  memcell (episode)  ──►  atom  ──►  atom_chain
-raw turns      the narrative unit     the          the same fact
-never edited   used for answering     retrieval    over time, grouped
-                                      anchor       but not collapsed
-```
-
-Two consequences that matter in practice:
-
-- **Contradictions survive.** "I have 15 fish" → "actually 13" → "actually 11" stay
-  as three linked atoms with their timestamps. The answer layer decides what is
-  current; the memory layer never silently overwrites the past.
-- **Answers cite episodes, not fragments.** Atoms are the retrieval index; the
-  narrative episode is what the model reads. Retrieval granularity and answering
-  granularity are deliberately different.
-
-### Multimodal: video and person identity
-
-Every other open memory framework is text-only, or converts an image to a caption
-at ingest. PersonOS takes **video clips** and builds stable *character* entities
-from faces, body shots and voiceprints, so a person recognised in clip 12 is the
-same person recognised three sessions later — without anyone enrolling them first.
-
-This is optional (`pip install personos[identity]`) and adds roughly 2 GB of model
-dependencies. The text memory core does not import any of it.
-
-## Install
+Layered long-term memory for agents — and the only open one that watches video
+and remembers *who* was in it.
 
 ```bash
 pip install personos
 ```
 
-## Quickstart
-
 ```python
 from personos import Memory
 
-m = Memory()                      # zero config: SQLite under ~/.personos, one env var
+m = Memory()                      # SQLite under ~/.personos; one env var to set
 
-m.add([{"role": "user", "content": "I moved from Hangzhou to Shanghai in June"}],
-      user_id="alice", session_id="chat-1")
-m.end_session(user_id="alice", session_id="chat-1")
+m.add("I moved from Hangzhou to Shanghai in June", user_id="alice", session_id="s1")
+m.end_session(user_id="alice", session_id="s1")
 
-out = m.search("where do I live now?", user_id="alice")
-print(out.ans.answer)
+print(m.search("where do I live?", user_id="alice").ans.answer)
 ```
 
 The only required configuration is a chat/embedding endpoint:
@@ -66,35 +25,119 @@ export PERSONOS_LLM_API_KEY=sk-...
 export PERSONOS_LLM_BASE_URL=https://api.openai.com/v1   # any OpenAI-compatible gateway
 ```
 
-Everything else — MySQL, Redis, object storage, reranker, vision, video identity,
-tracing — is optional. Leave it unset and the corresponding capability degrades or
-is reported as unavailable; it never crashes the text path.
+Not sure what your configuration can do? `personos doctor` reads it and tells
+you what works, what is off, and what to set.
 
-## Configuration tiers
+## Why another memory library
 
-| | Unset means |
-|---|---|
-| **Chat LLM + embedder** | **required** — nothing works without them |
-| Database | SQLite at `~/.personos/personos.db`, tables auto-created. Set `PERSONOS_DB_URL` for MySQL. |
-| Multimodal LLM | Text memory is unaffected. Images are stored but not understood; video is rejected with a clear error. |
-| Object storage | Files land on the local filesystem instead. |
-| Reranker | Retrieval keeps its fusion order. |
-| Redis | Single process instead of multi-worker. |
+Most store a flat list of facts and search it. PersonOS keeps a **layered,
+append-only record** and refuses to resolve contradictions at write time:
 
-## Roadmap
+```
+evidence  ──►  memcell (episode)  ──►  atom  ──►  atom_chain
+raw turns      the narrative unit     the          the same fact over time,
+never edited   used for answering     retrieval    grouped, never collapsed
+                                      anchor
+```
 
-This repo is mid-migration from an internal deployment. Landed / remaining:
+Two consequences that show up in practice:
 
-- [x] Behavioural baseline harness (record & replay, so the refactor is provably shape-only)
-- [ ] Config rewrite — no import-time evaluation, no internal secret manager
-- [ ] SQLite backend + `Database` protocol
-- [ ] OpenAI-compatible providers replacing the internal model gateway
-- [ ] Local media store
-- [ ] Capability contract — actionable errors for unconfigured features
-- [ ] `Memory` facade; HTTP server moves to `server/`
-- [ ] Dependency slimming and extras
-- [ ] English docstrings throughout
-- [ ] Docs and first release
+**Contradictions survive.** "15 fish" → "actually 13" → "actually 11" stay as
+three linked atoms with their timestamps. The answer layer decides what is
+current; the memory layer never silently overwrites the past. Ask *"how many
+fish do I have"* and you get the current count; ask *"did that change"* and the
+history is still there.
+
+**Answers cite episodes, not fragments.** Atoms are the retrieval index — short,
+self-contained propositions that embed well. The narrative episode is what the
+model actually reads. Retrieval granularity and answering granularity are
+deliberately different, because what makes a good search key makes a poor
+answer.
+
+### Recall shows its work
+
+`search()` returns the answer *and* how it got there: the rewritten query, the
+atoms retrieved, the materials ranked, the adjudication verdicts, whether it
+escalated to the deep agent. When an answer is wrong, you can see which stage
+went wrong instead of guessing.
+
+```python
+out = m.search("how many fish?", user_id="alice")
+out.ans.answer        # the answer
+out.rw.subject        # who the question was resolved to be about
+out.hits              # atoms retrieved, in fusion order
+out.reviews           # what the adjudicator said about the draft
+out.to_public()       # ...or a plain dict, if you just want the answer
+```
+
+### Video and person identity
+
+Every other open memory framework is text-only, or turns an image into a caption
+at ingest. PersonOS takes **video clips** and builds stable *character* entities
+from faces, body shots and voiceprints — so someone recognised in clip 12 is the
+same person three sessions later, without anyone enrolling them first.
+
+Optional (`pip install personos[identity]`, ~2 GB of model dependencies). The
+text core imports none of it.
+
+## Configuration
+
+Everything except the model endpoint is optional. Unset means a capability is
+off or degraded, never that the text path breaks.
+
+| | Default | Unset means |
+|---|---|---|
+| **Chat + embeddings** | — | **required** |
+| Database | SQLite at `~/.personos` | set `PERSONOS_DB_URL` for MySQL — needed only for several workers |
+| Multimodal model | off | images are stored but contribute nothing to retrieval; video is refused with instructions |
+| Media storage | local files | set `PERSONOS_MEDIA_BACKEND=oss` for object storage |
+| Reranker | off | retrieval keeps its fusion order |
+| Deep recall | off | `pip install personos[deep]` for the multi-step agent |
+| Redis | off | single process; session state is in memory |
+| Tracing | off | every tracing call is a no-op |
+
+See [.env.example](.env.example) for the full list with explanations.
+
+### Errors tell you what to do
+
+Ask for something unconfigured and you get a sentence, not silence:
+
+```
+MissingCapability: video understanding is unavailable: no multimodal model is configured
+  To enable it: set PERSONOS_MLLM_API_KEY and PERSONOS_MLLM_MODEL
+```
+
+The rule is: **cannot do it at all → raise; did it partially → return and say
+so** in `result.warnings`. A missing optional capability never fails a write.
+
+## API
+
+```python
+m.add(messages, user_id=..., session_id=...)   # a string, a dict, or a list of dicts
+m.end_session(user_id=..., session_id=...)     # build memories from the open segment
+m.search(query, user_id=..., mode="auto")      # "auto" | "fast" | "deep"
+m.profile(user_id=...)                         # distilled user profile
+m.trace(node_id, user_id=...)                  # provenance, both directions
+m.capabilities()                               # what this configuration can do
+m.reset(user_id=...)                           # delete one user's data
+```
+
+Everything is synchronous. There is no `AsyncMemory` yet, and rather than
+pretend, the honest workaround is `await asyncio.to_thread(m.search, q)`.
+
+## Running it as a service
+
+[`server/`](server/README.md) is a FastAPI deployment — ordered ingestion across
+processes, backpressure, token-scoped multi-tenancy. It is **not** part of the
+pip package; it has its own dependencies and lifecycle.
+
+If you are embedding memory in an application, you do not need it.
+
+## Status
+
+Pre-release (`0.1.0.dev0`). The memory pipeline has been running in a production
+deployment; the packaging around it is new, and the public API may still move
+before 0.1.0.
 
 ## License
 
