@@ -1,6 +1,7 @@
-"""共享 LLM 调用契约:ChatLLM 协议 + JSON 输出清洗。
+"""Shared LLM call contract: the ChatLLM protocol + cleanup of JSON output.
 
-写入(W1/W2)、检索(R0)、核判(R3')共用一份,协议站点不再各自定义。
+The write path (W1/W2), retrieval (R0) and adjudication (R3') all share this one definition, so no
+call site declares its own protocol any more.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ class ChatLLM(Protocol):
 
 
 def strip_fences(s: str) -> str:
-    """去掉 ```/```json 围栏;LLM 常把 JSON 包在代码块里。"""
+    """Strip ``` / ```json fences; LLMs often wrap their JSON in a code block."""
     s = s.strip()
     if s.startswith("```"):
         s = s.split("\n", 1)[1] if "\n" in s else s
@@ -30,20 +31,25 @@ def strip_fences(s: str) -> str:
 
 
 def _user_content(messages: list[dict]) -> str:
-    """拼接 user 角色内容(动态输入:transcript/episode/候选链/query 等);跳过静态 system prompt。"""
+    """Join the content of the user-role messages (the dynamic input: transcript, episode, candidate
+    chains, query, ...); the static system prompt is skipped."""
     return "\n".join(str(m.get("content", "")) for m in messages if m.get("role") == "user")
 
 
-# —— 业务方场景注入(留口子:高杠杆 LLM 环节的 system prompt 里插一段调用方场景描述)——
+# -- Caller scenario injection (an extension point: insert a description of the caller's scenario into
+# the system prompt of the high-leverage LLM steps) --
 _SCEN_HEADER = "# Caller scenario (business context from the calling application)"
 
 
 def with_scenario(prompt: str, anchor: str, scenario: str, directive: str) -> str:
-    """在 anchor 段【前】插入业务方场景区块;scenario 为空 → 原样返回(默认链路逐字节不变)。
+    """Insert the caller-scenario block BEFORE the anchor section; an empty scenario returns the
+    prompt unchanged (so the default path stays byte-for-byte identical).
 
-    业务偏好只调「关注度/详略」,directive 里写死「不改事实、不编造、不漏」的守则,防跑偏。
-    anchor 取各 prompt 的下一个 section 标题(避开 JSON 花括号,replace 一次即可);
-    anchor 万一不在 prompt 里(日后改了标题),兜底追加到末尾——scenario 绝不静默丢失。
+    Business preferences may only tune attention and level of detail; the directive hard-codes the
+    rules "do not alter facts, do not invent, do not omit" to keep it from drifting. The anchor is
+    the next section heading of each prompt (which avoids the JSON braces, so a single replace is
+    enough). If the anchor is not in the prompt (say a heading gets renamed later), fall back to
+    appending at the end — the scenario is never silently dropped.
     """
     s = (scenario or "").strip()
     if not s:
@@ -56,30 +62,34 @@ def with_scenario(prompt: str, anchor: str, scenario: str, directive: str) -> st
 
 def chat_json(llm: ChatLLM, messages: list[dict], *, max_tokens: int,
               temperature: float = 0.0, num_tries: int = 1, stage: str = ""):
-    """调 LLM 并把输出解析为 JSON;解析失败抛 ValueError(附 .raw=模型原文,调用方决定兜底)。
+    """Call the LLM and parse its output as JSON; a parse failure raises ValueError (with .raw set to
+    the model's original text, so the caller decides how to fall back).
 
-    num_tries > 1 时 JSON 解析失败自动重发(附上次原文与"只输出 JSON"提示,让模型自我纠正)。
-    只重试解析失败,不重试网络异常——后者由调用方各自的降级路径接住。
-    stage:LLM 阶段名(如 rewrite_query/answer),经 obs.stage 传给 MaasClient 给 langfuse span 命名。
+    With num_tries > 1, a JSON parse failure is retried automatically (resending the previous output
+    plus an "output JSON only" instruction so the model can correct itself). Only parse failures are
+    retried, never network errors — those are caught by each caller's own degradation path.
+    stage: the name of the LLM stage (e.g. rewrite_query / answer), passed through obs.stage to
+    MaasClient to name the langfuse span.
     """
     msgs = messages
     for attempt in range(1, num_tries + 1):
         with obs.stage(stage):
             raw = llm.chat(msgs, temperature=temperature, max_tokens=max_tokens)
-        # 完整打这次 LLM 看到的动态输入 + 输出原文(排障用;静态 system 不打)。重试每次各一条
+        # Log the full dynamic input this LLM call saw plus its raw output (for troubleshooting; the
+        # static system prompt is not logged). One line per retry attempt
         logger.info(f"LLM[{stage or 'chat'}] attempt={attempt}/{num_tries}\n"
-                    f"  ── 输入(user)──\n{_user_content(msgs)}\n"
-                    f"  ── 输出(raw)──\n{raw}")
+                    f"  -- input(user) --\n{_user_content(msgs)}\n"
+                    f"  -- output(raw) --\n{raw}")
         try:
             return json.loads(strip_fences(raw)), raw
         except json.JSONDecodeError as e:
             if attempt == num_tries:
-                err = ValueError(f"LLM 输出不是合法 JSON(重试 {num_tries} 次仍失败): {e}")
-                err.raw = raw   # 降级方仍能拿到原文(网络异常等无 .raw,getattr 兜底)
+                err = ValueError(f"LLM output is not valid JSON (still failing after {num_tries} tries): {e}")
+                err.raw = raw   # the fallback path can still read the original text (network errors and the like have no .raw, so callers use getattr)
                 raise err from e
             msgs = messages + [
                 {"role": "assistant", "content": raw},
                 {"role": "user", "content": "你上次的输出不是合法 JSON,无法解析。"
                                             "请重新输出,只输出 JSON 本体,不要解释、不要代码块围栏。"},
             ]
-            logger.warning(f"chat_json 第 {attempt} 次输出非 JSON,重试(共 {num_tries} 次)")
+            logger.warning(f"chat_json attempt {attempt} produced non-JSON output, retrying ({num_tries} tries total)")

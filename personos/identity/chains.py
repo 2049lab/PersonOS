@@ -1,12 +1,17 @@
-"""ChainBook(⑤b):身份链的证据台账(会话内事务性绑定)。
+"""ChainBook: the evidence ledger for identity chains, binding transactionally
+within a session.
 
-移植自 mneme anchor/chains.py,逐处对齐:链承载会话内身份(roster 续接维持),全局归属只是
-链的**当前假设**;本模块维护链的证据台账,并决定"新最佳证据"刷新触发——纯相对比较,不引新阈值、
-不调模型;评估调用与终审在编排层 / commit.py。
+A chain carries identity inside a session, held together by roster continuation,
+and global attribution is only ever the chain's **current hypothesis**. This
+module maintains the chain's evidence ledger and decides when "new best evidence"
+should trigger a refresh. That decision is a pure relative comparison: no new
+thresholds, and no model calls. Invoking the evaluation and running the final
+adjudication belong to the orchestration layer and commit.py.
 
-有意偏离(对齐 draft.py):store→DraftStore(Redis 草稿);素材以 oss_key 存草稿,做卡片时经
-media_store 取 b64(复用 recognize._read_b64);向量类型走 personos types(FacePick.crop_b64/
-body_crop_b64、VoiceSample.wav_bytes,非 mneme face_b64/body_b64/wav_ref)。
+Storage follows draft.py: the store is a DraftStore backed by Redis; assets live
+in the draft as oss_keys and are fetched as b64 when a card is built; and vector
+types come from our own types module (FacePick.crop_b64 / body_crop_b64,
+VoiceSample.wav_bytes).
 """
 
 from __future__ import annotations
@@ -20,21 +25,28 @@ from personos.identity.draft import DraftStore, read_b64
 from personos.identity.screenplay import ClipScript
 from personos.identity.types import CandidateCard, CastEvidence, FacePick, VoiceSample
 
-# 触发原因常量(写入 chain 评估 reason)。
+# Trigger reasons, written into the chain evaluation's reason field.
 FIRST_SEEN = "first_seen"
 BETTER_FACE = "better_face"
 BETTER_VOICE = "better_voice"
 FIRST_NAME = "first_name"
 
-# 计票箱:只统计证据触发的评估;碰撞重裁(collision_*)与终审(final_*)不计。
-# 强多数 = 稳定的证据共识,供终审弃权兜底 + 碰撞时保护强侧。
+# The ballot box counts only evidence-triggered evaluations; collision
+# re-arbitration (collision_*) and final adjudication (final_*) do not count.
+# A strong majority means a stable evidence consensus, which serves as the
+# fallback when final adjudication abstains and as protection for the stronger
+# side of a collision.
 EVIDENCE_REASONS = frozenset({FIRST_SEEN, BETTER_FACE, BETTER_VOICE, FIRST_NAME})
 MAJORITY_MIN_COUNT = 3
 MAJORITY_MIN_RATIO = 0.6
 
 
 class ChainBook:
-    """一个会话的身份链台账。draft=会话草稿存储;media_store 用于把草稿素材 oss_key 还原成 b64。"""
+    """The identity-chain ledger for one session.
+
+    store is the session draft storage; media_store turns a draft asset's oss_key
+    back into b64.
+    """
 
     def __init__(self, store: DraftStore, media_store: Any = None) -> None:
         self.store = store
@@ -43,7 +55,7 @@ class ChainBook:
     def _b64(self, oss_key: str) -> str:
         return read_b64(self.media_store, oss_key)
 
-    # ── 台账更新 + 刷新决策(s2 后,无模型调用)────────────────────────
+    # ── Ledger update and refresh decision. Runs after harvest, calls no model ──
     def observe_clip(
         self, session_id: str, clip_index: int, script: ClipScript,
         evidence_by_cast: dict[str, CastEvidence],
@@ -56,7 +68,8 @@ class ChainBook:
             evidence = evidence_by_cast.get(cast_id) or CastEvidence(cast_id=cast_id)
             decl = self._decl(script, cast_id)
 
-            # 台账更新:best q / named / desc / presence 无论是否触发刷新都记录。
+            # Ledger update: best q, named, desc and presence are recorded whether
+            # or not a refresh is triggered.
             updates: dict[str, Any] = {}
             best_face = max((p for p in evidence.faces if p.embedding is not None),
                             key=lambda p: p.q, default=None)
@@ -68,9 +81,12 @@ class ChainBook:
             voice_improved = best_voice is not None and best_voice.q > chain["best_voice_q"]
             if voice_improved:
                 updates["best_voice_q"] = best_voice.q
-            # WHY(对齐 mneme):被介绍是别人对话里的强名字证据,首次得名必须触发 FIRST_NAME,
-            # 否则被介绍的名字永不带链回到与注册档的仲裁。spoken/self_introduction/visible_text
-            # 仍不触发(弱证据)。
+            # Being introduced is strong name evidence, since it comes from someone
+            # else's speech. Acquiring a name for the first time must therefore
+            # trigger FIRST_NAME; otherwise an introduced name never carries the
+            # chain back into arbitration against the enrolled profiles. The weaker
+            # evidence kinds (spoken, self_introduction, visible_text) still do not
+            # trigger it.
             name_first = bool(
                 decl and decl.name
                 and decl.name_evidence in ("explicit_dialogue", "introduction")
@@ -81,8 +97,10 @@ class ChainBook:
                 updates["desc_text"] = decl.desc
             updates["presence"] = sorted(set(chain["presence"]) | {clip_index})
 
-            # 刷新决策:first_seen = 该链根从未被观测(presence 空→非空),已含"首次最佳证据",
-            # 故不与 better_*/first_name 并列。
+            # Refresh decision. first_seen means this chain root had never been
+            # observed (presence went from empty to non-empty), which already
+            # implies "first best evidence", so it is not listed alongside
+            # better_* or first_name.
             reasons: list[str] = []
             if not chain["presence"]:
                 reasons.append(FIRST_SEEN)
@@ -98,7 +116,7 @@ class ChainBook:
             if reasons:
                 merged = refreshed.setdefault(canonical, [])
                 merged.extend(r for r in reasons if r not in merged)
-                logger.debug(f"链 {canonical} 在 clip {clip_index} 刷新: {reasons}")
+                logger.debug(f"chain {canonical} refreshed at clip {clip_index}: {reasons}")
         return refreshed
 
     @staticmethod
@@ -110,13 +128,17 @@ class ChainBook:
                     return decl
         return None
 
-    # ── verdict 应用(只改假设,不注册)────────────────────────────────
+    # ── Applying a verdict: this changes the hypothesis only, it never enrolls ──
     def apply_verdict(self, chain_ref: str, verdict: str, *, session_id: str,
                       clip_index: int, reason: str, issues: list[str]) -> str:
         canonical = self.store.canonical_chain(chain_ref)
         chain = self.store.get_chain(canonical)
-        # 同框守卫(与终审同规,提前到 clip 级):s4 候选池是跨 cast 的并集,模型可能把两条同框链
-        # 判成同一人——合并不可逆,之后碰撞规则会把它们看作一条链复现,永久对错误失明。
+        # The same-frame guard, the same rule final adjudication applies, pulled
+        # forward to clip level. The arbitration candidate pool is the union across
+        # casts, so the model can judge two chains that appeared in the same frame
+        # to be one person. That merge is irreversible, and afterwards the
+        # collision rule sees them as a single chain recurring — permanently blind
+        # to the mistake.
         is_merge = self.store.is_chain_ref(verdict)
         target = self.store.canonical_chain(verdict) if is_merge else None
         rejected = (is_merge and target != canonical and self.copresent(canonical, target))
@@ -128,7 +150,7 @@ class ChainBook:
             evidence={"best_face_q": chain["best_face_q"],
                       "best_voice_q": chain["best_voice_q"], "named": chain["named"]})
         if rejected:
-            return canonical                             # 假设不变
+            return canonical                             # the hypothesis is unchanged
         if is_merge:
             if target != canonical:
                 self.store.merge_chain(canonical, target)
@@ -136,14 +158,18 @@ class ChainBook:
         self.store.update_chain(canonical, hypothesis=verdict, hypo_method=reason)
         return canonical
 
-    # ── 评估材料(query 卡 / 合成召回证据 / pending 候选卡)──────────────
+    # ── Evaluation material: query cards, synthetic recall evidence, pending candidate cards ──
     def query_card(self, session_id: str, cast_id: str, script: ClipScript, *,
                    evidence: Optional[CastEvidence] = None) -> dict[str, Any]:
         canonical = self.store.canonical_chain(self.store.chain_ref(session_id, cast_id))
         chain = self.store.get_chain(canonical) or {}
         pair = self.store.best_pair(canonical) or {}
-        # s4 评估在 s5 暂存前:首见时暂存为空,重评时本 clip 证据尚未存——当前证据质量更高时用当前
-        # 图,否则用暂存最佳。脸与全身取同一更高 q 源(暂存 vs 当前),但两图不保证同一瞬间。
+        # Evaluation happens before staging, so on first sight the staged set is
+        # empty, and on a re-evaluation this clip's evidence has not been staged
+        # yet. So we use the current image when its quality is higher, and the best
+        # staged one otherwise. The face and the body shot come from the same
+        # higher-q source (staged or current), though the two images are not
+        # guaranteed to be from the same instant.
         staged_q = float(pair["quality"]) if pair.get("quality") is not None else -1.0
         best_face = evidence.best_face() if evidence is not None else None
         if best_face is not None and best_face.q > staged_q:
@@ -157,7 +183,8 @@ class ChainBook:
         decl = self._decl(script, cast_id)
         key_lines = [line.text for line in script.lines
                      if line.kind == "speech" and script.cast_map.get(line.who) == cast_id][:3]
-        # 声纹样本同策:暂存最佳 vs 本 clip 证据,q 高者胜(必须带真 wav)。
+        # The voice sample follows the same policy: best staged versus this clip's
+        # evidence, higher q wins, and it must carry real wav bytes.
         staged_voice = self.store.best_voice(canonical) or {}
         staged_voice_q = (float(staged_voice["quality"])
                           if staged_voice.get("quality") is not None else -1.0)
@@ -177,10 +204,12 @@ class ChainBook:
         }
 
     def synthetic_evidence(self, chain_ref: str) -> CastEvidence:
-        """从暂存最佳素材合成一份证据(供大库粗召回;只需 embedding+q)。"""
+        """Synthesize evidence from the best staged assets, for coarse recall over a
+        large library. Only embedding and q are needed.
+        """
         canonical = self.store.canonical_chain(chain_ref)
         evidence = CastEvidence(cast_id=canonical)
-        for asset in self.store.active_staged(canonical, "face")[:1]:   # 已按 q 降序
+        for asset in self.store.active_staged(canonical, "face")[:1]:   # already ordered by q descending
             if asset.get("embedding") is not None:
                 evidence.faces.append(FacePick(t=float(asset.get("t") or 0),
                                                embedding=asset["embedding"], q=float(asset["q"])))
@@ -199,7 +228,9 @@ class ChainBook:
         return bool(set(a["presence"]) & set(b["presence"]))
 
     def vote_summary(self, chain_ref: str) -> dict[str, Any]:
-        """证据触发评估的计票(canonical + 别名合并;链-链合并 verdict 不计)。"""
+        """Tally the evidence-triggered evaluations across the canonical chain and
+        its aliases. Chain-to-chain merge verdicts are not counted.
+        """
         canonical = self.store.canonical_chain(chain_ref)
         counts: dict[str, int] = {}
         total = 0
@@ -216,8 +247,11 @@ class ChainBook:
         return {"counts": counts, "total": total}
 
     def strong_majority(self, chain_ref: str) -> Optional[str]:
-        """强多数档:票数≥MAJORITY_MIN_COUNT 且占比≥MAJORITY_MIN_RATIO 的 character_id
-        (NEW 从不作目标,但计入分母)。"""
+        """The strong-majority profile: the character_id with at least
+        MAJORITY_MIN_COUNT votes and at least MAJORITY_MIN_RATIO of the share.
+
+        NEW is never a target, but it does count toward the denominator.
+        """
         summary = self.vote_summary(chain_ref)
         total = summary["total"]
         if not total:
@@ -231,7 +265,12 @@ class ChainBook:
         return None
 
     def pending_cards(self, session_id: str, *, for_chain: str) -> list[CandidateCard]:
-        """其它 pending 链作候选(供断裂链回场时并入);曾同框的链物理上不可能同人,排除。"""
+        """Other pending chains offered as candidates, so a broken chain can be
+        merged back when the person returns.
+
+        Chains that have appeared in the same frame cannot physically be the same
+        person, so they are excluded.
+        """
         cards: list[CandidateCard] = []
         for chain in self.store.pending_chains(session_id):
             ref = chain["chain_ref"]
@@ -250,7 +289,8 @@ class ChainBook:
         return cards
 
 
-# ── 链级碰撞规则:同框链共享假设(检测 / 重裁 / 证据优先降级)──────────────
+# ── The chain-level collision rule: same-frame chains sharing a hypothesis.
+#    Detect, re-arbitrate, then degrade with evidence taking priority ──────
 def _chain_proposed(book: ChainBook, script: ClipScript, session_id: str) -> dict[str, str]:
     from personos.identity.inspect import present_casts
     proposed: dict[str, str] = {}
@@ -267,14 +307,18 @@ def resolve_chain_collisions(book: ChainBook, script: ClipScript, *, session_id:
                              clip_index: int, queries_by_cast: dict[str, dict[str, Any]],
                              pool: list[CandidateCard], omni: Any,
                              dump: Any = None) -> list[dict[str, Any]]:
-    """同框链共享假设的检测→重裁(≤2 轮)→证据优先降级。逐处对齐 mneme。"""
+    """Detect same-frame chains sharing a hypothesis, re-arbitrate (at most two
+    rounds), then degrade with evidence taking priority.
+    """
     from personos.identity.inspect import inspect_bind_collisions
     from personos.identity.recognize import build_arbitration_prompt, parse_verdicts
     log: list[dict[str, Any]] = []
 
     def _violations() -> list:
         vs = inspect_bind_collisions(script, _chain_proposed(book, script, session_id))
-        # 两 cast 在同一 canonical 上"自撞"不算(同一链复现):过滤 cast→canonical 同值的。
+        # Two casts colliding on the same canonical chain is not a violation — that
+        # is one chain recurring — so filter out groups whose casts all map to the
+        # same canonical.
         return [v for v in vs if len({
             book.store.canonical_chain(book.store.chain_ref(session_id, c))
             for c in v.cast_ids}) > 1]
@@ -284,7 +328,9 @@ def resolve_chain_collisions(book: ChainBook, script: ClipScript, *, session_id:
         return log
     candidate_ids = [card.character_id for card in pool]
 
-    # 保护强侧:争议档上恰有一条链握强多数时,它是证据最支持的身份——不进重裁、不降级。
+    # Protect the stronger side: when exactly one chain holds a strong majority on
+    # the contested profile, that is the identity the evidence best supports, so it
+    # is neither re-arbitrated nor degraded.
     def _contested_target(violation):
         proposed = _chain_proposed(book, script, session_id)
         targets = {proposed.get(c) for c in violation.cast_ids}
@@ -333,8 +379,10 @@ def resolve_chain_collisions(book: ChainBook, script: ClipScript, *, session_id:
         violations = _violations()
         if not violations:
             return log
-    # 证据优先降级:保强多数链,否则保 best_face_q 最高(早出场破平);其余降 NEW
-    # (错误的拆分可恢复,错误的合并不可)。
+    # Degrade with evidence taking priority: keep the strong-majority chain, or
+    # failing that the one with the highest best_face_q, breaking ties by who
+    # appeared earlier. Everything else degrades to NEW, because a wrong split can
+    # be recovered from and a wrong merge cannot.
     for violation in violations:
         chains = {c: book.store.get_chain(book.store.canonical_chain(
             book.store.chain_ref(session_id, c))) for c in violation.cast_ids}

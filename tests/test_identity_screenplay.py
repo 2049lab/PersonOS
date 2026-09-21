@@ -1,4 +1,5 @@
-"""V2 一路剧本(JSON 协议):parse_clip_output 校验 + build_clip_prompt(离线,不联网)。"""
+"""V2 single-pass screenplay (JSON protocol): parse_clip_output validation plus
+build_clip_prompt (offline, no network)."""
 
 from __future__ import annotations
 
@@ -49,23 +50,23 @@ def test_markdown_fenced_json_tolerated():
 
 def test_invalid_json_flagged_not_crash():
     s = parse_clip_output("not json at all", duration_sec=30.0)
-    assert not s.parsed_ok and any("JSON 解析失败" in i for i in s.issues)
+    assert not s.parsed_ok and any("JSON parse failed" in i for i in s.issues)
 
 
 def test_bad_records_skipped_to_issues():
     raw = json.dumps({
         "casts": [{"id": "P1", "desc": "x"}],
         "lines": [
-            {"t0": 0, "t1": 1, "who": "P9", "kind": "speech", "text": "hi"},   # 未声明 cast
-            {"t0": 0, "t1": 1, "who": "P1", "kind": "bogus", "text": "hi"},    # 坏 kind
-            {"t0": 0, "t1": 1, "who": "P1", "kind": "speech", "text": ""},     # 空文本
+            {"t0": 0, "t1": 1, "who": "P9", "kind": "speech", "text": "hi"},   # cast never declared
+            {"t0": 0, "t1": 1, "who": "P1", "kind": "bogus", "text": "hi"},    # bad kind
+            {"t0": 0, "t1": 1, "who": "P1", "kind": "speech", "text": ""},     # empty text
         ],
         "noms": [{"id": "P1", "t": 1, "pos": "weird"}],
     })
     s = parse_clip_output(raw)
     assert s.parsed_ok
     assert len(s.lines) == 0 and len(s.issues) == 3
-    assert s.nominations[0].pos == ""                     # 非法 pos 归空
+    assert s.nominations[0].pos == ""                     # an illegal pos is blanked out
 
 
 def test_env_kind_forces_who_env():

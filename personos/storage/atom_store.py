@@ -1,7 +1,10 @@
-"""原子存储:指向 cell 的检索单元,upsert 语义。向量单独列存,供 MaxSim 批量打分。
+"""Atom storage: the retrieval unit that points at a cell, with upsert semantics.
 
-多租户:实例按 user 绑定(构造注入 user_id),所有读写自动限定在该 user 内。user_id="" 为
-兼容旧库/单租户场景的默认命名空间。
+Vectors get their own column so MaxSim can score them in bulk.
+
+For multi-tenancy, an instance is bound to one user through the constructor and
+every read and write is confined to that user. user_id="" is the default
+namespace, kept for compatibility with older databases and single-tenant use.
 """
 
 from __future__ import annotations
@@ -14,10 +17,15 @@ from loguru import logger
 from ..models import MemoryAtom
 from .db import Database, blob_of, blob_param
 
-# VALUES(col) 写法:兼容 5.6/5.7/8.0 全版本(RedHub 代理报 5.6 协议,不用 8.0.19+ 的 AS new 别名);
-# embedding 走 UNHEX hex 通道(代理对 _binary 字面量非 binary-safe,见 db.blob_param)。
-# 链三列只进 INSERT、不进 ON DUPLICATE KEY UPDATE:重放 upsert 不抹链归属
-# (W2/remember 都写新 atom,本无碰撞;这是对将来重放路径的结构性保险)。
+# The VALUES(col) form works on 5.6, 5.7 and 8.0 alike. One database proxy we
+# deploy behind announces the 5.6 protocol, so the 8.0.19+ "AS new" alias is not
+# available to us.
+# embedding travels through the UNHEX hex channel, because that same proxy is not
+# binary-safe for _binary literals; see db.blob_param.
+# The three chain columns appear in the INSERT but deliberately not in the
+# ON DUPLICATE KEY UPDATE, so replaying an upsert cannot wipe out a chain
+# attribution. Nothing collides today — the write path and remember both insert
+# new atoms — so this is structural insurance for future replay paths.
 _UPSERT_SQL = (
     "INSERT INTO atoms(id, user_id, memcell_id, chain_id, prev_atom_id, next_atom_id, "
     "object_type, holder, recorded_at, updated_at, payload, embedding) "
@@ -42,7 +50,11 @@ class AtomStore:
                 atom.model_dump_json(), blob_param(emb_blob))
 
     def _existing_emb(self, atom_id: str, tx=None) -> bytes | None:
-        """读旧向量(embedding=None 复用);tx 传入时走同连接,事务内可见。"""
+        """Read the existing vector, which is reused when embedding is None.
+
+        When tx is given the read goes through the same connection, so it sees
+        what the transaction has written.
+        """
         q = tx if tx is not None else self.db
         row = q.fetch_one(
             "SELECT HEX(embedding) AS emb FROM atoms WHERE id=%s AND user_id=%s",
@@ -51,25 +63,31 @@ class AtomStore:
         return blob_of(row["emb"]) if row else None
 
     def upsert(self, atom: MemoryAtom, embedding: Optional[np.ndarray] = None) -> str:
-        """插入或整体替换一条原子。embedding 为 None 时保留原向量(remember 只改字段不重embed 时用)。"""
+        """Insert an atom or replace it wholesale.
+
+        When embedding is None the existing vector is kept, which is what remember
+        uses when it edits fields without re-embedding.
+        """
         emb_blob = (np.asarray(embedding, dtype=np.float32).tobytes()
                     if embedding is not None else self._existing_emb(atom.id))
         self.db.execute(_UPSERT_SQL, self._row_args(atom, emb_blob))
-        logger.info(f"原子 upsert id={atom.id} cell={atom.memcell_id} user={self.user_id or '(默认)'} "
+        logger.info(f"atom upsert id={atom.id} cell={atom.memcell_id} user={self.user_id or '(default)'} "
                     f"type={atom.object_type} holder={atom.holder}")
         return atom.id
 
     def upsert_many(self, items: list[tuple[MemoryAtom, Optional[np.ndarray]]]) -> int:
-        """批量 upsert,【单事务一次提交】(原子性):要么全可见、要么全不可见。
+        """Upsert in bulk, committing **once, in a single transaction**, so either
+        all of it is visible or none of it is.
 
-        W2 落库用它——一个 cell 的全部 atom 同进同出,快链读者不会读到"写了一半"的 cell。
+        This is what the write path uses: every atom of a cell arrives and departs
+        together, so a reader on the fast path never sees a half-written cell.
         """
         with self.db.transaction() as tx:
             for atom, embedding in items:
                 emb_blob = (np.asarray(embedding, dtype=np.float32).tobytes()
                             if embedding is not None else self._existing_emb(atom.id, tx))
                 tx.execute(_UPSERT_SQL, self._row_args(atom, emb_blob))
-        logger.info(f"原子 upsert_many 提交 {len(items)} 条(单事务)user={self.user_id or '(默认)'}")
+        logger.info(f"atom upsert_many committed {len(items)} rows in one transaction user={self.user_id or '(default)'}")
         return len(items)
 
     def get(self, atom_id: str) -> MemoryAtom | None:
@@ -89,7 +107,7 @@ class AtomStore:
         return np.frombuffer(emb, dtype=np.float32)
 
     def list_by_cell(self, memcell_id: str) -> list[MemoryAtom]:
-        """一个 cell 的全部原子(时序=落库序,即 W2② 输出序)。"""
+        """Every atom of one cell, ordered as they were written, which is the order the extraction step produced them."""
         rows = self.db.fetch_all(
             "SELECT payload FROM atoms WHERE user_id=%s AND memcell_id=%s ORDER BY recorded_at, id",
             (self.user_id, memcell_id),
@@ -104,9 +122,13 @@ class AtomStore:
         return [MemoryAtom.model_validate_json(r["payload"]) for r in rows]
 
     def all_with_embeddings(self) -> list[tuple[MemoryAtom, np.ndarray]]:
-        """取本 user 所有带向量的原子,供快链双路批量 MaxSim 打分。
+        """All of this user's atoms that carry a vector, for batch MaxSim scoring on
+        both branches of the fast path.
 
-        链三列随行取回并覆盖模型字段(列是链归属的唯一事实源,防过期 payload 误导热路径)。
+        The three chain columns are fetched alongside and overwrite the
+        corresponding model fields, because the columns are the only source of
+        truth for chain attribution — this stops a stale payload from misleading
+        the hot path.
         """
         rows = self.db.fetch_all(
             "SELECT payload, HEX(embedding) AS emb, chain_id, prev_atom_id, next_atom_id "

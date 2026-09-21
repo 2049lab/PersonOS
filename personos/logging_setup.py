@@ -1,7 +1,7 @@
-"""结构化日志落盘 + trace-id 贯穿一次请求(dev 原则 §3)。
+"""Structured logs written to disk + a trace id threaded through one request.
 
-用 loguru 的 contextualize 注入 trace_id,而非 patcher——后者在 enqueue 下会丢
-上下文(此前 pipecat 项目踩过)。
+We inject trace_id with loguru's contextualize rather than a patcher — the latter
+loses context under enqueue (we got burned by this on an earlier project).
 """
 
 from __future__ import annotations
@@ -13,7 +13,8 @@ from pathlib import Path
 from loguru import logger
 
 _configured = False
-_reinstalled = False   # 文件 sink 补挂只做一次(redinfra 掀翻是 import 期一次性动作)
+_reinstalled = False   # Re-adding the file sink happens once (the platform logging
+                       # library tears sinks down only once, at import time)
 
 _FMT = (
     "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <5}</level> "
@@ -22,14 +23,16 @@ _FMT = (
 
 
 def _file_sink(log_dir: Path) -> dict:
-    """按天轮转的文件 sink 配置;setup 与补挂共用一份,行为不漂移。"""
+    """Config for the daily-rotating file sink; setup and the later re-add share this
+    one definition so their behavior can't drift apart."""
     return dict(sink=log_dir / "personos_{time:YYYY-MM-DD}.log",
                 format=_FMT, level="DEBUG",
                 rotation="00:00", retention="14 days", encoding="utf-8")
 
 
 def _redinfra_ready() -> bool:
-    """redinfra 是否已初始化日志(已装它的 stdout xray sink)。未装/不可用 → False。"""
+    """Has the platform logging library already initialized logging (i.e. installed its
+    own stdout tracing sink)? Not installed / unavailable -> False."""
     try:
         import redinfra.log.logger as _rl
         return bool(getattr(_rl, "_initialized", False))
@@ -38,34 +41,40 @@ def _redinfra_ready() -> bool:
 
 
 def setup_logging(log_dir: Path, level: str = "INFO") -> None:
-    """幂等初始化:控制台 + 按天轮转的文件 sink,格式含 trace_id。
+    """Idempotent init: console + daily-rotating file sink, with trace_id in the format.
 
-    关键:若 redinfra 已先于本函数装好 stdout xray sink(某些 pod 启动序会在 app 之前
-    auto-init),**绝不 logger.remove() 掀翻它**——否则容器内业务日志再也进不了 xray
-    (redinfra init 幂等不会重装)。此时只补文件 sink,stdout 交给 redinfra。
+    The key point: if the platform logging library already installed its stdout tracing
+    sink before this function runs (in some pods the startup order auto-inits it before
+    the app), **never tear it down with logger.remove()** — otherwise application logs
+    inside the container never reach the tracing backend again (that library's init is
+    idempotent and will not reinstall). In that case we only add the file sink and
+    leave stdout to it.
     """
     global _configured
     if _configured:
         return
     log_dir.mkdir(parents=True, exist_ok=True)
-    logger.configure(extra={"trace_id": "-"})  # 缺省 trace_id,避免 file sink 格式 KeyError
+    logger.configure(extra={"trace_id": "-"})  # Default trace_id, so the file sink format never raises KeyError
     if _redinfra_ready():
-        logger.add(**_file_sink(log_dir))       # 保留 redinfra 的 stdout sink,只补落盘
+        logger.add(**_file_sink(log_dir))       # Keep the platform's stdout sink, only add on-disk logging
     else:
-        logger.remove()                         # 本地/正常序:自建 stderr+file;redinfra 若后跑会自行重配 stdout
+        logger.remove()                         # Local / normal order: build our own stderr+file; if the platform
+                                                # library runs later it will reconfigure stdout itself
         logger.add(sys.stderr, format=_FMT, level=level)
         logger.add(**_file_sink(log_dir))
     _configured = True
 
 
 def _xray_patcher(record: dict) -> None:
-    """loguru 全局 patcher:先跑 redinfra 的 inject_context(填 cat/userId 等),再用本请求的
-    trace_id 覆盖 xrayTraceId——让一次请求跨 ingest/recall 各 worker 线程的日志共用一个 id,
-    日志中心据此把请求串起来,且与 langfuse trace 同 id 可互跳。绝不抛。"""
+    """Global loguru patcher: first run the platform's inject_context (which fills in
+    userId and the tracing correlation fields), then overwrite the trace id with this
+    request's trace_id — so all logs of one request share a single id across the
+    ingest/recall worker threads, the log backend can stitch the request together, and
+    the id matches the langfuse trace so you can jump between the two. Never raises."""
     try:
         from redinfra.log.context_injector import inject_context
         inject_context(record)
-    except Exception:   # noqa: BLE001  redinfra 不可用:至少保证下面几个键存在
+    except Exception:   # noqa: BLE001  Platform library unavailable: at least make sure these keys exist
         for k in ("xrayTraceId", "catRootId", "catParentId", "catMsgId", "userId"):
             record["extra"].setdefault(k, "")
     try:
@@ -78,12 +87,16 @@ def _xray_patcher(record: dict) -> None:
 
 
 def reinstall_file_sink(log_dir: Path) -> None:
-    """Redis 接入后补挂文件 sink + 安装带请求 trace_id 的 patcher(幂等,只补一次)。
+    """After wiring up Redis, re-add the file sink and install the patcher that carries
+    the request trace_id (idempotent, done only once).
 
-    redinfra.redis.pool 在 import 时执行 init_logger() → logger.remove() 掀翻进程里
-    全部 loguru sink、并把 patcher 设成它自己的 inject_context(xrayTraceId 恒空,因我们不走
-    thrift)。建池后调用本函数:①补回文件 sink(落盘);②把 patcher 换成 _xray_patcher,
-    给每条日志灌本请求的 trace_id。容器内平台采集走 redinfra 的 stdout sink,两侧并存。
+    The platform's Redis pool module runs init_logger() at import time, which calls
+    logger.remove() — tearing down every loguru sink in the process — and sets the
+    patcher to its own inject_context (whose trace id stays empty, because we don't go
+    through its RPC layer). Call this function after creating the pool to: (1) re-add
+    the file sink so logs hit disk again; (2) swap the patcher for _xray_patcher so
+    every log line carries this request's trace_id. Inside the container the platform's
+    stdout sink still does the collecting, so both coexist.
     """
     global _reinstalled
     if _reinstalled or not _configured:
@@ -91,11 +104,11 @@ def reinstall_file_sink(log_dir: Path) -> None:
     _reinstalled = True
     log_dir.mkdir(parents=True, exist_ok=True)
     logger.add(**_file_sink(log_dir))
-    logger.configure(patcher=_xray_patcher)     # 覆盖 redinfra 的 patcher(handlers 不动)
+    logger.configure(patcher=_xray_patcher)     # Replace the platform's patcher (handlers untouched)
 
 
 @contextmanager
 def trace(trace_id: str):
-    """把一次请求的 trace_id 绑到该作用域内所有日志。"""
+    """Bind one request's trace_id to every log line emitted inside this scope."""
     with logger.contextualize(trace_id=trace_id):
         yield

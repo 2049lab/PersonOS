@@ -1,11 +1,15 @@
-"""对外记忆服务 API(外部 agent 调用的稳定契约)。
+"""The public memory service API (the stable contract external agents call).
 
-设计铁律:
-- 只给"记忆本身有意义"的字段;凡返回的记忆条目必带 atom_id + evidence_refs(可溯源=可信基础)。
-- 不下发任何内部量(打分 breakdown/score/tier/salience、prompt/raw、深轨 steps、full state)。
-- 写侧收口(ingest),读侧放权(recall / trace)。
-- 【多租户】先 POST /users/register 拿 token;此后所有记忆操作带 X-User-Token 头,
-  只能读写该 user 自己的记忆(user 内跨会话共享,跨 user 由 store 层物理隔离)。
+Hard design rules:
+- Only expose fields that are meaningful as memory; every memory item returned carries
+  atom_id + evidence_refs (traceable = the basis for trusting it).
+- Never hand out internal quantities (scoring breakdown/score/tier/salience, prompts and
+  raw output, deep-track steps, full state).
+- The write side is narrow (ingest); the read side is generous (recall / trace).
+- **Multi-tenancy**: POST /users/register first to get a token; every memory operation
+  afterwards carries the X-User-Token header and can only read and write that user's own
+  memory (shared across sessions within a user, physically isolated between users at the
+  store layer).
 """
 
 from __future__ import annotations
@@ -36,90 +40,112 @@ from personos.session_scope import scoped_session, valid_user_id
 from .signing import verify_signature
 from personos.online.views import memory_view as _memory_view
 
-# route_class:中心化把每个 handler 的返回响应包成 {code,data,msg}(不逐个改端点体)
-# dependencies:router 级 AK/SK 验签,先于各端点 _ctx 跑;pytest 下 no-op。所有 /api/v1 接口(含 register)都验签。
+# route_class: centrally wraps whatever each handler returns into {code, data, msg}, so
+# no endpoint body has to be changed.
+# dependencies: AK/SK request signing at the router level, which runs before each
+# endpoint's _ctx; it is a no-op under pytest. Every /api/v1 endpoint (including
+# register) is signed.
 router = APIRouter(prefix="/api/v1", route_class=EnvelopeRoute,
                    dependencies=[_Depends(verify_signature)])
 
-# 对外"依据记忆"收敛:精排后前 N 个单元的命中 atoms(内部作答吃全部材料单元,对外只给一小撮)
+# How much "supporting memory" we expose: the matched atoms of the top N units after
+# reranking (internally the answer consumes every material unit, externally we return
+# only a handful).
 _PUBLIC_FAST_MEMORIES = 10
-# 单批 ingest 上限:防单个 task 拖太久(每批 1 次 W1 判界,转移还要 W2 织写)
+# Cap on one ingest batch: keeps a single task from running too long (each batch costs
+# one W1 boundary decision, and a boundary shift additionally costs the W2 weave).
 _MAX_INGEST_MESSAGES = 20
 
 
 def _ctx(x_user_token: str = Header(default="")) -> UserContext:
-    """token → 该 user 的绑定上下文。缺失/未知 → 401。"""
+    """token -> that user's bound context. Missing or unknown -> 401."""
     ctx = rt.ctx_by_token(x_user_token)
     if ctx is None:
-        raise HTTPException(status_code=401, detail="X-User-Token 缺失或无效,请先 POST /api/v1/users/register")
+        raise HTTPException(status_code=401, detail="X-User-Token is missing or invalid, POST /api/v1/users/register first")
     return ctx
 
 
 def _sid(caller: str, session_id: str) -> str:
-    """入口处的调用方改写 + id 卫生(不合法 → 400;规则见 session_scope)。"""
+    """Caller scoping plus id hygiene at the entry point (invalid -> 400; the rules live
+    in session_scope)."""
     try:
         return scoped_session(caller, session_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
-# —— 请求体 ——
+# -- Request bodies --
 class RegisterBody(BaseModel):
-    user_id: str | None = None    # 可选;缺省自动生成。仅字母/数字/下划线/连字符,≤128
+    user_id: str | None = None    # Optional; generated automatically when absent. Letters/digits/underscore/hyphen only, <=128
 
 
 class IngestMessage(BaseModel):
-    speaker: str                  # 说话人:与助手对话的本人固定 "user";多参与者对话用原话里的名字
-    text: str = ""                # 消息文本(图片/视频消息可空)
-    image_b64: str | None = None  # 可选:base64 图片(带 data:image/...;base64, 前缀或纯 base64 均可)
+    speaker: str                  # Who is speaking: the person talking to the assistant is always "user"; in a multi-party conversation use the name from the transcript
+    text: str = ""                # Message text (may be empty for an image or video message)
+    image_b64: str | None = None  # Optional: a base64 image (with a data:image/...;base64, prefix or as plain base64)
     image_content_type: str = "image/jpeg"
-    # 视频 clip(clip 太大不内联走队列,二选一;向前兼容:老调用不填):
-    # - video_url:任意 http(s) 可下载地址(含调用方自己桶的预签名 URL)——**推荐**,不要求传我们桶;
-    #   消费侧下载后转存我方 OSS(内容寻址去重),供 MLLM 签名访问 + evidence 溯源留底。
-    # - video_oss_key:已在我方 OSS 时的快捷路径(跳过下载转存)。
-    # 一条视频消息 = 一个 clip;消费侧逐 clip 跑身份管线,session_end 时统一终审落记忆。
+    # A video clip (clips are too large to inline into the queue, so pick one of the two;
+    # backward compatible: older callers set neither):
+    # - video_url: any downloadable http(s) address, including a pre-signed URL from the
+    #   caller's own bucket — **recommended**, we do not require uploading to our bucket;
+    #   the consumer downloads it and re-stores it in our object storage (deduplicated by
+    #   content address) so the multimodal model can access it via a signed URL and the
+    #   evidence trail keeps a copy.
+    # - video_oss_key: the shortcut when the clip already lives in our object storage
+    #   (skips the download and re-store).
+    # One video message = one clip; the consumer runs the identity pipeline clip by clip
+    # and does a single final review at session_end before writing to memory.
     video_url: str | None = None
     video_oss_key: str | None = None
-    clip_index: int = 0           # 调用方编号(仅元数据;真实 clip 序号由消费侧全局单调计,防交错撞车)
+    clip_index: int = 0           # The caller's own numbering (metadata only; the real clip index is assigned by a globally monotonic counter on the consumer side, so interleaving can't collide)
     duration_sec: float | None = None
 
 
 class CallerContext(BaseModel):
-    """调用方业务信息容器(统一口子):把业务方传入的场景/词表都收进来。
+    """A container for the caller's business information (one place for all of it): the
+    scenario and vocabularies the calling application passes in.
 
-    - scenario:一段自由文本,描述业务场景与记忆侧重(如"饮食健康 App,关注用户饮食偏好与忌口")。
-      注入写入(切段/episode/atom)与召回(改写/作答/深轨)及画像整理的高杠杆 LLM 环节——
-      只调关注度/详略,不改事实、不编造、不漏。空 = 走默认链路(逐字节不变)。
-    - task_type:episode 分类候选词表(原 IngestBody 顶层字段迁入此处);召回请求填了也不用。
+    - scenario: free text describing the business scenario and what memory should focus
+      on (e.g. "a diet and health app, interested in the user's food preferences and
+      dietary restrictions"). It is injected into the high-leverage LLM stages of writing
+      (segmentation / episode / atom), recall (rewriting / answering / deep track) and
+      profile consolidation — it only adjusts attention and level of detail; it never
+      changes facts, invents anything, or drops anything. Empty = the default path,
+      byte for byte.
+    - task_type: the candidate vocabulary for episode classification (moved here from the
+      old top-level IngestBody field); it is ignored if a recall request sets it.
     """
     scenario: str = ""
     task_type: list[str] | None = None
 
 
 class IngestBody(BaseModel):
-    caller: str = ""              # 调用方标识(多调用方 session_id 可能重复,入口处拼前缀隔离)
-    session_id: str               # 仅字母/数字/下划线/连字符/点,≤95(禁冒号:Redis 键分隔符)
-    messages: list[IngestMessage] # 一批消息(原子):整批并入当前段或整批开启新段,批内不切
-    context: CallerContext | None = None  # 可选:业务方场景 + 分类词表(见 CallerContext)
+    caller: str = ""              # The calling party's identifier (different callers may use the same session_id, so we prefix it at the entry point to isolate them)
+    session_id: str               # Letters/digits/underscore/hyphen/dot only, <=95 (no colon: it's the Redis key separator)
+    messages: list[IngestMessage] # A batch of messages (atomic): the whole batch joins the current segment or the whole batch starts a new one; a batch is never split
+    context: CallerContext | None = None  # Optional: the caller's scenario + classification vocabulary (see CallerContext)
 
 
 class RecallBody(BaseModel):
-    caller: str = ""              # 同 ingest:须与写入时一致,才能命中同一会话的上下文
+    caller: str = ""              # Same as ingest: it must match what was used at write time to reach the same session's context
     session_id: str
     query: str
-    # 可选:随问题带一张图(多模态召回只支持文字+图片,视频暂不支持)。带图则在 R0 之前多跑
-    # 一道视觉理解改写——把图里的人/场景写进 query,后面的纯文本链路才用得上视觉信息。
-    image_b64: str | None = None          # 带 data:image/...;base64, 前缀或纯 base64 均可
+    # Optional: send one image along with the question (multimodal recall supports text +
+    # image; video is not supported yet). With an image we run one extra visual
+    # understanding rewrite before R0 — it writes the people and scene from the image
+    # into the query, which is the only way the text-only pipeline downstream can use the
+    # visual information.
+    image_b64: str | None = None          # With a data:image/...;base64, prefix or as plain base64
     image_content_type: str = "image/jpeg"
-    mode: str = "auto"           # auto(快链,核判不过自动升深轨)| fast(只快链)| deep(深轨直达)
-    top_k: int = 30              # R1 atom 池上限(两路 RRF 融合后保留数;材料单元由此派生)
-    context: CallerContext | None = None  # 可选:业务方场景(召回只用 scenario;task_type 忽略)
+    mode: str = "auto"           # auto (fast path, escalating to the deep track when adjudication fails) | fast (fast path only) | deep (straight to the deep track)
+    top_k: int = 30              # Cap on the R1 atom pool (how many survive the RRF fusion of the two retrieval paths; material units are derived from it)
+    context: CallerContext | None = None  # Optional: the caller's scenario (recall uses scenario only; task_type is ignored)
 
 
 class SessionEndBody(BaseModel):
-    caller: str = ""              # 同 ingest
+    caller: str = ""              # Same as ingest
     session_id: str
-    context: CallerContext | None = None  # 可选:业务方场景 + 尾段分类词表(见 CallerContext)
+    context: CallerContext | None = None  # Optional: the caller's scenario + the classification vocabulary for the trailing segment (see CallerContext)
 
 
 @router.get("/health")
@@ -134,9 +160,10 @@ def health():
 
 @router.post("/users/register", status_code=201)
 def register(body: RegisterBody):
-    """注册用户,签发唯一 token。token 只在此响应完整返回一次,调用方须持久保存。"""
+    """Register a user and issue a unique token. The token is returned in full exactly
+    once, in this response, so the caller must store it persistently."""
     try:
-        uid = valid_user_id(body.user_id)          # 字符集不合法 → 400(区别于 409 已存在)
+        uid = valid_user_id(body.user_id)          # Invalid character set -> 400 (as opposed to 409 for already exists)
     except ValueError as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
     try:
@@ -145,15 +172,19 @@ def register(body: RegisterBody):
         return JSONResponse(status_code=409, content={"error": str(e)})
 
 
-# 图片入队体积上限:图片以 base64 随消息进 Redis 队列(暂存,消费即出队),超限拒收
+# Size cap for images going into the queue: an image rides along with its message as
+# base64 in the Redis queue (parked there until consumption dequeues it), so anything
+# larger is rejected.
 _MAX_IMAGE_BYTES = 5 * 1024 * 1024
 
 
 def _decode_image_b64(value: str | None, where: str) -> tuple[bytes | None, str | None]:
-    """校验并归一化图片入参,返回 (字节, 去前缀的纯 base64);value 为空则 (None, None)。
+    """Validate and normalize an image parameter, returning (bytes, the plain base64 with
+    any prefix stripped); an empty value gives (None, None).
 
-    /ingest 与 /recall 共用一份:两处各写一遍必然漂(上限、data: 前缀、validate 开关),
-    而"哪种图能传"是对外契约的一部分,必须一致。
+    /ingest and /recall share this one implementation: writing it twice would inevitably
+    drift (the size cap, the data: prefix, the validate flag), and "which images you may
+    send" is part of the public contract, so the two must agree.
     """
     if not value:
         return None, None
@@ -161,56 +192,74 @@ def _decode_image_b64(value: str | None, where: str) -> tuple[bytes | None, str 
     try:
         decoded = base64.b64decode(raw, validate=True)
     except Exception:
-        raise HTTPException(status_code=400, detail=f"{where} 不是合法的 base64")
+        raise HTTPException(status_code=400, detail=f"{where} is not valid base64")
     if len(decoded) > _MAX_IMAGE_BYTES:
         raise HTTPException(
-            status_code=413, detail=f"{where} 图片过大(>{_MAX_IMAGE_BYTES // 1024 // 1024}MB)")
+            status_code=413, detail=f"{where} image is too large (>{_MAX_IMAGE_BYTES // 1024 // 1024}MB)")
     return decoded, raw
 
 
-# 视频 clip 体积/时长上限(与消费侧 video_ingest 同口径)
+# Size and duration caps for a video clip (the same numbers the consumer side,
+# video_ingest, uses)
 _MAX_CLIP_BYTES = int(os.environ.get("PERSONOS_VIDEO_MAX_BYTES", str(200 * 1024 * 1024)))
 _MAX_CLIP_DURATION_S = float(os.environ.get("PERSONOS_VIDEO_MAX_DURATION_S", "150"))
-# 上游可拉取上限:剧本 MLLM 是把**签名 URL** 交给模型服务、由它自己去下载整段视频的。
-# 它那边有自己的下载窗口——实测 106MB(2min@7.3Mbps)必现 `Download multimodal file timed out`,
-# 55MB 则长期稳定。所以真正的约束不是我们能不能传,而是**上游拉不拉得动**,这比 _MAX_CLIP_BYTES
-# (我方存储口径)严得多,必须单独一道。取 64MB:安全高于已验证可用的 55MB,远低于已验证失败的 106MB。
-# 超限在入口就 400 让调用方降码率/切短,而不是让它收了 202 再在几分钟后静默失败。
+# The cap on what the upstream can fetch: for the script stage we hand the multimodal
+# model provider a **signed URL** and it downloads the whole video itself.
+# It has its own download window — measured, 106MB (2 min @ 7.3Mbps) always produced
+# `Download multimodal file timed out`, while 55MB was stable over a long period. So the
+# real constraint is not whether we can upload it but **whether the upstream can pull
+# it**, which is far stricter than _MAX_CLIP_BYTES (our own storage limit) and therefore
+# needs its own check. We use 64MB: safely above the 55MB that is proven to work and far
+# below the 106MB that is proven to fail.
+# Anything larger gets a 400 at the entry point, telling the caller to lower the bitrate
+# or cut shorter clips — better than accepting a 202 and failing silently minutes later.
 _MAX_CLIP_UPSTREAM_BYTES = int(os.environ.get("PERSONOS_VIDEO_UPSTREAM_MAX_BYTES",
                                               str(64 * 1024 * 1024)))
 
 
 def _too_big_for_upstream(total: int) -> str:
-    """体积超上游可拉取上限 → 返回给调用方的错误原因(含可操作建议);通过则空串。"""
+    """Size above what the upstream can fetch -> the error reason returned to the caller
+    (with actionable advice); an empty string means it passed."""
     if not total or total <= _MAX_CLIP_UPSTREAM_BYTES:
         return ""
-    return (f"体积 {total / 1024 / 1024:.1f}MB 超过上限 "
-            f"{_MAX_CLIP_UPSTREAM_BYTES / 1024 / 1024:.0f}MB(模型服务拉取会超时)"
-            f"——请降低码率或切成更短的 clip")
+    return (f"size {total / 1024 / 1024:.1f}MB exceeds the {_MAX_CLIP_UPSTREAM_BYTES / 1024 / 1024:.0f}MB "
+            f"limit (the upstream model service would time out fetching it) "
+            f"-- please lower the bitrate or cut shorter clips")
 
 
-# 外链预检超时要短,别拖慢入口
+# The pre-check on an external URL must time out quickly, so it doesn't slow the entry
+# point down
 _URL_PRECHECK_TIMEOUT_S = float(os.environ.get("PERSONOS_VIDEO_URL_PRECHECK_TIMEOUT_S", "5"))
 
 
 def _precheck_video_url(url: str) -> str:
-    """外链快速预检(**带 Range 的 GET,只取 1 字节**):返回空串=通过,否则返回给调用方的错误原因。
+    """A quick pre-check on an external URL (**a GET with a Range header that fetches one
+    byte**): an empty string means it passed, otherwise the error reason returned to the
+    caller.
 
-    为什么在入口做:消费是异步的,调用方拿到 202 就走了;地址写错/已过期若只在消费侧才发现,
-    调用方毫不知情(只能靠留痕事后查)。入口花几百毫秒探一下,常见错误当场报。
+    Why do it at the entry point: consumption is asynchronous, so the caller is gone as
+    soon as it has its 202; if a mistyped or expired address were only discovered on the
+    consumer side, the caller would have no idea (their only recourse would be digging
+    through the failure records afterwards). Spending a few hundred milliseconds probing
+    at the entry point reports the common mistakes on the spot.
 
-    为什么不用 HEAD(踩过):**预签名 URL 的签名绑定 HTTP 方法**,签的是 GET 时 HEAD 一律 403 ——
-    用 HEAD 会把最常见的合法外链(调用方自己桶的预签名地址)全部误杀。带 Range 的 GET 方法匹配,
-    且只传 1 字节,代价与 HEAD 相当。
-    总体取向仍是"宁放勿杀":只拦明确的 4xx/5xx 与超大声明,任何异常/抖动一律放行,交消费侧真下载判定。
+    Why not HEAD (we got burned): **a pre-signed URL's signature is bound to the HTTP
+    method**, so when it was signed for GET, HEAD always returns 403 — using HEAD would
+    wrongly reject the most common kind of valid external link, a pre-signed address from
+    the caller's own bucket. A GET with a Range header matches the method and transfers
+    just one byte, so it costs about the same as HEAD.
+    The overall stance stays "let through rather than reject": we only block a clear
+    4xx/5xx or a declared size over the limit, and any exception or flakiness is let
+    through for the real download on the consumer side to judge.
     """
     try:
         import httpx
         r = httpx.get(url, headers={"Range": "bytes=0-0"},
                       timeout=_URL_PRECHECK_TIMEOUT_S, follow_redirects=True)
         if r.status_code >= 400:
-            return f"不可访问(HTTP {r.status_code})"
-        # 206 带 Content-Range: bytes 0-0/<total>;200(对端忽略 Range)则 Content-Length 即全长
+            return f"is not reachable (HTTP {r.status_code})"
+        # A 206 carries Content-Range: bytes 0-0/<total>; a 200 (the peer ignored Range)
+        # means Content-Length is the full length
         total = 0
         cr = r.headers.get("content-range") or ""
         if "/" in cr:
@@ -218,73 +267,93 @@ def _precheck_video_url(url: str) -> str:
         elif r.status_code == 200:
             total = int(r.headers.get("content-length") or 0)
         if total and total > _MAX_CLIP_BYTES:
-            return f"体积 {total} 超过上限 {_MAX_CLIP_BYTES} 字节"
+            return f"size {total} exceeds the limit of {_MAX_CLIP_BYTES} bytes"
         err = _too_big_for_upstream(total)
         if err:
             return err
-    except Exception:  # noqa: BLE001  抖动/对端不支持 Range → 放行,交给消费侧真下载判定
+    except Exception:  # noqa: BLE001  Flakiness, or a peer that doesn't support Range -> let it through and leave the verdict to the real download on the consumer side
         return ""
     return ""
 
 
 @router.post("/ingest", status_code=202)
 def ingest(body: IngestBody, ctx: UserContext = Depends(_ctx)):
-    """喂一批消息(入队,fire-and-forget):整批进【该会话的持久有序队列】,dispatcher 异步 FIFO 消费。
+    """Feed in a batch of messages (enqueue, fire-and-forget): the whole batch goes into
+    **that session's durable ordered queue**, and the dispatcher consumes it FIFO
+    asynchronously.
 
-    **整批原子**:这批消息地位等于以前的一句——消费时要么整批并入当前话题段,要么整批开启
-    新段,批内(如一对 QA)永远不切进两个 cell。批大小 1-20,超出 → 400。
+    **The batch is atomic**: this batch plays the role a single utterance used to — at
+    consumption time it either joins the current topic segment as a whole or starts a new
+    segment as a whole, and a batch (a Q&A pair, say) is never split across two cells.
+    Batch size is 1-20; anything else -> 400.
 
-    调用方无需"等上一批 done 再送下一批"——顺序/不丢/不重复由消费系统保证(见 ingest_worker):
-    同会话消息按 seq 排队、单飞消费者按序处理、可靠出队(消费成功才 ack)、游标去重。
-    消费有延后性(积压时),但所有消息保证被正确消费一次。caller 非空时 session_id 改写为
-    f"{caller}:{session_id}",不同调用方同名会话天然隔离。返回 msg_id + seq(不再回逐批段闭合
-    结果;进度可查 GET /api/v1/queue/status)。
+    Callers do not need to "wait for the previous batch to finish before sending the next
+    one" — ordering, no loss and no duplication are guaranteed by the consumption system
+    (see ingest_worker): messages of one session queue up by seq, a single-flight
+    consumer processes them in order, dequeuing is reliable (a message is only acked
+    after it was consumed successfully) and the cursor dedups. Consumption can lag (when
+    there is a backlog), but every message is guaranteed to be consumed correctly exactly
+    once. When caller is non-empty the session_id is rewritten to
+    f"{caller}:{session_id}", so identically named sessions from different callers are
+    isolated automatically. Returns msg_id + seq (it no longer returns per-batch segment
+    closing results; check progress with GET /api/v1/queue/status).
     """
     if not body.messages or len(body.messages) > _MAX_INGEST_MESSAGES:
         raise HTTPException(
             status_code=400,
-            detail=f"messages 须为 1-{_MAX_INGEST_MESSAGES} 条,收到 {len(body.messages)}")
+            detail=f"messages must contain 1-{_MAX_INGEST_MESSAGES} items, got {len(body.messages)}")
     sid = _sid(body.caller, body.session_id)
-    # 入口即校验并归一图片(坏 base64→400 / 过大→413);存纯 base64 进消息载荷(消费侧 decode 看图)
-    # 视频批与文本/图片批不混:一批要么全视频(kind=video,逐 clip 走身份管线)、要么全文本/图片
-    # (kind=ingest,走 feed_batch)。视频 clip 太大不内联——只带 URL/OSS key,消费侧异步取。
+    # Validate and normalize images right at the entry point (bad base64 -> 400, too
+    # large -> 413); the plain base64 goes into the message payload and the consumer
+    # decodes it to look at the image.
+    # Video batches and text/image batches are never mixed: a batch is either all video
+    # (kind=video, each clip goes through the identity pipeline) or all text/image
+    # (kind=ingest, which goes through feed_batch). Video clips are too large to inline —
+    # the message carries only a URL or storage key and the consumer fetches it
+    # asynchronously.
     def _is_vid(m) -> bool:
         return bool(m.video_url or m.video_oss_key)
 
     is_video = any(_is_vid(m) for m in body.messages)
     if is_video and any(not _is_vid(m) for m in body.messages):
-        raise HTTPException(status_code=400, detail="一批消息不能混合视频与文本/图片,请分批发送")
+        raise HTTPException(status_code=400, detail="one batch cannot mix video with text/image_b64, send them in separate batches")
     msgs: list[dict] = []
     for i, m in enumerate(body.messages):
         if not m.speaker.strip():
-            raise HTTPException(status_code=400, detail=f"messages[{i}].speaker 不能为空")
+            raise HTTPException(status_code=400, detail=f"messages[{i}].speaker must not be empty")
         if _is_vid(m):
-            # 同一条消息不得既带视频又带文本/图片——否则另一半会被静默丢弃(宁可明确拒绝)
+            # A single message must not carry both video and text/image — otherwise one
+            # of the two would be dropped silently, and an explicit rejection is better.
             if m.text.strip() or m.image_b64:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"messages[{i}] 不能同时带视频与 text/image_b64,请拆成两条消息分批发送")
+                    detail=f"messages[{i}] cannot carry video and text/image_b64 at once, split it into two messages sent in separate batches")
             url = (m.video_url or "").strip()
             if url and not url.startswith(("http://", "https://")):
                 raise HTTPException(status_code=400,
-                                    detail=f"messages[{i}].video_url 须是 http(s) 地址")
-            # 调用方给的时长若已超限,入口就拒(便宜的一道;真实时长消费侧还会再验一次)
+                                    detail=f"messages[{i}].video_url must be an http(s) address")
+            # If the duration the caller declared already exceeds the limit, reject at the
+            # entry point (a cheap check; the consumer verifies the real duration again)
             if m.duration_sec and m.duration_sec > _MAX_CLIP_DURATION_S:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"messages[{i}] 视频时长 {m.duration_sec}s 超过上限 "
-                           f"{_MAX_CLIP_DURATION_S}s,请切成更短的 clip")
-            # 外链可达性预检(带 Range 的 GET,短超时):地址失效/超大立刻报错,
-            # 不让调用方收了 202 才悄悄失败
+                    detail=f"messages[{i}] video duration {m.duration_sec}s exceeds the "
+                           f"{_MAX_CLIP_DURATION_S}s limit, please cut shorter clips")
+            # Reachability pre-check on the external link (a GET with Range and a short
+            # timeout): a dead address or an oversized clip errors out immediately,
+            # instead of the caller getting a 202 and then failing quietly
             if url:
                 err = _precheck_video_url(url)
                 if err:
                     raise HTTPException(status_code=400,
                                         detail=f"messages[{i}].video_url {err}")
             else:
-                # 我方 key:体积直接问 OSS(一次 head,无下载)。这条路径此前完全没校验——
-                # 调用方传个超大 clip 进来,要到几分钟后剧本 MLLM 挂了才知道。
-                # 取不到大小(key 不存在/OSS 抖动)一律放行,交消费侧判定(宁放勿杀)。
+                # Our own key: ask object storage for the size directly (one head
+                # request, no download). This path used to have no validation at all — a
+                # caller could push an oversized clip in and we'd only find out minutes
+                # later when the screenplay model failed.
+                # If the size can't be read (missing key, storage flaking) we always let
+                # it through for the consumer to judge (accept rather than reject).
                 try:
                     size = rt._media().object_size((m.video_oss_key or "").strip())
                 except Exception:  # noqa: BLE001
@@ -300,34 +369,39 @@ def ingest(body: IngestBody, ctx: UserContext = Depends(_ctx)):
         if not m.text.strip() and not m.image_b64:
             raise HTTPException(
                 status_code=400,
-                detail=f"messages[{i}] 须至少有 text / image_b64 / video_url(或 video_oss_key)之一")
+                detail=f"messages[{i}] must have at least one of text / image_b64 / video_url (or video_oss_key)")
         image_b64 = _decode_image_b64(m.image_b64, f"messages[{i}].image_b64")[1]
         msgs.append({"speaker": m.speaker.strip(), "text": m.text,
                      "image_b64": image_b64, "image_content_type": m.image_content_type})
-    # 背压:单会话队列积压超限则拒收(防刷屏会话撑爆队列),调用方降速重试
+    # Backpressure: reject once one session's queue backlog is over the limit (so a
+    # flooding session can't blow the queue up); the caller should slow down and retry
     if rt.queue_depth(ctx.user_id, sid) >= settings.max_queue_depth:
         return JSONResponse(status_code=503, headers={"Retry-After": "1"},
-                            content={"error": "该会话消息积压过多,请降速后重试"})
-    tid = uuid.uuid4().hex   # 端到端 trace_id:透传队列 → 消费用同 id 作 langfuse trace + 日志 xrayTraceId
+                            content={"error": "too many messages backed up on this session, slow down and retry"})
+    tid = uuid.uuid4().hex   # End-to-end trace_id: passed through the queue so consumption uses the same id for the langfuse trace and the log tracing id
     cc = body.context or CallerContext()
     try:
         msg_id, seq = rt.enqueue_message(
             ctx.user_id, sid,
             {"messages": msgs, "task_type": cc.task_type, "scenario": cc.scenario,
              "trace_id": tid}, kind="video" if is_video else "ingest")
-    except EnqueueBusy:   # 同会话入队严重争用超时:拒收让调用方重试(绝不硬上写坏顺序丢消息)
+    except EnqueueBusy:   # Severe contention enqueuing on this session timed out: reject and let the caller retry (never force it through and corrupt the order or lose a message)
         return JSONResponse(status_code=503, headers={"Retry-After": "1"},
-                            content={"error": "该会话入队繁忙,请稍后重试"})
+                            content={"error": "enqueuing on this session is busy, retry later"})
     return {"accepted": True, "msg_id": msg_id, "seq": seq,
             "queue_depth": rt.queue_depth(ctx.user_id, sid), "xrayTraceId": tid}
 
 
 @router.post("/session/end", status_code=202)
 def session_end(body: SessionEndBody, ctx: UserContext = Depends(_ctx)):
-    """会话结束(入队收尾任务):排在该会话既有消息之后,消费到它时强制闭合未闭合尾段。
+    """End of session (enqueues a wrap-up task): it queues behind the session's existing
+    messages, and when consumption reaches it, it force-closes the still-open trailing
+    segment.
 
-    走同一条有序队列 → "收尾"保证发生在所有先到消息被消费之后(不会先于未消费的 ingest 执行)。
-    caller 语义同 ingest。返回 msg_id + seq;回显原始 session_id(调用方自己的命名)。
+    Because it travels the same ordered queue, the wrap-up is guaranteed to happen after
+    every earlier message has been consumed (it can never run before an unconsumed
+    ingest). caller means the same thing as in ingest. Returns msg_id + seq, echoing back
+    the original session_id (the caller's own naming).
     """
     sid = _sid(body.caller, body.session_id)
     tid = uuid.uuid4().hex
@@ -342,7 +416,9 @@ def session_end(body: SessionEndBody, ctx: UserContext = Depends(_ctx)):
 
 @router.get("/queue/status")
 def queue_status(session_id: str, caller: str = "", ctx: UserContext = Depends(_ctx)):
-    """会话消费进度:depth=待消费积压,cursor=已消费到的最大 seq(调用方可判"我的 seq 消费了没")。"""
+    """Consumption progress of a session: depth = the backlog still to consume, cursor =
+    the largest seq consumed so far (so a caller can tell whether its own seq has been
+    consumed)."""
     sid = _sid(caller, session_id)
     mq = rt.msg_queue()
     return {"session_id": session_id, "depth": mq.depth(ctx.user_id, sid),
@@ -351,7 +427,8 @@ def queue_status(session_id: str, caller: str = "", ctx: UserContext = Depends(_
 
 @router.get("/tasks/{task_id}")
 def task_status(task_id: str, ctx: UserContext = Depends(_ctx)):
-    """查异步任务状态(只能查自己 user 的任务):pending|running|done|error。"""
+    """Query the status of an async task (only tasks belonging to your own user):
+    pending | running | done | error."""
     t = rt.get_task(task_id)
     if t is None or t.get("user_id") != ctx.user_id:
         return JSONResponse(status_code=404, content={"error": "unknown task", "task_id": task_id})
@@ -360,47 +437,64 @@ def task_status(task_id: str, ctx: UserContext = Depends(_ctx)):
 
 @router.post("/recall")
 def recall(body: RecallBody, ctx: UserContext = Depends(_ctx)):
-    """召回:快链一条龙(R0→R1→R2→R5草稿→R3'核判,核判不过自动升深轨)或深轨直达,返回作答 + 依据记忆。
+    """Recall: either the whole fast path (R0 -> R1 -> R2 -> R5 draft -> R3' adjudication,
+    escalating to the deep track automatically when adjudication fails) or straight to
+    the deep track; returns the answer plus the memories it rests on.
 
-    answer 是一段标准事实陈述(第三人称/中立/带绝对日期),由调用方组织成自己的对话。
-    verdict 是核判判级(ok=草稿通过对 / answer_defect=带指正重答后仍缺陷 / insufficient_material
-    =材料不足),critique 是核判指正——调用方可据此追问或换问法;retried 表示是否重答过。
-    每条 memory 内联 evidence(原文 + Q↔A),自带溯源。
+    answer is a plain statement of fact (third person, neutral, with absolute dates) that
+    the caller turns into its own dialogue.
+    verdict is the adjudication grade (ok = the draft passed / answer_defect = still
+    defective after being rewritten with the critique / insufficient_material = not
+    enough material), and critique is the adjudicator's criticism — the caller can use it
+    to ask a follow-up or rephrase; retried says whether the answer was rewritten.
+    Every memory inlines its evidence (the original text plus the Q&A), so it carries its
+    own provenance.
 
-    可随问题带一张图(image_b64):R0 之前先做一道视觉理解改写,把图里的人(与记忆里的人物对上)
-    和场景写进 query,后面的纯文本链路才用得上视觉信息。不带图则链路逐字节不变。
+    You may send one image along with the question (image_b64): before R0 we run one
+    visual understanding rewrite that writes the people in the image (matched against the
+    people in memory) and the scene into the query, which is what lets the text-only
+    pipeline downstream use the visual information. Without an image the pipeline is
+    unchanged, byte for byte.
     """
     if body.mode not in PUBLIC_MODES:
         return JSONResponse(status_code=400,
-                            content={"error": f"mode 只支持 {list(PUBLIC_MODES)}", "got": body.mode})
-    img, _ = _decode_image_b64(body.image_b64, "image_b64")   # 坏 base64→400 / 超大→413
+                            content={"error": f"mode only supports {list(PUBLIC_MODES)}", "got": body.mode})
+    img, _ = _decode_image_b64(body.image_b64, "image_b64")   # Bad base64 -> 400, too large -> 413
     if img is not None:
-        # 查询图**额外**做格式校验:它是查询输入,认不出格式则整个视觉理解无从谈起,
-        # 与其回 200 + 一个没用上图的答案(调用方无从察觉),不如当场告诉他图有问题。
-        # /ingest 的图片不加这道:那是**内容**,看不了就降级成纯文本,消息本身仍有价值。
+        # The query image gets an **extra** format check: it is query input, so if we
+        # can't recognize the format there is no visual understanding to speak of. Rather
+        # than returning a 200 plus an answer that quietly ignored the image (which the
+        # caller has no way to notice), we tell them right away that the image is bad.
+        # /ingest images don't get this check: there the image is **content**, and if we
+        # can't look at it the message degrades to text and still has value.
         from personos.storage.media._common import _detect_image_type
         if _detect_image_type(img[:32]) is None:
             raise HTTPException(status_code=400,
-                                detail="image_b64 不是可识别的图片(支持 jpeg/png/webp/gif/heic)")
+                                detail="image_b64 is not a recognizable image (supported: jpeg/png/webp/gif/heic)")
     sid = _sid(body.caller, body.session_id)
-    # 快照读:不排队、不等未消费的 ingest(以当前 DB 已提交态作答)。仅用 recall_gate 限流:
-    # sync 端点已在 anyio 线程内,直接在本线程跑 run_recall(不再 submit 到别池阻塞等 = 免双线程占用);
-    # 闸门上限 < anyio 线程池,recall 突发不占满线程拖垮探针,与 ingest 消费池天然隔离。
+    # A snapshot read: it neither queues nor waits for unconsumed ingests (it answers
+    # from whatever is committed in the DB right now). Only recall_gate limits it: the
+    # sync endpoint is already running on an anyio thread, so we run run_recall on this
+    # very thread (no submitting to another pool and blocking on it, which would occupy
+    # two threads). The gate's cap is below the anyio thread pool size, so a burst of
+    # recalls can't take every thread and drag the probes down, and it is naturally
+    # isolated from the ingest consumption pool.
     if not rt.recall_gate.try_enter():
         return JSONResponse(status_code=503, headers={"Retry-After": "1"},
-                            content={"error": "召回并发已满,请稍后重试"})
-    # 画像注入(空画像 → 空串,行为与今天逐字节一致):full→R0/深轨,traits→R5
+                            content={"error": "recall concurrency is at capacity, retry later"})
+    # Profile injection (an empty profile gives an empty string, so behavior is unchanged
+    # byte for byte): full goes to R0 and the deep track, traits goes to R5
     _pv = ProfileStore(rt.db, ctx.user_id).current()
     p_full = render_profile(_pv.profile, mode="full") if _pv else ""
     p_traits = render_profile(_pv.profile, mode="traits") if _pv else ""
-    tid = uuid.uuid4().hex   # 端到端 trace_id:langfuse trace + 日志 xrayTraceId + 响应体同 id
+    tid = uuid.uuid4().hex   # End-to-end trace_id: the langfuse trace, the log tracing id and the response body all use the same id
     try:
         with trace(tid), \
                 obs.root_span("recall", user_id=ctx.user_id, session_id=sid,
                               input=body.query, trace_id=tid) as _sp:
             if _sp is not None:
                 logger.info(f"recall langfuse trace_id={obs.current_trace_id()}")
-            o = run_recall(rt.maas, rt.maas, ctx.atoms, ctx.cells, ctx.evidence,
+            o = run_recall(rt.llm, rt.embedder, ctx.atoms, ctx.cells, ctx.evidence,
                            session_id=sid, query=body.query, now_dt=now(),
                            mode=body.mode, top_k=body.top_k, reranker=rt.reranker,
                            media_store=rt._media(), mllm=rt.mllm,
@@ -409,28 +503,35 @@ def recall(body: RecallBody, ctx: UserContext = Depends(_ctx)):
                            profile_full=p_full, profile_traits=p_traits,
                            scenario=(body.context.scenario if body.context else ""))
     except httpx.HTTPStatusError as e:
-        # 上游 429:客户端侧只做 1-2 次短退避重试即抛,这里原样透传——调用方按限流语义
-        # 退避重试,而不是让请求在服务端深退避里挂等(并发下会拖垮 worker = 重试地狱)
+        # An upstream 429: the client only does one or two short backoff retries before
+        # raising, and we pass it straight through — the caller should back off and retry
+        # per rate-limit semantics, rather than having the request hang in a deep backoff
+        # on our side (under concurrency that drags workers down = retry hell)
         if getattr(e.response, "status_code", None) == 429:
-            logger.warning(f"recall 上游限流 user={ctx.user_id} session={sid} q={body.query!r}")
+            logger.warning(f"recall upstream rate limited user={ctx.user_id} session={sid} q={body.query!r}")
             return JSONResponse(status_code=429, headers={"Retry-After": "5"},
-                                content={"error": "上游模型服务限流,请稍后重试", "detail": str(e)})
-        logger.exception(f"recall 失败 user={ctx.user_id} session={sid} q={body.query!r}")
+                                content={"error": "the upstream model service is rate limiting, retry later", "detail": str(e)})
+        logger.exception(f"recall failed user={ctx.user_id} session={sid} q={body.query!r}")
         return JSONResponse(status_code=502,
-                            content={"error": "记忆服务暂时不可用:上游模型/向量服务调用失败,本次召回未能完成",
+                            content={"error": "the memory service is temporarily unavailable: a call to the upstream model/embedding service failed and this recall could not complete",
                                      "detail": str(e)})
-    except Exception as e:   # noqa: BLE001  上游(模型/向量)故障:各工位内部已各自降级,漏到这里=检索本身不可用
-        logger.exception(f"recall 失败 user={ctx.user_id} session={sid} q={body.query!r}")
+    except Exception as e:   # noqa: BLE001  An upstream (model/embedding) failure: each stage degrades internally, so anything reaching here means retrieval itself is unavailable
+        logger.exception(f"recall failed user={ctx.user_id} session={sid} q={body.query!r}")
         return JSONResponse(status_code=502,
-                            content={"error": "记忆服务暂时不可用:上游模型/向量服务调用失败,本次召回未能完成",
+                            content={"error": "the memory service is temporarily unavailable: a call to the upstream model/embedding service failed and this recall could not complete",
                                      "detail": str(e)})
     finally:
-        rt.recall_gate.leave()          # 名额务必归还(成功/异常/早返回都经此)
-    # 依据记忆:与终答同源——快链=R2 精排 top 单元的命中 atoms;
-    # 深轨作答(mode=deep 直达,或 auto 升级后覆盖)= 终答引用 cells 的全部 atoms(cited 即依据)。
-    # 核判判材料不足(insufficient)时不下发:半相关条目会被调用方当"答案依据"误读,
-    # 无答案就诚实地空着,让 answer 里的客观交代(查了什么/结论/原因)说话。深轨负面作答
-    # 也可能引用"查过"的 cells(auto 升级后 review 仍是快链判定)——同样按最终核判门禁。
+        rt.recall_gate.leave()          # The permit must always be returned (success, exception and early return all pass through here)
+    # The supporting memories come from the same place as the final answer: on the fast
+    # path they are the matched atoms of the top units after R2 reranking; for a
+    # deep-track answer (mode=deep directly, or after an auto escalation overrode it)
+    # they are all atoms of the cells the final answer cited (cited = supporting).
+    # When adjudication rules the material insufficient we return none of them: a
+    # half-relevant item would be misread by the caller as "the basis of the answer", so
+    # with no answer we honestly leave it empty and let the objective account inside
+    # answer (what was searched, the conclusion, the reason) speak. A negative deep-track
+    # answer may also cite the cells it "looked at" (after an auto escalation the review
+    # is still the fast path's verdict) — the same final-adjudication gate applies.
     verdict = o.reviews[-1].verdict if o.reviews else None
     # One renderer, shared with the library: Memory.search(...).to_public() and
     # this endpoint produce the same shape by construction, so the two cannot
@@ -442,9 +543,12 @@ def recall(body: RecallBody, ctx: UserContext = Depends(_ctx)):
 
 
 def _public_profile(cur) -> dict:
-    """当前画像 → 对外结构化视图(纯函数,便于单测):剥内部量(f_id、sources=cell_id),不做整合。
+    """The current profile -> the public structured view (a pure function, easy to unit
+    test): internal quantities (f_id, sources=cell_id) are stripped and nothing is
+    consolidated here.
 
-    无画像(cur=None)→ {"exists": false}(调用方会话开始无脑拉一次,空画像不是错误,非 404)。
+    No profile (cur=None) -> {"exists": false} (callers fetch it unconditionally at the
+    start of a session, and an empty profile is not an error, so it isn't a 404).
     """
     if cur is None:
         return {"exists": False, "version": 0, "traits": {}, "facts": {b: [] for b in BANDS}}
@@ -463,12 +567,15 @@ def _public_profile(cur) -> dict:
 
 @router.get("/profile")
 def get_profile(ctx: UserContext = Depends(_ctx)):
-    """取本 user 的当前画像(结构化,不做整合;token→user 归属)。"""
+    """Get this user's current profile (structured, not consolidated; ownership comes
+    from token -> user)."""
     return _public_profile(ProfileStore(rt.db, ctx.user_id).current())
 
 
 def _episode_vo(cell) -> dict:
-    """memcell → 对外 episode VO(段粒度):id/会话/起止/主题/叙事/分类。不下发 payload/atoms/向量。"""
+    """memcell -> the public episode view object, at segment granularity: id, session,
+    start/end, topic, narrative, classification. The payload, atoms and vectors are never
+    exposed."""
     return {
         "memcell_id": cell.id,
         "session_id": cell.session_id,
@@ -482,15 +589,18 @@ def _episode_vo(cell) -> dict:
 
 @router.get("/episodes")
 def list_episodes(ctx: UserContext = Depends(_ctx),
-                  episode_type: str | None = Query(default=None, description="按分类过滤;不传=全部"),
-                  start: str | None = Query(default=None, description="起始时间(ISO,含);按段起始 t_start 过滤"),
-                  end: str | None = Query(default=None, description="结束时间(ISO,含)"),
+                  episode_type: str | None = Query(default=None, description="filter by classification; omit for all"),
+                  start: str | None = Query(default=None, description="start time (ISO, inclusive); filters on the segment's t_start"),
+                  end: str | None = Query(default=None, description="end time (ISO, inclusive)"),
                   page: int = Query(default=1, ge=1),
                   page_size: int = Query(default=20, ge=1, le=100)):
-    """按 episode_type + 时间范围分页检索本 user 的 episode(段),t_start 倒序(最近在前)。
+    """Page through this user's episodes (segments) by episode_type and time range,
+    ordered by t_start descending (most recent first).
 
-    token→user 归属;过滤项(episode_type/start/end)皆可选,分页 page/page_size 有默认(上限 100)。
-    返回段粒度 VO 列表 + 分页元信息(total/page/page_size)。
+    Ownership comes from token -> user; every filter (episode_type/start/end) is
+    optional, and page/page_size have defaults (with a cap of 100).
+    Returns a list of segment-level view objects plus pagination metadata
+    (total/page/page_size).
     """
     offset = (page - 1) * page_size
     cells = ctx.cells.list_by_type(episode_type=episode_type, start=start, end=end,
@@ -502,18 +612,22 @@ def list_episodes(ctx: UserContext = Depends(_ctx),
 
 @router.get("/trace/{node_id}")
 def trace_node(node_id: str, ctx: UserContext = Depends(_ctx)):
-    """按 id 溯源(只在该 user 的记忆内),记忆和证据都支持(按 id 自动分派):
+    """Trace provenance by id (only within this user's memory); both memories and
+    evidence are supported and dispatched automatically by the id:
 
-    - 记忆 atom_id → 正向链:记忆 + 归属/认识状态 + 下钻到原始证据(含当时 Q↔A),`node="memory"`。
-    - 证据 evidence_id → 反向链:证据原文 + 同轮 Q↔A + 被哪些记忆引用(cited_by),`node="evidence"`。
-    两者都查不到 → 404。
+    - a memory atom_id -> the forward chain: the memory + its attribution and knowledge
+      state + a drill-down to the original evidence (including the Q&A at the time),
+      `node="memory"`.
+    - an evidence_id -> the backward chain: the original evidence text + the Q&A of the
+      same turn + which memories cite it (cited_by), `node="evidence"`.
+    If neither lookup finds it -> 404.
     """
     media = rt._media()
-    chain = build_trust_chain([node_id], ctx.atoms, ctx.evidence, media)   # 先当记忆查
+    chain = build_trust_chain([node_id], ctx.atoms, ctx.evidence, media)   # Try it as a memory first
     node = chain[0] if chain else None
     if node is not None and not node.get("missing"):
         return {"node": "memory", **node}
-    ev_node = trace_evidence(node_id, ctx.evidence, ctx.atoms, media)      # 再当证据查
+    ev_node = trace_evidence(node_id, ctx.evidence, ctx.atoms, media)      # Then try it as evidence
     if ev_node is not None:
         return ev_node
     return JSONResponse(status_code=404, content={"error": "not found", "id": node_id})

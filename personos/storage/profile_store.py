@@ -1,10 +1,14 @@
-"""用户画像存储:画像结构模型 + profile_versions 版本表访问。
+"""User profile storage: the profile's structural model plus access to the
+profile_versions table.
 
-画像是 atom 层之上的**有损派生视图**(可从 cell 重蒸馏),不是真相源。每次 consolidate
-整版留档,当前画像 = 该 user 最新一版(单行读,无双真相源一致性问题)。
+A profile is a **lossy derived view** sitting above the atom layer and can be
+re-distilled from the cells; it is not a source of truth. Each consolidate
+archives a whole version, and the current profile is that user's latest one — a
+single-row read, so there is no two-sources-of-truth consistency problem.
 
-多租户:与其它 store 同规,实例按 user 绑定(构造注入 user_id),所有 SQL 自动带
-`user_id=%s` 过滤——**用户隔离收敛在此层,严禁跨用户串画像信息**(P2 纪律)。
+Multi-tenancy works as in the other stores: an instance is bound to one user and
+every statement carries `user_id=%s`. **User isolation is enforced at this layer,
+and profile information must never cross between users.**
 """
 
 from __future__ import annotations
@@ -19,44 +23,59 @@ from pydantic import BaseModel, Field
 from ..models import _ulid, now
 from .db import Database
 
-# facts 四个时间带(key 固定;分带与淘汰见 online/profile_merge)
+# The four time bands for facts. The keys are fixed; how facts are assigned to a
+# band and evicted from one lives in online/profile_merge.
 BANDS: tuple[str, ...] = ("today", "week", "month", "long")
 
-# PMO-16 维度(traits 的合法 key,英文);按 McAdams 三层分组(见 docs/design/user-profile.md §1)。
-# 空维度以 None 表示;整理 agent 只能写这 16 个 key(harness 拒未知域,保画像干净)。
+# The PMO-16 dimensions: the legal keys for traits, grouped into McAdams' three
+# levels. An empty dimension is represented by None. The consolidating agent may
+# write only these sixteen keys — the harness rejects unknown ones, which is what
+# keeps the profile clean.
 PMO16: tuple[str, ...] = (
-    # L1 dispositional traits(跨情境稳定性情)
+    # L1 dispositional traits: temperament that holds across situations
     "personality", "communication_style", "social_style",
-    # L2 characteristic adaptations(情境化的目标·价值·动机·应对)
+    # L2 characteristic adaptations: situated goals, values, motives and coping
     "occupation", "goals", "values", "work_style", "learning_style",
     "tech_environment", "lifestyle", "health", "finance",
-    # L3 narrative identity(如何理解自己的人生)
+    # L3 narrative identity: how someone makes sense of their own life
     "identity", "location", "family", "interests",
 )
 
 
 class ProfileTrait(BaseModel):
-    """a 部分一维:一句话侧写 + 认识状态 + 时效 + 出处。空维度以 None 表示(合法,不编造)。"""
+    """One dimension of the traits section: a one-line portrait, how well it is
+    known, when it was last confirmed, and where it came from.
+
+    An empty dimension is None, which is legal — better than inventing one.
+    """
     text: str = ""
     status: Literal["confirmed", "inferred"] = "inferred"
-    last_confirmed: str = ""                     # YYYY-MM-DD,引擎盖戳
-    sources: list[str] = Field(default_factory=list)   # cell_id 列表
+    last_confirmed: str = ""                     # YYYY-MM-DD, stamped by the engine
+    sources: list[str] = Field(default_factory=list)   # a list of cell_ids
 
 
 class ProfileFact(BaseModel):
-    """b 部分一条:一句(可跨天主题式整合)事实,日期写在正文(自然语言,双时间)。
+    """One entry in the facts section: a single fact, which may thematically
+    combine things said across several days, with the date written into the prose
+    itself in natural language.
 
-    带(today/week/month/long)由 LLM 显式决定放哪(不靠结构化日期机械分带)——见设计文档。
-    last_confirmed 是引擎盖戳的"最近更新时间",超限淘汰时踢最旧的它;无 event_time 概念。
+    Which band it goes in (today/week/month/long) is decided explicitly by the LLM
+    rather than derived mechanically from a structured date.
+
+    last_confirmed is the "last updated" timestamp the engine stamps on, and it is
+    the key used to evict the oldest entry when a band is over its limit. There is
+    no separate notion of event time here.
     """
     id: str = Field(default_factory=lambda: _ulid("f"))
-    text: str = ""                               # 事实叙事,日期在正文里
-    last_confirmed: str = ""                     # YYYY-MM-DD,引擎盖戳(超限淘汰键)
-    sources: list[str] = Field(default_factory=list)   # 真实 cell_id(consolidate 已短→长回填)
+    text: str = ""                               # the fact as prose, with the date inside it
+    last_confirmed: str = ""                     # YYYY-MM-DD, stamped by the engine; the eviction key
+    sources: list[str] = Field(default_factory=list)   # real cell_ids, which consolidate has already mapped back from short labels
 
 
 class UserProfile(BaseModel):
-    """全量画像:traits(PMO-16 域→侧写|None)+ facts(四带→事实列表)。"""
+    """The complete profile: traits maps each PMO-16 dimension to a portrait or
+    None, and facts maps each of the four bands to a list of facts.
+    """
     traits: dict[str, Optional[ProfileTrait]] = Field(default_factory=dict)
     facts: dict[str, list[ProfileFact]] = Field(
         default_factory=lambda: {b: [] for b in BANDS}
@@ -69,7 +88,7 @@ class UserProfile(BaseModel):
 
 @dataclass
 class ProfileVersion:
-    """一版画像行(带元数据)。"""
+    """One archived profile version, with its metadata."""
     version: int
     profile: UserProfile
     up_to_cell_id: str
@@ -77,14 +96,20 @@ class ProfileVersion:
 
 
 class ProfileStore:
-    """profile_versions 访问:整版留档,取当前版=最新版。实例按 user 绑定。"""
+    """Access to profile_versions: whole versions are archived, and the current one
+    is the latest. An instance is bound to one user.
+    """
 
     def __init__(self, db: Database, user_id: str = ""):
         self.db = db
         self.user_id = user_id
 
     def current(self) -> ProfileVersion | None:
-        """当前画像 = 该 user 最新一版;从未整理过 → None(消费侧走"无画像"路径)。"""
+        """The current profile, which is this user's latest version.
+
+        Returns None if consolidation has never run, and the consumer then takes
+        its no-profile path.
+        """
         row = self.db.fetch_one(
             "SELECT version, profile_json, up_to_cell_id, created_at "
             "FROM profile_versions WHERE user_id=%s ORDER BY version DESC LIMIT 1",
@@ -100,14 +125,16 @@ class ProfileStore:
         )
 
     def version_count(self) -> int:
-        """已整理过几版 = 画像成熟度(退火进度锚点)。"""
+        """How many versions have been consolidated, which is the profile's maturity
+        and the anchor for annealing progress.
+        """
         row = self.db.fetch_one(
             "SELECT COUNT(*) AS n FROM profile_versions WHERE user_id=%s", (self.user_id,)
         )
         return int(row["n"]) if row else 0
 
     def get_version(self, version: int) -> ProfileVersion | None:
-        """取指定版本(审计/回滚)。"""
+        """Fetch a specific version, for auditing or rollback."""
         row = self.db.fetch_one(
             "SELECT version, profile_json, up_to_cell_id, created_at "
             "FROM profile_versions WHERE user_id=%s AND version=%s",
@@ -123,9 +150,13 @@ class ProfileStore:
         )
 
     def save_version(self, profile: UserProfile, up_to_cell_id: str) -> int:
-        """整版留档,返回新版本号。version 在事务内 MAX+1(uq_user_version 兜底防并发重号)。
+        """Archive a whole version and return its new version number.
 
-        同 user 的 consolidate 已由 per-user 单飞锁串行,这里的事务只是二次护栏。
+        The version is MAX+1 computed inside the transaction, with
+        uq_user_version as the backstop against a concurrent duplicate.
+
+        Consolidation for one user is already serialized by a per-user
+        single-flight lock, so this transaction is only the second line of defence.
         """
         with self.db.transaction() as tx:
             row = tx.fetch_one(
@@ -139,8 +170,8 @@ class ProfileStore:
                 (_ulid("pv"), self.user_id, nv, profile.model_dump_json(),
                  up_to_cell_id or "", now().strftime("%Y-%m-%d %H:%M:%S")),
             )
-        logger.info(f"画像出版本 user={self.user_id or '(默认)'} version={nv} "
-                    f"up_to_cell={up_to_cell_id or '(全量)'} "
+        logger.info(f"profile version published user={self.user_id or '(default)'} version={nv} "
+                    f"up_to_cell={up_to_cell_id or '(all)'} "
                     f"traits={sum(1 for v in profile.traits.values() if v)} "
                     f"facts={sum(len(v) for v in profile.facts.values())}")
         return nv

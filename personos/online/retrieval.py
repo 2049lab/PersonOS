@@ -1,9 +1,14 @@
-"""快链召回(融合架构 §3):R0 预处理 → R1 两路 atom 检索+RRF → R5 作答。
+"""Fast-path recall (fused architecture §3): R0 preprocessing -> R1 two-route atom retrieval + RRF ->
+R5 answering.
 
-检索单元是 atom(联想/域两路,topic 路已删);材料单元是 memcell(普通格或链织写的
-memcell′ 临时视图,同构无感知)——atoms 不进任何精排/作答材料(检索单元不充当参考答案)。
-写入不消解——重复=冗余索引,冲突在作答时消费(D1)。
-开段(未闭合)内容不在任何向量池里,当前对话靠会话上下文回答。
+The retrieval unit is the atom (two routes, associative and domain; the topic route has been
+removed); the material unit is the memcell (either a plain cell or the temporary memcell' view woven
+from a chain — structurally identical and invisible downstream). Atoms never enter any rerank or
+answering material (a retrieval unit must not double as a reference answer).
+Writes are never reconciled — a duplicate is a redundant index, and conflicts are consumed at
+answering time (D1).
+The content of an open (unclosed) segment is in no vector pool; the current conversation is answered
+from the session context.
 """
 
 from __future__ import annotations
@@ -22,7 +27,8 @@ from ..models import (
 from ..storage.atom_store import AtomStore
 from .llm import ChatLLM, chat_json, with_scenario
 
-# 业务方场景注入 directive(只调关注度/详略,不改事实、不编造、不漏)——见 with_scenario
+# Directives for caller-scenario injection (they only tune attention and level of detail; facts are
+# never altered, invented, or omitted) -- see with_scenario
 _SCEN_DIR_REWRITE = ("When the question is ambiguous, bias domain guesses and expansion terms toward "
                      "the caller's subject area; never override the literal question.")
 _SCEN_DIR_ANSWER = ("Use it only to shape emphasis and level of detail in the answer; it never changes "
@@ -33,34 +39,39 @@ class Embedder(Protocol):
     def embed(self, texts: list[str]) -> np.ndarray: ...
 
 
-# —— 命中结构:atom 是检索单元(R1),memcell 是材料/精排单元(R2 起) ——
+# -- Hit structures: the atom is the retrieval unit (R1), the memcell is the material / rerank unit
+# (from R2 onwards) --
 
 @dataclass
 class AtomHit:
     atom: MemoryAtom
-    similarity: float        # 该 atom 对查询面的最大 cosine(联想/域两路取最优)
-    rrf: float = 0.0         # RRF 融合分(排名量纲;深轨单路检索不用,保持 0)
+    similarity: float        # this atom's max cosine over the query faces (best of the associative and domain routes)
+    rrf: float = 0.0         # RRF fusion score (a ranking quantity; the deep track's single-route retrieval does not use it and leaves it at 0)
 
 
 @dataclass
 class CellHit:
-    """材料单元:普通 memcell 或链织写的 memcell′(临时视图,下游完全无感知)。
+    """A material unit: either a plain memcell or the memcell' woven from a chain (a temporary view
+    that is completely invisible downstream).
 
-    memcell′:cell.id=链id、topic=链title、episode=织文、t_start/t_end=成员格跨度,
-    covers=成员格 id 全集——covers 只用于引用长短映射(mN → 成员格),不进任何 prompt 文本。
-    普通单元 covers 空,引用展开视为 [自身 cell.id]。
+    For a memcell': cell.id = the chain id, topic = the chain title, episode = the woven text,
+    t_start/t_end = the span of its member cells, covers = the full set of member cell ids — `covers`
+    is only used for the short/long handle mapping of citations (mN -> member cells) and never enters
+    any prompt text.
+    A plain unit has an empty `covers`, and citation expansion treats it as [its own cell.id].
     """
 
     cell: MemCell
-    score: float                     # 单元最佳 atom 的 RRF 融合分(排名量纲,非相似度)
-    best_sim: float                  # 单元最佳 atom 相似度(可解释:语义近不近)
-    atoms: list[AtomHit] = field(default_factory=list)   # 该单元命中的池内 atoms(相似度降序)
-    rerank_score: float | None = None                   # R2 精比分(未跑 rerank 时 None)
-    covers: list[str] = field(default_factory=list)     # 织写单元=成员 cell id 全集;空=视为[自身 cell.id]
+    score: float                     # the RRF fusion score of the unit's best atom (a ranking quantity, not a similarity)
+    best_sim: float                  # the similarity of the unit's best atom (explainable: how close the meaning is)
+    atoms: list[AtomHit] = field(default_factory=list)   # the pool atoms that hit this unit (descending similarity)
+    rerank_score: float | None = None                   # the R2 rerank score (None when rerank did not run)
+    covers: list[str] = field(default_factory=list)     # for a woven unit, the full set of member cell ids; empty means [its own cell.id]
 
 
 def _cosine(qmat: np.ndarray, mat: np.ndarray) -> np.ndarray:
-    """qmat:(f,d) 查询面 × mat:(n,d) 文档 → (n,f) 余弦矩阵。零向量安全。"""
+    """qmat: (f,d) query faces x mat: (n,d) documents -> an (n,f) cosine matrix. Safe for zero
+    vectors."""
     if mat.size == 0:
         return np.zeros((0, qmat.shape[0]), dtype=np.float32)
     qn = qmat / (np.linalg.norm(qmat, axis=1, keepdims=True) + 1e-9)
@@ -71,15 +82,18 @@ def _cosine(qmat: np.ndarray, mat: np.ndarray) -> np.ndarray:
 def _maxsim_ranking(
     query_vecs: list[np.ndarray], pool: list[tuple[MemoryAtom, np.ndarray]],
 ) -> tuple[list[str], dict[str, float], dict[str, dict[str, float]]]:
-    """MaxSim:每条 atom 对各查询面取最大 cosine,按 memcell_id 聚合取 max → cell 排名。
+    """MaxSim: take each atom's max cosine over the query faces, then aggregate by memcell_id taking
+    the max -> a cell ranking.
 
-    一个 cell 只出它最强的 atom(候选池自动多样化,防单个富 cell 灌满)。
-    返回 (cell 排名序列[相似度降序], cell→MaxSim 分, cell→atom→最佳面相似度)。
+    A cell only contributes its strongest atom (which diversifies the candidate pool automatically and
+    stops one rich cell from flooding it).
+    Returns (the cell ranking [descending similarity], cell -> MaxSim score, cell -> atom -> its best
+    face similarity).
     """
     if not pool:
         return [], {}, {}
     qmat = np.stack([np.asarray(v, dtype=np.float32) for v in query_vecs])
-    sims = _cosine(qmat, np.stack([v for (_, v) in pool])).max(axis=1)   # 每条 atom 的最佳面
+    sims = _cosine(qmat, np.stack([v for (_, v) in pool])).max(axis=1)   # each atom's best face
     cell_scores: dict[str, float] = {}
     atom_sims: dict[str, dict[str, float]] = {}
     for (atom, _), s in zip(pool, sims):
@@ -92,7 +106,8 @@ def _maxsim_ranking(
 
 
 def _vec_ranking(query_vecs: list[np.ndarray], entries: list[tuple[MemCell, np.ndarray]]) -> list[str]:
-    """1 cell 1 向量的池(如 topic 向量):对各查询面取最大 cosine → cell id 排名(降序)。"""
+    """A pool with one vector per cell (e.g. topic vectors): take the max cosine over the query faces
+    -> a cell id ranking (descending)."""
     if not entries:
         return []
     sims = _cosine(np.stack([np.asarray(v, dtype=np.float32) for v in query_vecs]),
@@ -101,13 +116,14 @@ def _vec_ranking(query_vecs: list[np.ndarray], entries: list[tuple[MemCell, np.n
     return [entries[i][0].id for i in order]
 
 
-_RRF_K = 60   # RRF 平滑常数(融合架构 §3 定死;k 越大名次差异越平)
+_RRF_K = 60   # the RRF smoothing constant (fixed by fused architecture §3; a larger k flattens the differences between ranks)
 
 
 def _rrf(rankings: list[list[str]], k: int = _RRF_K) -> dict[str, float]:
-    """多路排名 → 融合分:Σ 1/(k+rank),rank 从 1 起。
+    """Multiple rankings -> a fusion score: the sum of 1/(k+rank), with rank starting at 1.
 
-    多路都认的浮上来,单路噪声被稀释;只在一路出现的条目只累计那一路的贡献。
+    Items several routes agree on float up while single-route noise is diluted; an item that appears
+    in only one route accumulates only that route's contribution.
     """
     scores: dict[str, float] = {}
     for ranking in rankings:
@@ -116,7 +132,8 @@ def _rrf(rankings: list[list[str]], k: int = _RRF_K) -> dict[str, float]:
     return scores
 
 
-# —— R0 · 查询预处理:一次轻 LLM 产五件套(qtype 已拆,D-C1)——
+# -- R0 - query preprocessing: one lightweight LLM call produces all five fields (qtype has been
+# split out, D-C1) --
 _REWRITE_SYS = (
     "# Role\n"
     "You are the query preprocessor of a memory retrieval system: turn the user's CURRENT QUESTION into "
@@ -160,29 +177,34 @@ _REWRITE_SYS = (
 @dataclass
 class QueryRewrite:
     original: str
-    resolved: str               # 指代补全、相对时间转绝对后的问题(检索与作答都用它)
-    subject: str = ""           # 疑问主体(R5 归属校验锚点;"user"/人名;空=未判出)
-    expansions: list[str] = field(default_factory=list)   # 扩展词(联想路查询面)
-    time_start: str = ""        # 绝对日期窗(ISO yyyy-MM-dd;空=无界;直供深轨工具 start/end_date)
+    resolved: str               # the question after reference resolution and relative-to-absolute time conversion (used by both retrieval and answering)
+    subject: str = ""           # the subject of the question (the anchor for R5's attribution check; "user" or a person's name; empty = could not be determined)
+    expansions: list[str] = field(default_factory=list)   # expansion terms (the query faces of the associative route)
+    time_start: str = ""        # the absolute date window (ISO yyyy-MM-dd; empty = unbounded; feeds the deep-track tools' start/end_date directly)
     time_end: str = ""
-    domains: list[str] = field(default_factory=list)      # 域路锚点(D 轴)
+    domains: list[str] = field(default_factory=list)      # the domain route's anchors (the D axis)
     system: str = ""
     user: str = ""
     raw: str = ""
 
 
 def _iso_date(v) -> str:
-    """LLM 输出 → 规整 ISO 日期串(yyyy-MM-dd);null/解析失败 → 空串(该侧无界)。"""
+    """LLM output -> a normalized ISO date string (yyyy-MM-dd); null or a parse failure -> an empty
+    string (that side of the window is unbounded)."""
     d = ensure_aware(v)
     return d.date().isoformat() if d else ""
 
 
 def rewrite_query(llm: ChatLLM, *, raw_query: str, history: list[tuple[str, str]] | None = None,
                   now_dt: datetime | None = None, profile: str = "", scenario: str = "") -> QueryRewrite:
-    """R0:一次 LLM 产五件套(补全指代/疑问主体/日期窗/扩展词/判域),解析失败退化为原 query(容错不阻塞)。
+    """R0: one LLM call produces all five fields (reference resolution, question subject, date window,
+    expansion terms, domain guess); a parse failure degrades to the original query (fault-tolerant,
+    never blocking).
 
-    profile:用户画像文本块(可空)——注入以补全指代/省略、主体判定、时间习惯换算。
-    scenario:业务方场景描述(可空)——偏置判域/扩展词到调用方主题域。
+    profile: the user profile text block (may be empty) — injected to help with reference and
+    ellipsis resolution, subject determination, and converting the user's habitual time expressions.
+    scenario: the caller's scenario description (may be empty) — biases the domain guess and the
+    expansion terms toward the caller's subject area.
     """
     now_dt = now_dt or now()
     hist = "\n".join(f"{h}: {t}" for h, t in (history or [])) or "(no history)"
@@ -201,28 +223,31 @@ def rewrite_query(llm: ChatLLM, *, raw_query: str, history: list[tuple[str, str]
                if s][:5]
         doms = [d for d in (str(x).strip() for x in (obj.get("domains") or [])) if d in DOMAIN_VOCAB]
         ts, te = _iso_date(obj.get("time_start")), _iso_date(obj.get("time_end"))
-        logger.info(f"R0 改写 subject={subject or '-'} exp={exp} "
-                    f"窗={ts or '-'}/{te or '-'} 域={doms or '[]'} "
+        logger.info(f"R0 rewrite subject={subject or '-'} exp={exp} "
+                    f"window={ts or '-'}/{te or '-'} domains={doms or '[]'} "
                     f"resolved={resolved!r}")
         return QueryRewrite(original=raw_query, resolved=resolved, subject=subject,
                             expansions=exp, time_start=ts, time_end=te, domains=doms,
                             system=sys, user=user, raw=raw)
     except Exception as e:
-        logger.warning(f"R0 改写解析失败,退回原 query: {e}")
+        logger.warning(f"R0 rewrite parse failed, falling back to the original query: {e}")
         return QueryRewrite(original=raw_query, resolved=raw_query,
                             system=sys, user=user,
                             raw=getattr(e, "raw", "") or str(e))
 
 
-# —— R1 · 两路召回:联想路(发散,全库) ∥ 域路(收敛,域内子集)→ atom 级 RRF ——
+# -- R1 - two-route recall: the associative route (divergent, whole store) in parallel with the domain
+# route (convergent, the subset inside the guessed domains) -> atom-level RRF --
 
-_PER_CELL_CAP = 10   # 池内同格 atom 数上限(防富格灌满挤掉别家——atom 级池选择的护栏)
+_PER_CELL_CAP = 10   # max atoms from one cell in the pool (a guard on atom-level pool selection, so a rich cell cannot flood it and squeeze others out)
 
 
 def _date_window(start_date: str, end_date: str) -> tuple[datetime | None, datetime | None]:
-    """yyyy-MM-dd 串 → (下界, 上界+1天);日期窗按【含端点一整天】算。坏值忽略该侧。
+    """A yyyy-MM-dd string -> (lower bound, upper bound + 1 day); the date window covers WHOLE DAYS
+    INCLUSIVE of both endpoints. A malformed value makes that side unbounded.
 
-    快链(无过滤)与深轨工具(search_atoms/find_cells)共用同一份窗语义,防两处各写漂移。
+    The fast path (which does no filtering) and the deep-track tools (search_atoms / find_cells) share
+    this one definition of window semantics, so the two cannot drift apart.
     """
     lo = ensure_aware(start_date) if start_date else None
     hi = ensure_aware(end_date) if end_date else None
@@ -232,13 +257,15 @@ def _date_window(start_date: str, end_date: str) -> tuple[datetime | None, datet
 
 
 def _in_window(anchor: datetime | None, lo: datetime | None, hi: datetime | None) -> bool:
-    """锚点是否落在窗内;时间筛选下无锚对象不可见(不知道何时成立,不能冒充实效)。"""
+    """Whether the anchor falls inside the window; under a time filter an object with no anchor is
+    invisible (if we do not know when it held, it cannot pass itself off as in force)."""
     return not ((lo and (anchor is None or anchor < lo)) or (hi and (anchor is None or anchor >= hi)))
 
 
 def _atom_maxsim(query_vecs: list[np.ndarray],
                  rows: list[tuple[MemoryAtom, np.ndarray]]) -> dict[str, float]:
-    """每条 atom 对各查询面取最大 cosine → {atom_id: sim}(atom 级排名原料,无 cell 聚合)。"""
+    """Each atom's max cosine over the query faces -> {atom_id: sim} (the raw material for atom-level
+    ranking, with no cell aggregation)."""
     if not rows:
         return {}
     qmat = np.stack([np.asarray(v, dtype=np.float32) for v in query_vecs])
@@ -248,9 +275,11 @@ def _atom_maxsim(query_vecs: list[np.ndarray],
 
 @dataclass
 class AtomPool:
-    """R1 产物:RRF 融合序 atom 池 + 池外候选(残缺提示点名其链 title 用)。
+    """The R1 product: the atom pool in RRF fusion order + the candidates beyond it (used by the
+    boundary note to name their chain titles).
 
-    beyond 只收池满之后的名次——被同格上限挤出的 atom 其事实仍在所示格 episode 里,不算缺料。
+    `beyond` only collects ranks after the pool filled up — an atom squeezed out by the per-cell cap
+    still has its fact in the episode of a shown cell, so it does not count as missing material.
     """
     atoms: list[AtomHit] = field(default_factory=list)
     beyond: list[AtomHit] = field(default_factory=list)
@@ -267,18 +296,26 @@ def search_atoms(
     holder: str = "",
     domains_filter: list[str] | None = None,
 ) -> AtomPool:
-    """两路 atom 检索 → RRF(k=60) 融合 → 池选择,取 top_n 个 atom(D-C6:召回单位 = atom)。
+    """Two-route atom retrieval -> RRF (k=60) fusion -> pool selection, taking top_n atoms (D-C6: the
+    recall unit is the atom).
 
-    - 联想路:resolved + 各扩展词【分别 embed】成多个查询面,每条 atom 取对面最大 cosine,
-      对全库 atom 池——召回优先,防漏。
-    - 域路:resolved 原样不扩展,只对判出域内的 atom 子集——精度优先,防误
-      (域对但语义没匹配上的仍可命中)。判不出域 → 该路空,RRF 自然退化为单路。
-    - 每路各取前 2×top_n 名进 RRF(过采样),融合后取 top_n。
-    - 池选择:同格最多 per_cell_cap 个 atom;池满后其余名次进 beyond(链面残缺提示用)。
-    - start/end_date / holder / domains_filter:深轨工具的结构化【硬过滤】(快链全留空);
-      日期窗按 atom 锚点(occurrence_time,回退 recorded_at),含端点一整天。
-      注意 domains_filter ≠ rewrite.domains:前者是硬过滤(agent 显式设的条件),
-      后者是域路锚点(R0 猜的召回提示,不滤掉任何 atom)。
+    - Associative route: the resolved query plus each expansion term are **embedded separately** into
+      several query faces; each atom takes its max cosine over those faces, against the whole atom
+      pool — recall first, so nothing is missed.
+    - Domain route: the resolved query as-is with no expansion, against only the subset of atoms in
+      the guessed domains — precision first, to avoid false hits (an atom in the right domain whose
+      wording did not match semantically can still be found). With no domain guess this route is
+      empty and RRF naturally degenerates into a single route.
+    - Each route contributes its top 2 x top_n ranks to RRF (oversampling), and top_n is taken after
+      fusion.
+    - Pool selection: at most per_cell_cap atoms per cell; once the pool is full the remaining ranks
+      go to `beyond` (used by the chain face's boundary note).
+    - start/end_date / holder / domains_filter: the structured HARD FILTERS of the deep-track tools
+      (the fast path leaves them all empty); the date window is applied to the atom anchor
+      (occurrence_time, falling back to recorded_at) over whole inclusive days.
+      Note that domains_filter is not rewrite.domains: the former is a hard filter (a condition the
+      agent set explicitly), while the latter is the domain route's anchor (a recall hint R0 guessed,
+      which filters out no atom at all).
     """
     lo, hi = _date_window(start_date, end_date)
     rows = []
@@ -293,7 +330,8 @@ def search_atoms(
             continue
         rows.append((a, v))
 
-    # 联想路查询面(face[0] 恒为 resolved,域路复用该向量,只 embed 一次)
+    # The associative route's query faces (face[0] is always the resolved query, which the domain
+    # route reuses, so it is embedded only once)
     faces = [rewrite.resolved] + list(rewrite.expansions)
     qvecs = list(embedder.embed(faces))
     assoc_sims = _atom_maxsim(qvecs, rows)
@@ -305,10 +343,10 @@ def search_atoms(
         dom_sims = _atom_maxsim([qvecs[0]], [(a, v) for a, v in rows if dset & set(a.domains)])
     dom_ranking = sorted(dom_sims, key=lambda aid: -dom_sims[aid])
 
-    route_depth = 2 * top_n                                # 每路过采样深度(60 = 2×30)
+    route_depth = 2 * top_n                                # per-route oversampling depth (60 = 2 x 30)
     fused = _rrf([assoc_ranking[:route_depth], dom_ranking[:route_depth]])
     best_sim = {aid: max(assoc_sims.get(aid, 0.0), dom_sims.get(aid, 0.0)) for aid in fused}
-    order = sorted(fused, key=lambda aid: (-fused[aid], -best_sim[aid]))   # 并列按相似度定序
+    order = sorted(fused, key=lambda aid: (-fused[aid], -best_sim[aid]))   # ties are broken by similarity
 
     atom_map = {a.id: a for a, _ in rows}
     per_cell: dict[str, int] = {}
@@ -316,28 +354,30 @@ def search_atoms(
     for aid in order:
         atom = atom_map.get(aid)
         if atom is None:
-            continue                                       # 防御:fused 键必来自 rows,理论不可达
+            continue                                       # defensive: every key in `fused` comes from `rows`, so this is unreachable in theory
         if len(pool.atoms) < top_n:
             n = per_cell.get(atom.memcell_id, 0)
             if n < per_cell_cap:
                 per_cell[atom.memcell_id] = n + 1
                 pool.atoms.append(AtomHit(atom=atom, similarity=best_sim[aid], rrf=fused[aid]))
-            # 同格超限被挤出:该格事实已在所示 episode 里,不算缺料 → 跳过(不进 beyond)
+            # Squeezed out by the per-cell cap: that cell's fact is already in the shown episode, so
+            # it does not count as missing material -> skip it (it does not go into `beyond`)
         else:
             pool.beyond.append(AtomHit(atom=atom, similarity=best_sim[aid], rrf=fused[aid]))
     pool_detail = "\n".join(
         f"    [{i}] sim={h.similarity:.3f} rrf={h.rrf:.4f} {h.atom.text!r}"
         for i, h in enumerate(pool.atoms, 1))
-    logger.info(f"R1 search_atoms rows={len(rows)} faces={len(faces)} 域={rewrite.domains or '[]'} "
-                f"assoc={len(assoc_ranking)} 域路={len(dom_ranking)} pool={len(pool.atoms)} "
+    logger.info(f"R1 search_atoms rows={len(rows)} faces={len(faces)} domains={rewrite.domains or '[]'} "
+                f"assoc={len(assoc_ranking)} domain_route={len(dom_ranking)} pool={len(pool.atoms)} "
                 f"beyond={len(pool.beyond)} q={rewrite.resolved!r}\n"
-                f"  命中 atom 池(n={len(pool.atoms)}):\n{pool_detail}")
+                f"  matched atom pool(n={len(pool.atoms)}):\n{pool_detail}")
     return pool
 
 
-# —— R5 · 作答:episode 主料 + 命中 atoms,一次 LLM ——
+# -- R5 - answering: the episode as the primary material plus the atoms that hit, in one LLM call --
 
-# 冲突消费规则(D1 的落点):作答与核判两个 prompt 共用同一份措辞,防多处复述漂移。
+# The conflict-consumption rule (where D1 lands): the answering and adjudication prompts share this
+# one wording, so restating it in several places cannot drift.
 _MOST_RECENT_RULE = (
     "A fact stated several times and never mentioned again afterwards: the MOST RECENT statement "
     "is the current state — even if older statements are more frequent or more detailed."
@@ -350,9 +390,13 @@ CONFLICT_RULE = (
     "arbitrarily."
 )
 
-# R5 v2(2026-09-09,错题归因:拒答桶 68 道的病根是规则罗列下模型挑最省力路径——软拒答写得
-# 有理有据,核判对无 claim 草稿无从核对而放行)。规则罗列 → CoT 流程式,拒答抬高成本并留痕
-# (逐块声明),给 R3' 提供可核对的抓手。保留全部硬规则语义(冲突/归属/保真/程度/引用)。
+# R5 v2 (2026-09-09, from error attribution: the root cause of the 68 questions in the refusal bucket
+# was that, given a flat list of rules, the model takes the path of least effort — it writes a soft
+# refusal that sounds well-reasoned, and adjudication lets a draft with no claims through because
+# there is nothing to check it against). So the flat rule list became a CoT procedure: refusing is
+# made expensive and has to leave a trace (declaring block by block), which gives R3' something
+# checkable to grab onto. All the hard-rule semantics are preserved (conflict, attribution, fidelity,
+# degree, citations).
 _ANSWER_SYS = (
     "# Role\n"
     "You are the answerer of a personal memory system: answer the USER QUESTION strictly from the given "
@@ -417,24 +461,28 @@ _ANSWER_SYS = (
 
 @dataclass
 class MemoryAnswer:
-    answer: str                 # 对问题的直接作答(空串=记忆无相关信息)
-    cited_cells: list[str] = field(default_factory=list)   # 引用的 cell id(规则 6)
+    answer: str                 # the direct answer to the question (an empty string means memory holds nothing relevant)
+    cited_cells: list[str] = field(default_factory=list)   # the cell ids cited (rule 6)
     system: str = ""
     user: str = ""
     raw: str = ""
 
 
 def _date_str(dt: datetime | None) -> str:
-    """日期 → 裸 'yyyy-MM-dd'(cell 时间窗用,外面不再套中括号);无日期 → 空串。"""
+    """A date -> a bare 'yyyy-MM-dd' (used for the cell time window; no brackets are wrapped around it
+    here); no date -> an empty string."""
     dt = ensure_aware(dt)
     return f"{dt:%Y-%m-%d}" if dt else ""
 
 
 def cell_lead(c: MemCell) -> str:
-    """程序化元信息拼一行语言中立的材料头:对话时间(证据时间戳,无需 LLM 识别)+ topic。
+    """Assemble one language-neutral material header from metadata programmatically: the dialogue
+    time (an evidence timestamp, so no LLM has to recognize it) + the topic.
 
-    R2 精排文档与 R3/R5 材料块共用,保证三个工位看到的单元口径一致。
-    英文固定格式(元数据框架不随库内容语言变,材料主体语言由 episode/topic 自带)。
+    Shared by the R2 rerank document and the R3/R5 material blocks, which keeps the unit as seen by
+    all three stations identical.
+    The format is fixed English (the metadata frame does not change with the language of the stored
+    content; the language of the material body comes from the episode and topic themselves).
     """
     ts, te = _date_str(c.t_start), _date_str(c.t_end)
     if ts and te:
@@ -445,28 +493,38 @@ def cell_lead(c: MemCell) -> str:
 
 
 def cell_block(hit: CellHit, handle: str) -> str:
-    """一个材料单元:「━━━ 编号 ━━━」分隔行 + 元信息头(时间+topic)+ episode(唯一主料)。
+    """One material unit: a "━━━ handle ━━━" separator line + the metadata header (time + topic) +
+    the episode (the only primary material).
 
-    普通格与织写 memcell′ 同构渲染(临时视图,下游无感知):memcell′ 的 topic=链 title、
-    时间=成员格跨度、episode=织文。covers 只影响引用展开(mN→成员格),不进材料文本。
-    R3' 核判与 R5 作答共用同一渲染器(两个 prompt 的材料口径一致,不各写各的漂移)。
-    atoms 不进材料:它们是检索单元(R1 定位用),喂给判级/作答器会被当"参考答案"混淆视听。
+    A plain cell and a woven memcell' render identically (a temporary view, invisible downstream):
+    a memcell' has topic = the chain title, time = the span of its member cells, episode = the woven
+    text. `covers` only affects citation expansion (mN -> member cells) and never enters the material
+    text.
+    R3' adjudication and R5 answering share this one renderer (so the material as seen by the two
+    prompts is identical and cannot drift apart).
+    Atoms do not go into the material: they are the retrieval unit (used by R1 for locating), and
+    feeding them to the grader or the answerer would let them be read as a "reference answer" and
+    muddy the judgment.
     """
     c = hit.cell
     return "\n".join([f"━━━ {handle} ━━━", cell_lead(c), c.episode or "(no episode)"])
 
 
-# —— 材料渲染顺序(P1-B A/B 开关)——
-# relevance=按 R2 精排序(现行基线);time_asc/time_desc=按 cell 时间窗排。
-# CONFLICT_RULE 要求「后者覆盖前者」:时间序下 LLM 的自然阅读顺序即冲突消费顺序,
-# 不再依赖它自己从各格 header 读日期重排(重排错一次就取旧值)。
-# env 逐次读取(测试/多臂对比友好);A/B 定档后把默认值改为胜者。
+# -- Material rendering order (the P1-B A/B switch) --
+# relevance = the R2 rerank order (the current baseline); time_asc / time_desc = ordered by the cell
+# time window.
+# CONFLICT_RULE requires that "the later one overrides the earlier": in time order, the LLM's natural
+# reading order IS the conflict-consumption order, so it no longer has to reorder the cells itself by
+# reading the dates out of each header (one reordering mistake and it takes the stale value).
+# The env var is read on every call (friendly to tests and to multi-arm comparisons); once the A/B is
+# settled, change the default to the winner.
 _R5_ORDER_ENV = "PERSONOS_R5_ORDER"
-_R5_ORDER_FLOOR = datetime(1, 1, 1, tzinfo=timezone.utc)   # t_start 缺失的排序下界(aware)
+_R5_ORDER_FLOOR = datetime(1, 1, 1, tzinfo=timezone.utc)   # sort floor for a missing t_start (timezone-aware)
 
 
 def _order_hits_for_answer(hits: list[CellHit], order: str) -> list[CellHit]:
-    """按 order 重排作答材料;stable sort——同刻/无时刻的格保持精排序(相关度仍是同序参照)。"""
+    """Reorder the answering material by `order`; a stable sort — cells at the same time or with no
+    time keep the rerank order (so relevance is still the reference for ties)."""
     if order == "relevance":
         return hits
     return sorted(hits, key=lambda h: ensure_aware(h.cell.t_start) or _R5_ORDER_FLOOR,
@@ -478,19 +536,23 @@ def answer_from_cells(
     now_dt: datetime | None = None,
     feedback: str = "", boundary: str = "", profile: str = "", scenario: str = "",
 ) -> MemoryAnswer:
-    """R5 作答:材料单元(普通格或织写 memcell′,同构)的 episode 为唯一主料,按规则出答复。
+    """R5 answering: the episode of each material unit (a plain cell or a woven memcell', which are
+    structurally identical) is the only primary material, and the answer follows the rules.
 
-    now_dt 进 prompt 作【当前时间】锚("多久了"类问题换算相对量的唯一基准)。
-    feedback:核判判 defect 后的修正指令(重答轮);boundary:枚举扩面的边界提示(5b)。
-    材料为空不调 LLM(空作答即"无相关信息");解析失败原样透出;
-    基建异常(限流/超时)空答交上层无答案交代——异常文本不当答案。
+    now_dt goes into the prompt as the CURRENT TIME anchor (the only basis for converting relative
+    quantities in "how long ago" style questions).
+    feedback: the fix instruction after adjudication returned a defect (the re-answer round);
+    boundary: the boundary note for enumeration coverage (5b).
+    With no material there is no LLM call (an empty answer means "nothing relevant"); a parse failure
+    is passed through as-is; an infrastructure error (rate limit, timeout) returns an empty answer and
+    lets the caller produce the no-answer account — the exception text is never used as the answer.
     """
     if not hits:
-        logger.info(f"R5 作答 空材料,直接空答 q={query!r}")
+        logger.info(f"R5 answer: no materials, returning an empty answer directly q={query!r}")
         return MemoryAnswer(answer="")
     order = os.environ.get(_R5_ORDER_ENV, "").strip() or "relevance"
     hits = _order_hits_for_answer(hits, order)
-    handles = [f"m{i + 1}" for i in range(len(hits))]   # 快链窗口自用编号 mN(深轨目录用 cN,不共享)
+    handles = [f"m{i + 1}" for i in range(len(hits))]   # the fast path's own mN handles for this window (the deep track's catalogue uses cN; the two are not shared)
     block = "\n\n".join(cell_block(h, hd) for h, hd in zip(hits, handles))
     bnd = f"\n\nBOUNDARY\n{boundary}" if boundary else ""
     fb = (f"\n\nJUDGE FEEDBACK\nA reviewer checked your previous draft against the SAME materials "
@@ -498,12 +560,13 @@ def answer_from_cells(
           if feedback else "")
     subj = subject or "(not determined)"
     tnow = f"\n\nCurrent time: {(now_dt or now()).isoformat()}" if now_dt else ""
-    prof = f"\n\n{profile}" if profile else ""       # 仅影响作答组织(详略/语言),不改事实选择
+    prof = f"\n\n{profile}" if profile else ""       # only shapes how the answer is organized (detail, language); it never changes which facts are chosen
     user = (f"MEMORY MATERIALS\n{block}{bnd}{tnow}{fb}{prof}"
             f"\n\nQUESTION SUBJECT\n{subj}\n\nUSER QUESTION\n{query}")
     sys = with_scenario(_ANSWER_SYS, "# How to read the materials", scenario, _SCEN_DIR_ANSWER)
     messages = [{"role": "system", "content": sys}, {"role": "user", "content": user}]
-    # mN → 该单元覆盖的 cell id(织写单元展开成员格全集,普通单元=自身格);跨单元去重保序
+    # mN -> the cell ids that unit covers (a woven unit expands to its full set of member cells, a
+    # plain unit to itself); deduped across units while preserving order
     h2ids = {hd: (h.covers or [h.cell.id]) for hd, h in zip(handles, hits)}
     try:
         obj, raw = chat_json(llm, messages, max_tokens=2000, num_tries=3, stage="answer")
@@ -514,22 +577,25 @@ def answer_from_cells(
                 if cid not in cited:
                     cited.append(cid)
         res = MemoryAnswer(answer=answer,
-                           cited_cells=cited,   # 未知编号丢弃,不崩
+                           cited_cells=cited,   # unknown handles are dropped rather than crashing
                            system=sys, user=user, raw=raw)
     except Exception as e:
-        # 只有 JSON 解析失败才有 .raw(模型其实答了,只是格式坏)——原样透出;
-        # 限流/超时等基建异常没有可用原文,异常文本绝不当答案(H1),空答走上层无答案交代
+        # Only a JSON parse failure has .raw (the model did answer, the format was just bad) — pass it
+        # through as-is; infrastructure errors like a rate limit or a timeout have no usable original
+        # text, and the exception text must never become the answer (H1), so an empty answer goes up
+        # to the caller's no-answer account
         raw = getattr(e, "raw", "")
         if raw:
-            logger.warning(f"R5 作答解析失败,原样透出: {e}")
+            logger.warning(f"R5 answer parse failed, passing the raw text through as-is: {e}")
             res = MemoryAnswer(answer=raw, system=sys, user=user)
         else:
-            logger.warning(f"R5 作答调用失败(基建/网络),空答交上层兜底: {type(e).__name__}: {e}")
+            logger.warning(f"R5 answer call failed (infrastructure/network), returning an empty answer for the caller to handle: {type(e).__name__}: {e}")
             res = MemoryAnswer(answer="", system=sys, user=user)
-    logger.info(f"R5 作答 cells={len(hits)} cited={len(res.cited_cells)} "
-                f"ans={len(res.answer)}字 q={query!r}")
+    logger.info(f"R5 answer cells={len(hits)} cited={len(res.cited_cells)} "
+                f"ans_chars={len(res.answer)} q={query!r}")
     return res
 
 
-# 作答材料/对外视图共用的认识状态中文名(object_type 三分类,影响作答措辞)。
+# Chinese names for the epistemic status, shared by the answering material and the public view (the
+# three object_type categories, which affect how the answer is worded).
 _TYPE_CN = {"event": "经历", "fact": "事实", "claim": "说法"}

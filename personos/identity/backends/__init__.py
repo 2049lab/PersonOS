@@ -1,9 +1,12 @@
-"""视频生产管线的可插拔后端:mm_runner(Omni)/ face_detector / voiceprint。
+"""Pluggable backends for the video pipeline: mm_runner (multimodal LLM), face_detector, voiceprint.
 
-factory.make_backends(profile) 按 profile 装配:
-- "mock":纯 numpy 假后端,不下模型、不联网,供单测/骨架冒烟;
-- "real":真后端(AdaFace/InsightFace 检测识别 + ECAPA 声纹 + xhs MAAS Omni),需模型权重 + GPU/CPU。
+factory.make_backends(profile) assembles them by profile:
+- "mock": pure-numpy fakes that download no models and make no network calls, for
+  unit tests and smoke runs of the skeleton;
+- "real": the real thing (AdaFace/InsightFace detection and recognition + ECAPA
+  voiceprints + a hosted multimodal LLM), which needs model weights and a GPU/CPU.
 
-契约(对齐 mneme):face_detector.detect(frame_rgb: ndarray)->list[FaceDet];
-voiceprint.embed(wav_bytes)->ndarray(归一化);mm_runner.chat(prompt, *, video_url/images_b64)->str。
+The contract is: face_detector.detect(frame_rgb: ndarray) -> list[FaceDet];
+voiceprint.embed(wav_bytes) -> ndarray (normalized);
+mm_runner.chat(prompt, *, video_url/images_b64) -> str.
 """

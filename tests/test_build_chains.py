@@ -1,6 +1,8 @@
-"""build_chains 回填测试(§4.3):清链重放 + 幂等(重跑无重复)+ 统计口径。
+"""Backfill tests for build_chains (§4.3): clear-and-replay, idempotence (a re-run creates no
+duplicates), and correct statistics.
 
-FakeLLM 按格出队判链 JSON;重放顺序确定性(格时间序 × 格内发生时间),可断言。
+FakeLLM dequeues one chain-assignment JSON per cell; the replay order is deterministic
+(cells by time, atoms by occurrence time within a cell), so the results are assertable.
 """
 
 from __future__ import annotations
@@ -15,8 +17,10 @@ from .test_retrieval import _v
 
 
 def _scene(db):
-    """两格三 atom:c1(08-10,健身房+教练)、c2(08-24,搬迁)。
-    FakeLLM 两响应:第 1 格(无候选)拆两条新链;第 2 格追加到候选 c1(地点链)。"""
+    """Two cells, three atoms: c1 (08-10, gym + coach) and c2 (08-24, relocation).
+
+    FakeLLM returns two responses: the first cell (no candidates) splits into two new chains;
+    the second cell appends to candidate c1, the location chain."""
     env = Env(db)
     env.add_cell(topic="瑜伽一", episode="叙事一",
                  t_start=datetime(2026, 8, 10, tzinfo=timezone.utc), atoms=[
@@ -33,31 +37,36 @@ def _scene(db):
     responses = [
         '{"assignments":[{"chain":"new","title":"地点链","atoms":[1]},'
         '{"chain":"new","title":"教练链","atoms":[2]}]}',
-        '{"assignments":[{"chain":"c1","atoms":[1]}]}',       # c1=预筛候选(地点链),追加
+        # c1 is the pre-filtered candidate (the location chain); append to it.
+        '{"assignments":[{"chain":"c1","atoms":[1]}]}',
     ]
     return env, responses
 
 
 def test_rebuild_clears_and_replays_in_time_order(db):
-    """回填:先清本 user 链,再按格时间序重放 W2.5(跨格可追加);统计口径正确。"""
+    """Backfill: first clear this user's chains, then replay W2.5 in cell time order (a chain
+    may be appended to across cells); the statistics must add up."""
     env, responses = _scene(db)
     stats = rebuild_user(db, FakeLLM(responses), "")
 
-    assert stats["cleared_chains"] == 0                       # 原本无链
-    assert stats["rebuilt_assigned"] == 3                     # 三 atom 全分配
+    assert stats["cleared_chains"] == 0                       # there were no chains to begin with
+    assert stats["rebuilt_assigned"] == 3                     # all three atoms got assigned
     assert stats["n_chains"] == 2 and stats["chained_atoms"] == 3
     assert stats["free_rate"] == 0.0
-    assert (2, "地点链") in stats["top_chains"]               # 搬迁 atom 追加进了地点链
+    # The relocation atom was appended to the location chain.
+    assert (2, "地点链") in stats["top_chains"]
     assert (1, "教练链") in stats["top_chains"]
 
 
 def test_rebuild_is_idempotent(db):
-    """幂等:重跑先清后建,链数/挂链 atom 数不变,无重复链行;atom 本身不动。"""
+    """Idempotence: a re-run clears before rebuilding, so the chain count and the number of
+    chained atoms stay the same with no duplicate chain rows; the atoms themselves are untouched."""
     env, responses = _scene(db)
     s1 = rebuild_user(db, FakeLLM(responses), "")
-    s2 = rebuild_user(db, FakeLLM(list(responses)), "")       # 重跑(新 LLM 队列同响应)
+    # Re-run with a fresh LLM queue holding the same responses.
+    s2 = rebuild_user(db, FakeLLM(list(responses)), "")
 
-    assert s2["cleared_chains"] == s1["n_chains"]             # 清掉了上一轮的链
-    assert s2["n_chains"] == s1["n_chains"]                   # 重建后数量一致,无重复
+    assert s2["cleared_chains"] == s1["n_chains"]             # the previous round's chains were cleared
+    assert s2["n_chains"] == s1["n_chains"]                   # same count after the rebuild, no duplicates
     assert s2["chained_atoms"] == s1["chained_atoms"] == 3
-    assert s2["n_atoms"] == s1["n_atoms"]                     # 不重抽 atom
+    assert s2["n_atoms"] == s1["n_atoms"]                     # atoms are not re-extracted

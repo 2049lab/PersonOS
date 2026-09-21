@@ -1,10 +1,13 @@
-"""Langfuse(公司 xray)LLM 可观测埋点:薄封装,禁用时全无操作、零副作用。
+"""Langfuse LLM observability instrumentation: a thin wrapper that becomes a complete
+no-op with zero side effects when disabled.
 
-设计原则:pk/sk 未配 → 客户端 None,所有 span/observation 上下文管理器退化为空操作
-(不上报、不影响主流程)。**埋点只加观测,绝不改变业务返回或异常路径**——init/开 span/
-update/flush 任一失败都吞掉并降级,主链路照常。
+Design rule: no pk/sk configured -> the client is None and every span/observation
+context manager degrades to a no-op (nothing reported, main flow untouched).
+**Instrumentation only observes; it must never change a business return value or an
+exception path** — a failure in init, span creation, update, or flush is swallowed and
+degraded, and the main path carries on.
 
-用法:
+Usage:
     with obs.root_span("recall", user_id=u, session_id=s, input=q) as span:
         with obs.observation("chat", model=m, input=msgs) as gen:
             resp = llm.chat(...)
@@ -25,16 +28,18 @@ from .config import settings
 
 _lock = threading.Lock()
 _inited = False
-_client = None   # Langfuse | None(懒建)
+_client = None   # Langfuse | None (created lazily)
 
-# 当前 LLM 阶段名(R0/R5/R3'/W1/W2…),供 MaasClient 给 generation span 命名。
-# contextvar 沿同线程调用栈传播:stage() 在某阶段入口设,栈下游的 maas.chat 读到。
+# Name of the current LLM stage (R0/R5/R3'/W1/W2...), used by the model client to name
+# its generation spans. The contextvar propagates along the call stack of one thread:
+# stage() sets it at the entrance of a stage, and the chat call further down reads it.
 _stage: contextvars.ContextVar[str] = contextvars.ContextVar("lf_stage", default="")
 
 
 @contextmanager
 def stage(name: str):
-    """标注当前 LLM 阶段(嵌套调用会临时覆盖,退出还原)。"""
+    """Mark the current LLM stage (a nested call temporarily overrides it and restores
+    the previous value on exit)."""
     tok = _stage.set(name or "")
     try:
         yield
@@ -46,8 +51,10 @@ def current_stage() -> str:
     return _stage.get()
 
 
-# 当前请求的 trace_id(与 langfuse trace 同 id),供日志 patcher 写进 xrayTraceId 把一次请求
-# 的所有日志(跨 ingest/recall 各 worker 线程)串起来。contextvar 随 copy_context 传播到子线程。
+# trace_id of the current request (same id as the langfuse trace). The log patcher
+# writes it into the tracing id field so that all logs of one request — across the
+# ingest/recall worker threads — are stitched together. The contextvar propagates into
+# child threads via copy_context.
 _req_trace: contextvars.ContextVar[str] = contextvars.ContextVar("req_trace", default="")
 
 
@@ -56,10 +63,14 @@ def request_trace_id() -> str:
 
 
 class ContextThreadPoolExecutor(ThreadPoolExecutor):
-    """保 contextvars 的线程池:submit 时捕获提交线程的 context(含 OTel 活动 span + stage),
-    worker 里以 copy_context().run 执行 → 并行子任务的 LLM span 正确 nest 到父 trace、stage
-    随之传播。标准库 ThreadPoolExecutor 默认丢弃提交线程的 contextvars,会把并行 LLM 调用
-    甩成孤儿根 trace(见 weave 织写)。公司 redinfra 只有 asyncio 版(async_to_sync),不适用同步 fan-out。"""
+    """A thread pool that preserves contextvars: submit() captures the submitting
+    thread's context (including the active OTel span and the stage) and the worker runs
+    the callable through copy_context().run — so LLM spans of parallel subtasks nest
+    correctly under the parent trace and the stage propagates with them. The stdlib
+    ThreadPoolExecutor drops the submitting thread's contextvars, which turns parallel
+    LLM calls into orphan root traces (as seen in the weave-style writes). The
+    platform's helper only has an asyncio version (async_to_sync), which doesn't apply
+    to a synchronous fan-out."""
 
     def submit(self, fn, /, *args, **kwargs):
         ctx = contextvars.copy_context()
@@ -67,7 +78,8 @@ class ContextThreadPoolExecutor(ThreadPoolExecutor):
 
 
 def client():
-    """懒建 langfuse 客户端单例;pk/sk 未配 → None(埋点全关)。init 失败也降级为 None。"""
+    """Lazily build the langfuse client singleton; no pk/sk configured -> None (all
+    instrumentation off). A failed init also degrades to None."""
     global _inited, _client
     if _inited:
         return _client
@@ -76,7 +88,7 @@ def client():
             return _client
         _inited = True
         if not (settings.langfuse_public_key and settings.langfuse_secret_key):
-            logger.info("langfuse 未配置(无 pk/sk),LLM 埋点关闭")
+            logger.info("langfuse not configured (no pk/sk), LLM instrumentation disabled")
             return _client
         try:
             from langfuse import Langfuse
@@ -87,18 +99,19 @@ def client():
                 environment=settings.langfuse_environment or None,
                 release=settings.langfuse_release or None,
             )
-            logger.info(f"langfuse 已启用 env={settings.langfuse_environment} host={settings.langfuse_host}")
-        except Exception as e:   # noqa: BLE001  埋点初始化失败绝不拖垮服务
-            logger.warning(f"langfuse 初始化失败,埋点关闭: {e}")
+            logger.info(f"langfuse enabled env={settings.langfuse_environment} host={settings.langfuse_host}")
+        except Exception as e:   # noqa: BLE001  A failed instrumentation init must never take the service down
+            logger.warning(f"langfuse init failed, instrumentation disabled: {e}")
             _client = None
     return _client
 
 
 def _set_attrs(span, user_id, session_id, *, as_root: bool) -> None:
-    """标 as_root(上游不接 langfuse 时链路入口必须)+ 挂 user/session。失败忽略。"""
+    """Mark as_root (required at the entry of a trace when the upstream isn't wired to
+    langfuse) and attach user/session. Failures are ignored."""
     try:
         if as_root:
-            span._otel_span.set_attribute("langfuse.internal.as_root", "true")   # 必须字符串
+            span._otel_span.set_attribute("langfuse.internal.as_root", "true")   # must be a string
         if user_id:
             span._otel_span.set_attribute("langfuse.user.id", str(user_id))
         if session_id:
@@ -110,20 +123,27 @@ def _set_attrs(span, user_id, session_id, *, as_root: bool) -> None:
 @contextmanager
 def root_span(name: str, *, user_id=None, session_id=None, input: Any = None,
               metadata: Any = None, trace_id: Optional[str] = None):
-    """请求入口根 span(recall/ingest/profile/深轨)。标 as_root。禁用/失败时 yield None。
+    """Root span at a request entry point (recall/ingest/profile/deep track). Marked
+    as_root. Yields None when disabled or on failure.
 
-    入口先把 OTel 上下文重置为空再开 span:线程池(ingest_exec / FastAPI anyio)复用线程时,
-    上一任务遗留的 span 上下文会串扰后一任务,使其嵌套观测丢父 → 甩成孤儿根 trace。从空上下文
-    起,本任务的 attach/detach 自成一栈,既保证自己是真根、又清掉残留,recall/ingest/profile 通吃。
+    We reset the OTel context to empty before opening the span: when a thread pool
+    (ingest_exec / FastAPI's anyio pool) reuses a thread, span context left over from
+    the previous task bleeds into the next one, so its nested observations lose their
+    parent and get thrown out as orphan root traces. Starting from an empty context,
+    this task's attach/detach form their own stack — which both guarantees we really
+    are the root and clears the leftovers, for recall, ingest and profile alike.
 
-    trace_id(可选,32 hex):端到端贯穿——入口生成、经队列透传;传入则 langfuse trace 用该 id,
-    且日志 xrayTraceId 也用它(即便 langfuse 禁用/开 span 失败也灌进 _req_trace,保证日志可查)。
+    trace_id (optional, 32 hex): threaded end to end — generated at the entry point and
+    passed through the queue. If given, the langfuse trace uses that id and so does the
+    tracing id in the logs (it is written into _req_trace even when langfuse is disabled
+    or span creation fails, so the logs stay searchable).
     """
     c = client()
 
     @contextmanager
     def _bind(tid: str):
-        """把请求 trace_id 绑到 _req_trace(供 _xray_patcher 写日志 xrayTraceId);空则不绑。"""
+        """Bind the request trace_id to _req_trace (so _xray_patcher can write it into
+        the log tracing id); an empty value binds nothing."""
         tok = None
         try:
             if tid:
@@ -136,23 +156,23 @@ def root_span(name: str, *, user_id=None, session_id=None, input: Any = None,
                 except Exception:   # noqa: BLE001
                     pass
 
-    if c is None:                                  # langfuse 关:仍灌 trace_id 让日志带上
+    if c is None:                                  # langfuse off: still set trace_id so the logs carry it
         with _bind(trace_id or ""):
             yield None
         return
     reset_token = None
     try:
         from opentelemetry import context as _otel_ctx
-        reset_token = _otel_ctx.attach(_otel_ctx.Context())   # 干净空上下文,隔离线程残留
-    except Exception:   # noqa: BLE001  OTel 不可用时退化:不重置,行为同前
+        reset_token = _otel_ctx.attach(_otel_ctx.Context())   # Clean empty context, isolates thread leftovers
+    except Exception:   # noqa: BLE001  OTel unavailable: degrade by not resetting, behavior as before
         reset_token = None
     try:
         kw = {"name": name, "input": input, "metadata": metadata}
         if trace_id:
-            kw["trace_context"] = {"trace_id": trace_id}   # 令 langfuse trace 用传入 id
+            kw["trace_context"] = {"trace_id": trace_id}   # make the langfuse trace use the id passed in
         cm = c.start_as_current_span(**kw)
     except Exception as e:   # noqa: BLE001
-        logger.debug(f"langfuse root_span 失败(忽略): {e}")
+        logger.debug(f"langfuse root_span failed (ignored): {e}")
         if reset_token is not None:
             try:
                 from opentelemetry import context as _otel_ctx
@@ -179,7 +199,8 @@ def root_span(name: str, *, user_id=None, session_id=None, input: Any = None,
 @contextmanager
 def observation(name: str, *, as_type: str = "generation", model: Optional[str] = None,
                 input: Any = None, metadata: Any = None):
-    """一次 LLM/工具/检索观测(嵌在当前 span 下)。禁用/失败时 yield None。"""
+    """One LLM/tool/retrieval observation, nested under the current span. Yields None
+    when disabled or on failure."""
     c = client()
     if c is None:
         yield None
@@ -188,7 +209,7 @@ def observation(name: str, *, as_type: str = "generation", model: Optional[str] 
         cm = c.start_as_current_observation(as_type=as_type, name=name, model=model,
                                             input=input, metadata=metadata)
     except Exception as e:   # noqa: BLE001
-        logger.debug(f"langfuse observation 失败(忽略): {e}")
+        logger.debug(f"langfuse observation failed (ignored): {e}")
         yield None
         return
     with cm as obs:
@@ -197,7 +218,8 @@ def observation(name: str, *, as_type: str = "generation", model: Optional[str] 
 
 def update(obs, *, output: Any = None, usage: Optional[dict] = None,
            level: Optional[str] = None, status_message: Optional[str] = None) -> None:
-    """回填观测 output/token(usage 值须数字)/错误。obs 为 None 时无操作。绝不抛。"""
+    """Fill in an observation's output / token usage (usage values must be numbers) /
+    error. A no-op when obs is None. Never raises."""
     if obs is None:
         return
     try:
@@ -217,7 +239,8 @@ def update(obs, *, output: Any = None, usage: Optional[dict] = None,
 
 
 def current_trace_id() -> Optional[str]:
-    """当前活跃 trace 的 id(供日志/回给调用方去 xray 检索)。禁用/无活跃 → None。"""
+    """Id of the currently active trace (for logs, or to return to the caller so they
+    can look it up in the tracing backend). Disabled / nothing active -> None."""
     c = client()
     if c is None:
         return None
@@ -228,7 +251,8 @@ def current_trace_id() -> Optional[str]:
 
 
 def flush() -> None:
-    """退出前把缓冲的 trace 冲出去(短命进程/请求收尾必调)。"""
+    """Flush buffered traces before exit (must be called by short-lived processes and
+    at the end of a request)."""
     c = client()
     if c is not None:
         try:

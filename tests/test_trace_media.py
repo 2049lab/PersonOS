@@ -1,11 +1,12 @@
-"""溯源返图单测:图片证据在 recall memories / trace 里带 modality + media_url(签名 URL)。
+"""Returning images along the provenance path: image evidence carries modality plus a signed media_url in recalled
+memories and in trace output.
 
-覆盖:
-- evidence_entries:图片证据带 modality 与 media_url;纯文本不带;
-- media_store 未给 → 只标 modality 不带 media_url;
-- sign_url 抛异常 → 不带 media_url(不炸);
-- _ev_dict(trace 的 pair 用)同规则;
-- memory_view 端到端把 media_url 透进 evidence 条目。
+Covers:
+- evidence_entries gives image evidence both modality and media_url, while plain text gets neither;
+- with no media_store supplied, only modality is set and media_url is omitted;
+- if sign_url raises, media_url is omitted and nothing blows up;
+- _ev_dict, used by the trace pairs, follows the same rules;
+- memory_view threads media_url all the way through to the evidence entries.
 """
 
 from __future__ import annotations
@@ -75,7 +76,7 @@ def test_text_evidence_no_media_fields():
 
 def test_no_signer_marks_modality_only():
     store = FakeEvStore([_img_ev()])
-    evs = evidence_entries(_atom(["ev_img"]), store, None)   # 无签名器
+    evs = evidence_entries(_atom(["ev_img"]), store, None)   # no signer
     assert evs[0]["modality"] == "image"
     assert "media_url" not in evs[0]
 
@@ -84,11 +85,11 @@ def test_sign_failure_degrades():
     store = FakeEvStore([_img_ev()])
     evs = evidence_entries(_atom(["ev_img"]), store, FakeSigner(fail=True))
     assert evs[0]["modality"] == "image"
-    assert "media_url" not in evs[0]        # 签名失败:只标 modality,不炸
+    assert "media_url" not in evs[0]        # signing failed, so only modality is set and no error escapes
 
 
 def test_ev_dict_image_media_url():
-    """trace 的 pair 用 _ev_dict,同规则带 media_url。"""
+    """The trace pairs go through _ev_dict, which attaches media_url under the same rules."""
     d = _ev_dict(_img_ev(), FakeSigner())
     assert d["modality"] == "image"
     assert d["media_url"].startswith("https://oss.example/")
@@ -97,7 +98,7 @@ def test_ev_dict_image_media_url():
 
 
 def test_memory_view_threads_media_url():
-    """memory_view 端到端:图片证据 evidence 条目带 media_url。"""
+    """End to end through memory_view: the evidence entry for image evidence carries media_url."""
     store = FakeEvStore([_img_ev()])
     view = memory_view(_atom(["ev_img"]), store, FakeSigner())
     assert view["evidence"][0]["media_url"].startswith("https://oss.example/")

@@ -1,4 +1,6 @@
-"""⑥a/⑥b 单测:inspect 同框约束 + registry map_casts/build_candidates(fake store,无网)。"""
+"""Unit tests for the co-presence constraint in inspect and for registry map_casts/build_candidates, using a fake
+store and no network.
+"""
 
 from __future__ import annotations
 
@@ -25,7 +27,7 @@ def test_present_casts_ignores_env_and_empty_shell():
                  lines=[ClipLine(0, 1, "P1", "speech", "hi"),
                         ClipLine(1, 2, "ENV", "environment", "a room")],
                  noms=[Nomination(local_id="P2", t=1.0)])
-    assert present_casts(sc) == {"S1", "S2"}               # ENV 不计,P2 靠提名在场
+    assert present_casts(sc) == {"S1", "S2"}               # ENV does not count; P2 is present via its nomination
 
 
 def test_bind_collision_detects_copresent_same_char():
@@ -33,7 +35,7 @@ def test_bind_collision_detects_copresent_same_char():
                  {"P1": "S1", "P2": "S2", "P3": "S3"},
                  lines=[ClipLine(0, 1, "P1", "speech", "a"), ClipLine(1, 2, "P2", "speech", "b"),
                         ClipLine(2, 3, "P3", "speech", "c")])
-    proposed = {"S1": "char_a", "S2": "char_a", "S3": "char_b"}   # S1/S2 撞 char_a
+    proposed = {"S1": "char_a", "S2": "char_a", "S3": "char_b"}   # S1 and S2 collide on char_a
     vs = inspect_bind_collisions(sc, proposed)
     assert len(vs) == 1 and vs[0].cast_ids == ("S1", "S2") and vs[0].rule == "bind_collision"
 
@@ -53,7 +55,7 @@ class _FakeCloud:
 
 class _FakeStore:
     def __init__(self, chars):
-        self._chars = chars   # [{id, primary_name, payload, names:[...]}]
+        self._chars = chars   # [{id, primary_name, payload, names: [...]}]
 
     def list_active_characters(self, *, include_wearer=False):
         return self._chars
@@ -72,12 +74,12 @@ def _registry(chars=()):
 
 def test_map_casts_mint_and_continuation():
     reg = _registry()
-    # 首 clip:P1/P2 新人 → 铸 S1/S2;SW 恒 SW
+    # First clip: P1 and P2 are new, so they mint S1 and S2; SW always maps to SW.
     sc = _script([CastDecl(local_id="P1"), CastDecl(local_id="P2"),
                   CastDecl(local_id="SW", is_wearer=True)], {})
     m = reg.map_casts(S, sc)
     assert m == {"P1": "S1", "P2": "S2", "SW": "SW"}
-    # 写 roster 后,第二 clip 用 CONT prev=S1 续接
+    # Once the roster entry is written, the second clip continues from prev=S1 through CONT.
     reg.draft.save_roster_entry(S, "S1", character_id=None, card={"name": "Bob"})
     sc2 = _script([CastDecl(local_id="P1")], {}, cont={"P1": "S1"})
     assert reg.map_casts(S, sc2) == {"P1": "S1"}
@@ -85,7 +87,7 @@ def test_map_casts_mint_and_continuation():
 
 def test_map_casts_unknown_cont_mints_new():
     reg = _registry()
-    sc = _script([CastDecl(local_id="P1")], {}, cont={"P1": "S9"})   # S9 不在 roster
+    sc = _script([CastDecl(local_id="P1")], {}, cont={"P1": "S9"})   # S9 is not in the roster
     assert reg.map_casts(S, sc) == {"P1": "S1"}
     assert any("S9" in i for i in sc.issues)
 
@@ -99,7 +101,7 @@ def test_build_candidates_small_library_passthrough_and_extras():
     extra = {"S1": [CandidateCard(character_id="chain:sess1:S2", name="pend")]}
     out = reg.build_candidates(["S1"], {"S1": CastEvidence("S1")}, sc, extra_cards=extra)
     ids = [c.character_id for c in out["S1"]]
-    assert ids == ["char_a", "char_b", "chain:sess1:S2"]   # 小库全量 + extra 附尾
+    assert ids == ["char_a", "char_b", "chain:sess1:S2"]   # a small library passes through in full, extras appended
 
 
 def test_build_candidates_empty_library_only_extras():

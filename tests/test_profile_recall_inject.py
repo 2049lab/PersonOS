@@ -1,4 +1,5 @@
-"""画像消费侧单测:/profile 对外结构化视图(纯函数)+ R0/R5 注入(捕获 message 断言)。"""
+"""Unit tests for the profile consumer side: the public structured /profile view (a pure
+function) plus R0/R5 injection (asserted by capturing the messages)."""
 
 from __future__ import annotations
 
@@ -15,7 +16,8 @@ from personos.storage.profile_store import (
 
 
 class CapturingLLM:
-    """记录最后一次 messages,返回预设响应(验证注入)。"""
+    """Records the last messages it was given and returns a canned response, so injection can
+    be verified."""
 
     def __init__(self, resp: str):
         self.resp = resp
@@ -47,9 +49,9 @@ def test_public_profile_seeded_strips_internal_ids():
     v = _public_profile(_seeded())
     assert v["exists"] is True and v["version"] == 3
     t = v["traits"]["communication_style"]
-    assert t == {"text": "direct", "status": "confirmed", "last_confirmed": "2026-09-01"}  # 无 sources
+    assert t == {"text": "direct", "status": "confirmed", "last_confirmed": "2026-09-01"}  # no sources
     f = v["facts"]["today"][0]
-    assert f == {"text": "2026-09-14 had ramen", "last_confirmed": "2026-09-14"}  # 无 id/sources
+    assert f == {"text": "2026-09-14 had ramen", "last_confirmed": "2026-09-14"}  # no id, no sources
 
 
 def test_rewrite_query_injects_profile():
@@ -57,13 +59,14 @@ def test_rewrite_query_injects_profile():
     rewrite_query(llm, raw_query="how is she", now_dt=now(),
                   profile="USER PROFILE:\n[基本特征]\n家庭: wife is Alice(确认)")
     user_msg = llm.messages[1]["content"]
-    assert "USER PROFILE" in user_msg and "Alice" in user_msg   # R0 注入了画像
+    assert "USER PROFILE" in user_msg and "Alice" in user_msg   # R0 injected the profile
 
 
 def test_rewrite_query_without_profile_has_no_block():
     llm = CapturingLLM('{"resolved": "q"}')
-    rewrite_query(llm, raw_query="q", now_dt=now())            # 空画像
-    assert "USER PROFILE" not in llm.messages[1]["content"]     # 无画像行为与今天一致
+    rewrite_query(llm, raw_query="q", now_dt=now())            # empty profile
+    # With no profile, behaviour is the same as it is today.
+    assert "USER PROFILE" not in llm.messages[1]["content"]
 
 
 def test_answer_from_cells_injects_profile():
@@ -73,4 +76,4 @@ def test_answer_from_cells_injects_profile():
     answer_from_cells(llm, query="q", subject="user", hits=[hit], now_dt=now(),
                       profile="USER PROFILE:\n[基本特征]\n沟通风格: 偏好简短(确认)")
     user_msg = llm.messages[1]["content"]
-    assert "USER PROFILE" in user_msg and "偏好简短" in user_msg   # R5 注入了 traits
+    assert "USER PROFILE" in user_msg and "偏好简短" in user_msg   # R5 injected the traits

@@ -1,4 +1,6 @@
-"""画像触发退火 + 单 user 编排单测:anneal/should(纯逻辑)+ run_user_consolidation(真 store + FakeLLM)。"""
+"""Unit tests for the profile trigger's annealing schedule and the single-user orchestration:
+anneal_step and should_consolidate are pure logic, while run_user_consolidation runs against
+real stores with a FakeLLM."""
 
 from __future__ import annotations
 
@@ -19,15 +21,15 @@ from .fakes import FakeLLM
 
 
 def test_anneal_step_ramps_and_caps():
-    assert [anneal_step(v) for v in range(8)] == [1, 2, 2, 3, 4, 5, 5, 5]   # 冷启动1,涨到5封顶
+    assert [anneal_step(v) for v in range(8)] == [1, 2, 2, 3, 4, 5, 5, 5]   # starts cold at 1 and rises to a cap of 5
 
 
 def test_should_consolidate_either_condition():
-    # 退火:第 0 版 step=1,1 个新 cell 即触发
+    # annealing: at version 0 the step is 1, so a single new cell already triggers
     assert should_consolidate(n_new=1, ep_chars=10, version_count=0, ep_chars_trigger=15000)
-    # 第 1 版 step=2,1 个 cell 不够 & 字数不够 → 不触发
+    # at version 1 the step is 2, so one cell is not enough and neither is the character count
     assert not should_consolidate(n_new=1, ep_chars=10, version_count=1, ep_chars_trigger=15000)
-    # 字数达上界 → 触发(哪怕 cell 数没到 step)
+    # the character count reaches its bound, which triggers even though the cell count is below the step
     assert should_consolidate(n_new=1, ep_chars=15000, version_count=1, ep_chars_trigger=15000)
 
 
@@ -48,9 +50,9 @@ def test_run_user_consolidation_first_version(db):
                                profile_store=ps, today=now().date())
     assert v == 1
     cur = ps.current()
-    assert cur.up_to_cell_id == c.id                       # 游标记到最后一个 cell
+    assert cur.up_to_cell_id == c.id                       # the cursor advances to the last cell
     t = cur.profile.traits["interests"]
-    assert t.text == "likes ramen" and t.sources == [c.id]  # 短标 c1 → 真实 cell_id 回填
+    assert t.text == "likes ramen" and t.sources == [c.id]  # the short label c1 is filled back in with the real cell_id
 
 
 def test_run_user_consolidation_no_new_cells_returns_none(db):
@@ -60,16 +62,21 @@ def test_run_user_consolidation_no_new_cells_returns_none(db):
                                                "sources": ["c1"]}}})
     assert run_user_consolidation(FakeLLM([patch]), cells_store=cs, atoms_store=ats,
                                   profile_store=ps, today=now().date()) == 1
-    # 再跑:游标已到 c,无新 cell → None(幂等,不重复出版)
+    # run again: the cursor already sits at c and there are no new cells, so it returns None.
+    # The call is idempotent and does not publish a second version.
     assert run_user_consolidation(FakeLLM([patch]), cells_store=cs, atoms_store=ats,
                                   profile_store=ps, today=now().date()) is None
 
 
 def test_single_flight_lock_serializes_two_triggers():
-    """并发两次触发(模拟两 pod/两次关段)共享一把锁:只有一个抢到真跑,另一个直接返回(不重复整理)。
+    """Two concurrent triggers, standing in for two service instances or two segment closes,
+    share one lock: only one wins and does the real work, the other returns immediately
+    instead of consolidating a second time.
 
-    纯锁语义(不碰 pin 的 db 连接,DB 并发由 E2E 脚本真链路覆盖):验证 runtime._run_user_profile
-    的单飞骨架——try_acquire 抢不到即返回。
+    This covers lock semantics only; it does not touch the pinned database connection, since
+    database-level concurrency is exercised by the end-to-end scripts against the real path.
+    What is checked here is the single-flight skeleton of runtime._run_user_profile: if
+    try_acquire fails, return.
     """
     import threading
 
@@ -83,10 +90,10 @@ def test_single_flight_lock_serializes_two_triggers():
         start.wait()
         token = lock.try_acquire("u", "profile")
         if not token:
-            return                                     # 抢不到 → 交给对方(幂等自愈)
+            return                                     # lost the race -> leave it to the other worker, which heals idempotently
         try:
             ran["n"] += 1
-            time.sleep(0.05)                           # 放大临界区窗口
+            time.sleep(0.05)                           # widen the critical section window
         finally:
             lock.release("u", "profile", token)
 
@@ -95,4 +102,4 @@ def test_single_flight_lock_serializes_two_triggers():
         t.start()
     for t in ts:
         t.join(2)
-    assert ran["n"] == 1                               # 单飞:同一时刻只有一个整理在跑
+    assert ran["n"] == 1                               # single-flight: only one consolidation runs at a time

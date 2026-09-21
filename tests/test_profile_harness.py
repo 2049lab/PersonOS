@@ -1,10 +1,12 @@
-"""补丁校验器单测(干净结构):合法通过 + 非法字段打回(未知域/枚举/长度/band/幻觉短标出处)。"""
+"""Unit tests for the patch validator (clean-structure path): a legal patch passes, and
+illegal fields are rejected (unknown domain / bad enum / over-length / bad band / hallucinated
+short-label source)."""
 
 from __future__ import annotations
 
 from personos.online.profile_harness import validate_patch
 
-VALID = {"c1", "c2"}          # 本轮 cell 的短标集
+VALID = {"c1", "c2"}          # the set of short cell labels for this round
 
 
 def _v(patch):
@@ -31,11 +33,12 @@ def test_unknown_trait_domain_rejected():
 
 def test_trait_text_too_long_rejected():
     errs = _v({"traits": {"personality": {"text": "x" * 501, "status": "inferred", "sources": ["c1"]}}})
-    assert any("超上限" in e for e in errs)          # 上限 500(c5880c1 由 250 提到 500)
+    assert any("超上限" in e for e in errs)          # limit is 500 (raised from 250 in c5880c1)
 
 
 def test_trait_text_within_limit_ok():
-    """限界条件描述天然字多:120 字的一句话应通过(上限 500)。"""
+    """A bounded-condition description is naturally wordy: a single 120-character sentence must
+    pass (the limit is 500)."""
     assert _v({"traits": {"personality": {"text": "x" * 120, "status": "inferred", "sources": ["c1"]}}}) == []
 
 
@@ -75,7 +78,8 @@ def test_rewrite_missing_id_rejected():
 
 
 def test_rewrite_partial_fields_ok():
-    """rewrite 只改一个字段合法(未提字段保留,不强制全给)。"""
+    """A rewrite that touches only one field is legal: unmentioned fields are preserved, so the
+    model is not forced to restate everything."""
     assert _v({"facts": {"rewrite": [{"id": "f_1", "band": "long"}]}}) == []
 
 

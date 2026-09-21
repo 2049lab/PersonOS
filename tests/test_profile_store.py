@@ -1,7 +1,9 @@
-"""画像存储单测:版本递增 / current 取最新 / 版本查询 / 用户隔离 / cells_after 游标。
+"""Unit tests for profile storage: version increment / current returns the latest / lookup by
+version / per-user isolation / the cells_after cursor.
 
-走共享 SIT 库,autouse 的 db fixture 已把每个测试包进 rollback_scope(结束无条件回退,
-固定 user_id/id 安全,零污染)。
+These run against a shared database; the autouse db fixture already wraps each test in a
+rollback scope (an unconditional rollback at the end), which makes fixed user_ids and ids safe
+and leaves no residue.
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ def _profile(trait_text: str = "prefers terse feedback", fact_text: str = "ate r
     p.traits["communication_style"] = ProfileTrait(
         text=trait_text, status="confirmed", last_confirmed="2026-09-14", sources=["cell_x"]
     )
-    p.traits["finance"] = None                      # 空维度合法
+    p.traits["finance"] = None                      # an empty dimension is legal
     p.facts["today"].append(ProfileFact(
         id="f_1", text=fact_text, last_confirmed="2026-09-14", sources=["cell_y"],
     ))
@@ -40,15 +42,16 @@ def test_save_version_monotonic_and_current_latest(db):
     ps = ProfileStore(db, user_id="u_prof_2")
     v1 = ps.save_version(_profile(trait_text="v1"), up_to_cell_id="cell_a")
     v2 = ps.save_version(_profile(trait_text="v2"), up_to_cell_id="cell_b")
-    assert (v1, v2) == (1, 2)                        # 单调递增
+    assert (v1, v2) == (1, 2)                        # monotonically increasing
     assert ps.version_count() == 2
     cur = ps.current()
     assert cur.version == 2 and cur.up_to_cell_id == "cell_b"
-    assert cur.profile.traits["communication_style"].text == "v2"   # 取最新版
+    assert cur.profile.traits["communication_style"].text == "v2"   # the latest version wins
 
 
 def test_profile_json_round_trip(db):
-    """结构完整往返:traits(含 None 空维)、facts(含 f_id)不丢不变。"""
+    """The structure survives a full round trip: traits (including a None empty dimension) and
+    facts (including f_id) come back unchanged and complete."""
     ps = ProfileStore(db, user_id="u_prof_3")
     ps.save_version(_profile(), up_to_cell_id="")
     p = ps.current().profile
@@ -69,17 +72,19 @@ def test_get_version(db):
 
 
 def test_user_isolation(db):
-    """严禁跨用户串画像:u_a 出版本后 u_b 仍无画像,各取各的。"""
+    """Profiles must never cross between users: after u_a publishes a version, u_b still has no
+    profile at all — each sees only their own."""
     pa = ProfileStore(db, user_id="u_iso_a")
     pb = ProfileStore(db, user_id="u_iso_b")
     pa.save_version(_profile(trait_text="a's profile"), up_to_cell_id="ca")
-    assert pb.current() is None                      # b 看不到 a 的画像
+    assert pb.current() is None                      # b cannot see a's profile
     assert pb.version_count() == 0
     assert pa.current().profile.traits["communication_style"].text == "a's profile"
 
 
 def test_cells_after_cursor(db):
-    """cells_after:游标之后的新 cell(old→new);空游标=全部;游标不存在=全部(重蒸馏)。"""
+    """cells_after returns the cells newer than the cursor (oldest to newest); an empty cursor
+    means everything, and a cursor that does not exist also means everything (re-distill)."""
     cs = CellStore(db, user_id="u_cells")
     base = now()
     ids = []
@@ -89,14 +94,15 @@ def test_cells_after_cursor(db):
         cs.upsert(c)
         ids.append(c.id)
 
-    assert [c.id for c in cs.cells_after("")] == ids                 # 空游标 → 全部
-    assert [c.id for c in cs.cells_after(ids[0])] == ids[1:]         # 游标后两条
-    assert cs.cells_after(ids[2]) == []                              # 最后一条之后无
-    assert [c.id for c in cs.cells_after("cell_nonexistent")] == ids  # 游标不存在 → 全部(重蒸馏)
+    assert [c.id for c in cs.cells_after("")] == ids                 # empty cursor -> everything
+    assert [c.id for c in cs.cells_after(ids[0])] == ids[1:]         # the two after the cursor
+    assert cs.cells_after(ids[2]) == []                              # nothing after the last one
+    # Cursor does not exist -> everything (re-distill).
+    assert [c.id for c in cs.cells_after("cell_nonexistent")] == ids
 
 
 def test_cells_after_isolation(db):
-    """cells_after 只看本 user 的 cell。"""
+    """cells_after only sees cells belonging to this user."""
     ca = CellStore(db, user_id="u_ca")
     cb = CellStore(db, user_id="u_cb")
     base = now()
@@ -104,5 +110,5 @@ def test_cells_after_isolation(db):
     ca.upsert(a)
     b = MemCell(session_id="s", topic="b", episode="b", t_start=base + timedelta(minutes=1))
     cb.upsert(b)
-    assert [c.id for c in ca.cells_after("")] == [a.id]              # 各看各的
+    assert [c.id for c in ca.cells_after("")] == [a.id]              # each sees only their own
     assert [c.id for c in cb.cells_after("")] == [b.id]

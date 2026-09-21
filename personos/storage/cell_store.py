@@ -1,6 +1,9 @@
-"""MemCell 存储:段粒度组织单元。topic 向量单独列存,是段粒度检索面(find_cells / rerank 材料头)。
+"""MemCell storage: the organizing unit at segment granularity.
 
-多租户:与 AtomStore 同规,实例按 user 绑定。
+The topic vector gets its own column and forms the segment-level retrieval
+surface, used by find_cells and as the header of rerank material.
+
+Multi-tenancy works as it does in AtomStore: an instance is bound to one user.
 """
 
 from __future__ import annotations
@@ -14,7 +17,8 @@ from loguru import logger
 from ..models import MemCell, ensure_aware
 from .db import Database, blob_of, blob_param
 
-# VALUES(col) 写法:兼容 5.6/5.7/8.0 全版本(同 atom_store);topic_embedding 走 UNHEX hex 通道
+# The VALUES(col) form works on 5.6, 5.7 and 8.0 alike, as in atom_store, and
+# topic_embedding travels through the UNHEX hex channel for the same reason.
 _UPSERT_SQL = (
     "INSERT INTO memcells(id, user_id, session_id, t_start, t_end, episode_type, payload, topic_embedding) "
     "VALUES(%s,%s,%s,%s,%s,%s,%s,UNHEX(%s)) "
@@ -30,7 +34,9 @@ class CellStore:
         self.user_id = user_id
 
     def upsert(self, cell: MemCell, topic_embedding: Optional[np.ndarray] = None) -> str:
-        """插入或整体替换一个 cell(remember 修订 episode 时整体替换)。embedding None 保留原向量。"""
+        """Insert a cell or replace it wholesale, which is what remember does when
+        it revises an episode. When embedding is None the existing vector is kept.
+        """
         emb_blob = topic_embedding
         if emb_blob is None:
             row = self.db.fetch_one(
@@ -48,7 +54,7 @@ class CellStore:
             cell.model_dump_json(), blob_param(emb_blob),
         ))
         logger.info(f"cell upsert id={cell.id} session={cell.session_id} "
-                    f"user={self.user_id or '(默认)'} topic={cell.topic[:40]!r}")
+                    f"user={self.user_id or '(default)'} topic={cell.topic[:40]!r}")
         return cell.id
 
     def get(self, cell_id: str) -> MemCell | None:
@@ -58,7 +64,7 @@ class CellStore:
         return MemCell.model_validate_json(row["payload"]) if row else None
 
     def list_session(self, session_id: str) -> list[MemCell]:
-        """一个会话的全部 cell,按段起始时间 old→new(即对话时序)。"""
+        """Every cell of one session, by segment start time oldest to newest, which is conversational order."""
         rows = self.db.fetch_all(
             "SELECT payload FROM memcells WHERE user_id=%s AND session_id=%s "
             "ORDER BY t_start, id",
@@ -67,7 +73,11 @@ class CellStore:
         return [MemCell.model_validate_json(r["payload"]) for r in rows]
 
     def count_session(self, session_id: str) -> int:
-        """该会话已产出 cell 数:重部署/多副本下的权威口径(取代内存累积计数)。"""
+        """How many cells this session has produced.
+
+        This is the authoritative count across redeploys and replicas, replacing a
+        counter accumulated in memory.
+        """
         row = self.db.fetch_one(
             "SELECT COUNT(*) AS n FROM memcells WHERE user_id=%s AND session_id=%s",
             (self.user_id, session_id),
@@ -75,7 +85,7 @@ class CellStore:
         return int(row["n"]) if row else 0
 
     def iter_all(self, limit: int = 1000) -> list[MemCell]:
-        """本 user 全部 cell,按段起始时间 old→new。"""
+        """All of this user's cells, by segment start time oldest to newest."""
         rows = self.db.fetch_all(
             "SELECT payload FROM memcells WHERE user_id=%s ORDER BY t_start, id LIMIT %s",
             (self.user_id, limit),
@@ -83,11 +93,18 @@ class CellStore:
         return [MemCell.model_validate_json(r["payload"]) for r in rows]
 
     def cells_after(self, up_to_cell_id: str = "") -> list[MemCell]:
-        """本 user 中,游标 cell 之后(按 (t_start, id) 全序)的所有 cell,old→new。
+        """All of this user's cells after the cursor cell, under the total order on
+        (t_start, id), oldest to newest.
 
-        供画像 consolidate 取"上次出版本以来的新 cell"。游标空 → 全部;游标 cell 已不存在
-        (如被 forget 删)→ 退化为全部(触发全量重蒸馏,符合"画像可重编译")。
-        (t_start, id) 元组序:t_start 同值时以 id 兜底,不漏不重。t_start 为 ISO 字符串,字典序=时间序。
+        This is how profile consolidation picks up the cells added since the last
+        published version. An empty cursor means all of them. A cursor cell that no
+        longer exists — deleted by forget, say — also degrades to all of them,
+        triggering a full re-distillation, which is consistent with a profile being
+        recompilable.
+
+        Ordering on the (t_start, id) tuple means id breaks ties when two cells
+        share a t_start, so nothing is skipped and nothing repeats. t_start is an
+        ISO string, where lexical order equals chronological order.
         """
         if not up_to_cell_id:
             return self.iter_all()
@@ -103,19 +120,25 @@ class CellStore:
         return [MemCell.model_validate_json(r["payload"]) for r in rows]
 
     def _type_where(self, episode_type: Optional[str], start: Optional[str], end: Optional[str]):
-        """按 user + 可选(类型/时间范围)拼 WHERE;过滤值一律走参数,子句名固定,无注入面。"""
+        """Build the WHERE clause from user plus optional type and time range.
+
+        Filter values always go through bound parameters and the clause names are
+        fixed, so there is no injection surface.
+        """
         clauses, params = ["user_id=%s"], [self.user_id]
         if episode_type:
             clauses.append("episode_type=%s"); params.append(episode_type)
         if start:
-            clauses.append("t_start >= %s"); params.append(start)      # t_start 存 ISO 串,字典序=时间序
+            clauses.append("t_start >= %s"); params.append(start)      # t_start holds an ISO string, so lexical order is chronological order
         if end:
             clauses.append("t_start <= %s"); params.append(end)
         return " AND ".join(clauses), params
 
     def list_by_type(self, *, episode_type: Optional[str] = None, start: Optional[str] = None,
                      end: Optional[str] = None, limit: int = 20, offset: int = 0) -> list[MemCell]:
-        """按 episode_type + 时间范围分页取本 user 的 cell,t_start 倒序(最近在前)。过滤项皆可选,limit/offset 必给。"""
+        """Page through this user's cells by episode_type and time range, newest
+        t_start first. Every filter is optional; limit and offset are required.
+        """
         where, params = self._type_where(episode_type, start, end)
         rows = self.db.fetch_all(
             f"SELECT payload FROM memcells WHERE {where} ORDER BY t_start DESC, id DESC LIMIT %s OFFSET %s",
@@ -125,13 +148,13 @@ class CellStore:
 
     def count_by_type(self, *, episode_type: Optional[str] = None, start: Optional[str] = None,
                       end: Optional[str] = None) -> int:
-        """同 list_by_type 的过滤条件下的总数(分页 total)。"""
+        """The total under the same filters as list_by_type, for pagination."""
         where, params = self._type_where(episode_type, start, end)
         row = self.db.fetch_one(f"SELECT COUNT(*) AS n FROM memcells WHERE {where}", tuple(params))
         return int(row["n"]) if row else 0
 
     def all_with_embeddings(self) -> list[tuple[MemCell, np.ndarray]]:
-        """取本 user 所有带 topic 向量的 cell,供 find_cells 语义检索批量打分。"""
+        """All of this user's cells that carry a topic vector, for batch scoring in find_cells."""
         rows = self.db.fetch_all(
             "SELECT payload, HEX(topic_embedding) AS emb FROM memcells "
             "WHERE user_id=%s AND topic_embedding IS NOT NULL",
@@ -144,13 +167,17 @@ class CellStore:
         ]
 
     def in_window(self, cells: list[MemCell], start: Optional[datetime], end: Optional[datetime]) -> list[MemCell]:
-        """按段起始时间过滤(P0 规模 Python 侧过滤即可;不填 = 该侧无界)。"""
+        """Filter by segment start time.
+
+        At this scale filtering in Python is fine. An omitted bound means that side
+        is unbounded.
+        """
         s, e = ensure_aware(start), ensure_aware(end)
         out = []
         for c in cells:
             t = ensure_aware(c.t_start)
             if t is None:
-                continue          # 无时间元数据的 cell 不进时间窗(宁缺勿错)
+                continue          # a cell with no time metadata stays out of the window rather than being guessed into it
             if s and t < s:
                 continue
             if e and t > e:

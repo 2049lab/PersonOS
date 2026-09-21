@@ -1,9 +1,15 @@
-"""会话对话历史的滚动压缩缓存存取(派生物,可覆盖、可持久)。
+"""Access to the rolling compressed cache of a session's conversation history.
 
-每 (user, session) 单条:summary(已压缩的更早历史)+ covered(已折进 summary 的轮数=水位)。
-与 evidence 分开存:evidence 是不可变真相源,summary 只是为对话连续性服务的临时上下文。
+It is derived data: overwritable and persistent. One row per (user, session),
+holding summary — the already-compressed earlier history — and covered, the number
+of turns folded into it, which acts as a high-water mark.
 
-多租户:实例按 user 绑定(构造注入 user_id);复合主键 (user_id, session_id)。
+It is kept apart from evidence deliberately: evidence is the immutable source of
+truth, while a summary is only temporary context in service of conversational
+continuity.
+
+For multi-tenancy, an instance is bound to one user through the constructor, and
+the primary key is the composite (user_id, session_id).
 """
 
 from __future__ import annotations
@@ -25,7 +31,8 @@ class SessionContextStore:
         return (row["summary"], row["covered"]) if row else ("", 0)
 
     def save(self, session_id: str, summary: str, covered: int) -> None:
-        # 复合主键 (user_id, session_id) 命中即更新,无需冲突目标子句
+        # A hit on the composite primary key (user_id, session_id) updates in place,
+        # so no conflict-target clause is needed.
         self.db.execute(
             "INSERT INTO session_context(user_id, session_id, summary, covered, updated_at) "
             "VALUES(%s,%s,%s,%s,%s) "

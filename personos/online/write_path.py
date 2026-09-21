@@ -1,8 +1,11 @@
-"""写入链路(融合架构 §2):W0 逐句落证据 → W1 边界检测 → W2 cell 生成。
+"""The write path (fused architecture §2): W0 persists each utterance as evidence -> W1 boundary
+detection -> W2 cell generation.
 
-写入侧总纲:只做"切段、织 episode、拆 atom",不做任何跨 cell 消解——
-重复允许存在(冗余索引),冲突是作答时的事(D1)。
-评测批量写入与产品在线走同一循环,前者对全对话快进执行。
+The guiding principle of the write side: it only segments, weaves episodes and extracts atoms, and
+performs no cross-cell reconciliation at all — duplicates are allowed to exist (a redundant index),
+and conflicts are a matter for answering time (D1).
+Batch writes during benchmarking and online product writes go through the same loop; the former just
+fast-forwards through a whole conversation.
 """
 
 from __future__ import annotations
@@ -27,7 +30,8 @@ from ..storage.seg_store import MemorySegStore, SegStore
 from . import chain_build
 from .llm import ChatLLM, chat_json, with_scenario
 
-# 业务方场景注入 directive(只调关注度/详略,不改事实、不编造、不漏)——见 with_scenario
+# Directives for caller-scenario injection (they only tune attention and level of detail; facts are
+# never altered, invented, or omitted) -- see with_scenario
 _SCEN_DIR_BOUNDARY = ("Use it as background for the caller's typical dialogue rhythm and what counts "
                       "as one coherent topic; it informs the judgment below but never overrides the "
                       "priority rules.")
@@ -44,15 +48,19 @@ class Embedder(Protocol):
     def embed(self, texts: list[str]) -> np.ndarray: ...
 
 
-# 段长安全阀:W1 判歪时兜底,超此轮数强制闭合(融合架构 W1 维度 5)
+# Segment-length safety valve: the backstop for when W1 misjudges; past this many turns the segment is
+# force-closed (fused architecture, W1 dimension 5)
 MAX_SEGMENT_TURNS = 30
-# W1 prompt 里"当前段最近几轮"窗口:防长段把边界检测 prompt 撑爆
+# The "most recent turns of the current segment" window in the W1 prompt: keeps a long segment from
+# blowing up the boundary-detection prompt
 _BOUNDARY_WINDOW = 6
-# W2② quote 匹配不中时的处理:refs 留空(该 atom 仍可被检索,溯源走 cell→evidence)
+# What happens when a W2 step 2 quote does not match: refs are left empty (the atom is still
+# retrievable, and traceability goes through cell -> evidence)
 _D_MENU = "- domains (D axis, 0-3 Dxx codes; never output the labels):\n  " + vocab_menu(DOMAIN_VOCAB)
 
 
-# —— W0 · 逐句落证据(零 LLM,被动;不再对证据 embed——全库只有 atom/topic 两种向量)——
+# -- W0 - persist each utterance as evidence (no LLM, passive; evidence is no longer embedded — the
+# whole store holds only two kinds of vector, atom and topic) --
 
 def append_utterance(
     evidence_store: EvidenceStore, *, session_id: str, speaker: str, text: str,
@@ -63,12 +71,13 @@ def append_utterance(
                          modality=modality, content_ref=content_ref, sha256=sha256,
                          source={"session_id": session_id}, captured_at=now_dt or now())
     evidence_id = evidence_store.append(rec)
-    logger.debug(f"W0 证据落库 ev={evidence_id} speaker={speaker} modality={modality} len={len(text)}")
+    logger.debug(f"W0 evidence persisted ev={evidence_id} speaker={speaker} modality={modality} len={len(text)}")
     return evidence_id
 
 
 def _transcript(records: list[EvidenceRecord]) -> str:
-    """段内原话渲染:带说话人与时间戳(供 W1/W2 的 prompt 与 LLM 写双时间格式)。"""
+    """Render the raw utterances of a segment with speaker and timestamp (for the W1/W2 prompts, and
+    so the LLM can write the dual-time format)."""
     lines = []
     for r in records:
         ts = r.captured_at.strftime("%Y-%m-%d %H:%M") if r.captured_at else "?"
@@ -76,14 +85,14 @@ def _transcript(records: list[EvidenceRecord]) -> str:
     return "\n".join(lines)
 
 
-# —— W1 · 边界检测(逐句 1 次小 LLM)——
+# -- W1 - boundary detection (one small LLM call per utterance) --
 
 @dataclass
 class BoundaryDecision:
     should_end: bool
     confidence: float = 0.0
-    topic_summary: str = ""    # 当前段一句话主题,供 W2① 的 topic 参考
-    raw: str = ""              # 溯源
+    topic_summary: str = ""    # a one-sentence topic for the current segment, used as a reference by W2 step 1's topic
+    raw: str = ""              # for traceability
 
 
 _BOUNDARY_SYSTEM = """# Role
@@ -113,12 +122,15 @@ def detect_boundary(
     llm: ChatLLM, seg: list[EvidenceRecord], new_records: list[EvidenceRecord],
     *, gap_minutes: Optional[float] = None, scenario: str = "",
 ) -> BoundaryDecision:
-    """判"新到的整批是否开启新段"。seg 为空时不调 LLM(新段首批无界可判)。
+    """Decide whether the newly arrived batch opens a new segment. With an empty seg there is no LLM
+    call (the first batch of a new segment has no boundary to judge).
 
-    new_records 是调用方声明的一个原子批(如一对 QA):批内永远不切,
-    判的是整批 vs 当前段的去留。解析失败/异常 → 保守延续(should_end=False):
-    错闭合伤 episode 连贯,延续只伤段长,且有安全阀兜底。
-    scenario:业务方场景描述(可空)——注入切段校准(对话形态/何为一个话题)。
+    new_records is one atomic batch as declared by the caller (say a QA pair): it is never split
+    internally, and what is judged is the whole batch against the current segment. A parse failure or
+    exception conservatively continues the segment (should_end=False): wrongly closing hurts episode
+    coherence, whereas wrongly continuing only hurts segment length and the safety valve catches it.
+    scenario: the caller's scenario description (may be empty) — injected to calibrate segmentation
+    (the shape of the dialogue, and what counts as one topic).
     """
     if not seg:
         return BoundaryDecision(should_end=False)
@@ -137,23 +149,23 @@ def detect_boundary(
         d = BoundaryDecision(should_end=bool(data.get("should_end")),
                              confidence=float(data.get("confidence") or 0.0),
                              topic_summary=str(data.get("topic_summary") or ""), raw=raw)
-        logger.info(f"W1 边界 end={d.should_end} conf={d.confidence:.2f} seg_len={len(seg)} "
+        logger.info(f"W1 boundary end={d.should_end} conf={d.confidence:.2f} seg_len={len(seg)} "
                     f"gap={gap} summary={d.topic_summary!r}")
         return d
-    except Exception as e:   # noqa: BLE001  解析失败/网络抖动一律保守延续(错闭合伤 episode,延续有安全阀兜底)
-        logger.warning(f"W1 边界检测异常,保守延续: {e}")
+    except Exception as e:   # noqa: BLE001  a parse failure or network hiccup always continues conservatively (wrongly closing hurts the episode, while continuing is caught by the safety valve)
+        logger.warning(f"W1 boundary detection failed, conservatively continuing the segment: {e}")
         return BoundaryDecision(should_end=False, raw=str(e))
 
 
-# —— W2 · cell 生成(每段 2 次 LLM,顺序)——
+# -- W2 - cell generation (two LLM calls per segment, in order) --
 
 @dataclass
 class CellBuild:
-    """一个 cell 的生成产物(含溯源)。"""
+    """What generating one cell produced (including traceability)."""
     cell: MemCell
     atoms: list[MemoryAtom]
-    gen: dict = field(default_factory=dict)   # {call1: {system,user,raw}, call2: {...}} 工作台透视用
-    chain_assign: "chain_build.ChainAssignResult | None" = None   # W2.5 判链产物(关闭/失败=None 或全游离)
+    gen: dict = field(default_factory=dict)   # {call1: {system,user,raw}, call2: {...}}, for workbench inspection
+    chain_assign: "chain_build.ChainAssignResult | None" = None   # the W2.5 chain-assignment product (disabled or failed = None, or everything free-floating)
 
 
 _EPISODE_SYSTEM = """# Role
@@ -273,10 +285,12 @@ it): speaker attribution, times and numbers are always settled from the transcri
 
 
 def _match_evidence_refs(records: list[EvidenceRecord], quote: str) -> list[EvidenceRef]:
-    """quote 子串 → 命中的证据(逐字包含即算;多句命中取全部,时序)。
+    """A quote substring -> the evidence it hits (verbatim containment counts; if several utterances
+    match, take them all in time order).
 
-    未命中 → refs 留空并告警:atom 仍可检索,但金标证据链断在"回链"这一环,
-    评测统计断点时要能从日志里数出来。
+    No match -> leave refs empty and warn: the atom is still retrievable, but the gold evidence chain
+    is broken at the link-back step, and when benchmarking counts breakpoints that has to be countable
+    from the logs.
     """
     q = (quote or "").strip()
     if not q:
@@ -284,12 +298,14 @@ def _match_evidence_refs(records: list[EvidenceRecord], quote: str) -> list[Evid
     refs = [EvidenceRef(evidence_id=r.id)
             for r in records if q in (r.content_inline or "")]
     if not refs:
-        logger.warning(f"W2② quote 未命中原话,refs 留空(证据链断点)quote={q[:40]!r}")
-    return refs[:3]   # 一条 atom 的出处顶多几句话,防 LLM 给整段原文
+        logger.warning(f"W2(2) quote did not match any original utterance, refs left empty (evidence chain break) quote={q[:40]!r}")
+    return refs[:3]   # one atom's source is at most a few utterances; this stops the LLM handing back the whole transcript
 
 
-# episode 分类:仅当调用方传了 task_type 词表才追加(否则 LLM 根本不知道有这字段,默认 unknown)。
-# 挂在 W2① 那次调用上,零额外 LLM 开销。选不中列表 → 解析侧回落 unknown。
+# Episode classification: only appended when the caller passed a task_type vocabulary (otherwise the
+# LLM never learns the field exists and it defaults to unknown).
+# It rides on the W2 step 1 call, so it costs no extra LLM call. A value outside the list falls back
+# to unknown during parsing.
 _CLASSIFY_SUFFIX = """
 
 # Episode classification (REQUIRED extra field)
@@ -305,17 +321,21 @@ def build_cell(
     chain_store: ChainStore | None = None, task_type: list[str] | None = None,
     scenario: str = "",
 ) -> CellBuild:
-    """W2:一段闭合的原话 → MemCell(topic/episode/域)+ atoms,批量 embed 后落库。
+    """W2: one closed segment of raw utterances -> a MemCell (topic / episode / domains) + atoms,
+    embedded in one batch and persisted.
 
-    Call① 失败 → 降级用原话当 episode(信息不丢,格式受损);Call② 失败 → cell 落库、
-    atoms 留空(漏抽由深轨 remember / 后续 dream 补抽自愈,见 D3/D8)。
-    atoms 落库后接 W2.5 判链(chain_store 未注入则从
-    atom_store 派生);判链失败非阻塞——本格 atom 留游离,绝不动 cell/atoms 已落库结果。
+    Call 1 failing degrades to using the raw transcript as the episode (no information is lost, only
+    the formatting); call 2 failing persists the cell with no atoms (a missed extraction heals itself
+    later through the deep track's remember or a subsequent dream pass, see D3/D8).
+    After the atoms are persisted, W2.5 chain assignment runs (deriving chain_store from atom_store
+    when it was not injected); a failed assignment is non-blocking — this cell's atoms are left
+    free-floating and the already-persisted cell and atoms are never touched.
     """
     transcript = _transcript(records)
     gen: dict = {}
 
-    # Call① topic + episode + cell 域(时间戳缺失按 "?" 渲染,不让格式化把 W2 整个炸穿)
+    # Call 1: topic + episode + cell domains (a missing timestamp renders as "?", so formatting cannot
+    # blow the whole of W2 apart)
     t0s = (records[0].captured_at.strftime("%Y-%m-%d %H:%M") if records[0].captured_at else "?")
     t1s = (records[-1].captured_at.strftime("%Y-%m-%d %H:%M") if records[-1].captured_at else "?")
     user1 = (f"Session window: {t0s} ~ {t1s}\n"
@@ -333,12 +353,12 @@ def build_cell(
         topic = str(data.get("topic") or "").strip()
         episode = str(data.get("episode") or "").strip()
         cell_domains = normalize_domains(data.get("domains"))[:3]
-        if types:   # 传了词表才认:LLM 输出须命中列表,否则回落 unknown(选不中不硬套)
+        if types:   # only honoured when a vocabulary was passed: the LLM's output must be in the list, otherwise it falls back to unknown (nothing is force-fitted)
             et = str(data.get("episode_type") or "").strip()
             episode_type = et if et in set(types) else "unknown"
         gen["call1"] = {"system": sys1, "user": user1, "raw": raw}
-    except Exception as e:   # noqa: BLE001  解析失败/网络抖动降级为原话 episode(信息不丢,格式受损)
-        logger.warning(f"W2① 失败,降级为原话 episode: {e}")
+    except Exception as e:   # noqa: BLE001  a parse failure or network hiccup degrades to the raw transcript as the episode (no information lost, only the formatting)
+        logger.warning(f"W2(1) failed, degrading the episode to the raw transcript: {e}")
         topic = topic_hint or (records[0].content_inline or "")[:50]
         episode = transcript
         gen["call1"] = {"system": sys1, "user": user1, "raw": str(e)}
@@ -348,7 +368,7 @@ def build_cell(
                    t_start=records[0].captured_at, t_end=records[-1].captured_at,
                    evidence_refs=[EvidenceRef(evidence_id=r.id) for r in records])
 
-    # Call② atom 批量提取(episode + 原话双喂)
+    # Call 2: batch atom extraction (fed both the episode and the raw transcript)
     atoms: list[MemoryAtom] = []
     user2 = (f"—— Episode (episodic memory compressed from the original dialogue) ——\n{episode}\n\n"
              f"—— Full original transcript ——\n{transcript}")
@@ -357,7 +377,7 @@ def build_cell(
 
     def _extract(nudge: str = "") -> tuple[list[MemoryAtom], str]:
         msgs = [{"role": "system", "content": sys2}, {"role": "user", "content": user2}]
-        if nudge:   # 重抽时追加纠正语:原样重发等于再摇一次同样偏向空的骰子
+        if nudge:   # append a correction when re-extracting: resending the identical request just rolls the same empty-biased dice again
             msgs += [{"role": "assistant", "content": '{"atoms":[]}'},
                      {"role": "user", "content": nudge}]
         data, raw_out = chat_json(llm, msgs, max_tokens=4000, num_tries=3, stage="atom_extract")
@@ -382,44 +402,53 @@ def build_cell(
 
     try:
         atoms, raw = _extract()
-        # 0 atom 再抽一次:atom 是**检索触角**,一条都没有 = 这个 cell 任何查询都召不回,
-        # 成了孤岛(episode 还在,但找不到它)。而 chat_json 的 num_tries 只管 JSON 解析失败,
-        # 合法的 {"atoms":[]} 会被直接放行。实测同一份输入在不同进程里给过 0 也给过 2,
-        # 说明空结果有相当概率是漏抽而非"确实无可记"。第二次仍空则认定确实无可记。
+        # Zero atoms means extracting once more: atoms are the **retrieval antennae**, and having none
+        # makes this cell unreachable by any query — an island (the episode is still there, but
+        # nothing can find it). chat_json's num_tries only covers JSON parse failures, so a
+        # well-formed {"atoms":[]} sails straight through. In practice the same input has returned 0
+        # in one process and 2 in another, which says an empty result is quite likely a missed
+        # extraction rather than "there really is nothing to remember". If the second attempt is also
+        # empty, we accept that there really is nothing to remember.
         if not atoms:
-            logger.warning(f"W2② 抽取 0 atoms,带纠正语重抽 turns={len(records)} topic={topic[:30]!r}")
+            logger.warning(f"W2(2) extracted 0 atoms, re-extracting with a correction note turns={len(records)} topic={topic[:30]!r}")
             atoms, raw = _extract(
                 "你上次返回了空列表。请重新通读这一段:哪怕整段以争执/闲聊为主,其中提到的"
                 "**持久事实**(谁的什么东西、明确的数字、身份/专业/习惯、发生过的具体事件)仍然要抽出来。"
                 "只有当这一段确实通篇只有寒暄与应答、没有任何值得记住的事实时,才允许返回空列表。"
                 "只输出 JSON 本体。")
         gen["call2"] = {"system": sys2, "user": user2, "raw": raw}
-    except Exception as e:   # noqa: BLE001  解析失败/网络抖动 → cell 落库、atoms 留空(补抽自愈,见 D3/D8)
-        logger.warning(f"W2② 失败,atoms 留空: {e}")
+    except Exception as e:   # noqa: BLE001  a parse failure or network hiccup -> persist the cell with no atoms (a later re-extraction heals it, see D3/D8)
+        logger.warning(f"W2(2) failed, atoms left empty: {e}")
         gen["call2"] = {"system": sys2, "user": user2, "raw": str(e)}
 
-    # —— 兜底:有 memcell 就必须有至少一条检索触角 ——
-    # 快链 R1(retrieval.search_atoms)只检索 **atom** 向量;cell 的 topic_embedding 只在深轨
-    # 对已选中的 cell 子集用。所以 0 atom 的 cell 在快链里**彻底不可达** —— episode 还在库里,
-    # 但任何问法都召不到它(实测 4 种问法全 miss)。
-    # 信息量再低的一段也该留一句概括当触角,而不是整段消失。topic 本身就是"谁在做什么"的
-    # 一句话概括,直接拿来当这条 atom 的正文;evidence_refs 挂全段,溯源不断。
-    # 标 source="w2_fallback" 便于事后统计这条路径被触发的频率(正常路径恒为 "w2")。
+    # -- Backstop: a memcell must have at least one retrieval antenna --
+    # The fast path's R1 (retrieval.search_atoms) only searches **atom** vectors; a cell's
+    # topic_embedding is used only by the deep track, over an already-selected subset of cells. So a
+    # cell with zero atoms is **completely unreachable** on the fast path — its episode is still in
+    # the store, but no phrasing of a query can retrieve it (four phrasings were tried, all missed).
+    # However thin a segment is, it deserves one summary sentence as an antenna rather than vanishing
+    # entirely. The topic is already a one-sentence summary of "who is doing what", so it is used
+    # directly as this atom's body; evidence_refs points at the whole segment, keeping traceability
+    # intact.
+    # Marking source="w2_fallback" makes it easy to count afterwards how often this path fires (the
+    # normal path is always "w2").
     if not atoms:
         summary = (topic or "").strip() or (episode or "").strip()[:120]
         if summary:
             atoms = [MemoryAtom(
                 memcell_id=cell.id, object_type="event", text=summary,
-                holder="user",          # 段概括不属于某一个人,用默认 holder
-                kind="K04",             # event/experience:这一段发生过的事
+                holder="user",          # a segment summary belongs to no single person, so use the default holder
+                kind="K04",             # event/experience: what happened during this segment
                 domains=cell_domains, occurrence_time=seg_date, source="w2_fallback",
                 evidence_refs=[EvidenceRef(evidence_id=r.id) for r in records])]
-            logger.warning(f"W2② 重抽后仍 0 atoms → 合成 1 条概括 atom 兜底(否则该 cell 永久"
-                           f"不可召回)turns={len(records)} text={summary[:60]!r}")
+            logger.warning(f"W2(2) still 0 atoms after re-extraction -> synthesizing 1 summary atom as a "
+                           f"backstop (otherwise this cell is permanently unrecallable) "
+                           f"turns={len(records)} text={summary[:60]!r}")
         else:
-            logger.error(f"W2② 0 atoms 且 topic/episode 皆空,该 cell 将不可召回 cell={cell.id}")
+            logger.error(f"W2(2) 0 atoms and both topic and episode are empty, this cell will be unrecallable cell={cell.id}")
 
-    # 批量 embed:topic 一个 + atom 逐条(全库仅有的两种向量),一次调用;topic 空不占位
+    # Batch embed: one topic + one per atom (the only two kinds of vector in the whole store) in a
+    # single call; an empty topic takes no slot
     texts = ([topic] if topic else []) + [a.text for a in atoms]
     vecs = list(embedder.embed(texts)) if texts else []
     topic_vec = np.asarray(vecs[0]) if topic and vecs else None
@@ -428,15 +457,16 @@ def build_cell(
     cell_store.upsert(cell, topic_embedding=topic_vec)
     if atoms:
         atom_store.upsert_many(list(zip(atoms, atom_vecs)))
-    logger.info(f"W2 cell 落库 id={cell.id} turns={len(records)} atoms={len(atoms)} "
+    logger.info(f"W2 cell persisted id={cell.id} turns={len(records)} atoms={len(atoms)} "
                 f"episode_type={episode_type} domains={cell_domains}\n"
                 f"  topic={topic!r}\n"
                 f"  episode={episode!r}\n"
                 f"  atoms(n={len(atoms)})=" + "\n".join(
                     f"    [{i}] {a.object_type}/{a.kind} {a.text!r} holder={a.holder} "
                     f"domains={a.domains} occ={a.occurrence_time}" for i, a in enumerate(atoms, 1)))
-    # 广播「这些记忆刚形成」。记忆服务不关心谁在听——投递、签名、订阅关系
-    # 都是业务层的事。无订阅者时零开销,回调失败也不影响本次写入。
+    # Broadcast "these memories were just formed". The memory service does not care who is listening —
+    # delivery, signing and subscription relationships are all the application layer's business. With
+    # no subscribers it costs nothing, and a failing callback does not affect this write.
     if atoms:
         emit(
             atom_store.user_id,
@@ -446,12 +476,13 @@ def build_cell(
                 "session_id": cell.session_id,
                 "atom_ids": [a.id for a in atoms],
                 "count": len(atoms),
-                # 只带 id 不带正文:正文属于记忆本身,要内容让订阅方回调 API 取
+                # Ids only, no body text: the body belongs to the memory itself, and a subscriber that wants the content calls back into the API for it
                 "domains": sorted({d for a in atoms for d in (a.domains or [])}),
             },
         )
 
-    # W2.5 判链(有 atom 才走;失败在 assign_chains 内部消化,绝不阻塞)
+    # W2.5 chain assignment (only runs when there are atoms; failures are absorbed inside
+    # assign_chains and never block)
     chain_assign = None
     if atoms:
         cs = chain_store or ChainStore(atom_store.db, atom_store.user_id)
@@ -461,26 +492,27 @@ def build_cell(
             gen["w25"] = {"system": chain_build._ASSIGN_SYSTEM, "result": {
                 "new": [c.id for c in chain_assign.new_chains],
                 "appended": chain_assign.appended, "free": len(chain_assign.free)}}
-        except Exception as e:   # noqa: BLE001  双保险:assign_chains 已自捕获,这里兜未知路径
-            logger.warning(f"W2.5 判链异常,本格 atom 留游离: {e}")
+        except Exception as e:   # noqa: BLE001  belt and braces: assign_chains already catches its own errors, and this covers any unknown path
+            logger.warning(f"W2.5 chain assignment raised, this cell's atoms are left unchained: {e}")
     return CellBuild(cell=cell, atoms=atoms, gen=gen, chain_assign=chain_assign)
 
 
-# —— 编排:SessionWriter(产品在线逐句 / 评测批量快进,同一循环)——
+# -- Orchestration: SessionWriter (online product writes go utterance by utterance, benchmark batches
+# fast-forward, both through the same loop) --
 
 @dataclass
 class StepResult:
-    """feed 一句话后的全部中间态(场景/工作台透视用)。"""
+    """All the intermediate state after feeding one utterance (for scenario and workbench inspection)."""
     evidence_id: str
     record: EvidenceRecord
-    boundary: Optional[BoundaryDecision] = None   # None = 段首句(无界可判)或 30 轮强制闭合
-    forced_close: bool = False                    # True = 安全阀闭合,非 LLM 判定
-    closed_cell: Optional[CellBuild] = None       # 本句触发闭合的 cell(新句归新段)
+    boundary: Optional[BoundaryDecision] = None   # None = the first utterance of a segment (no boundary to judge) or a forced close at 30 turns
+    forced_close: bool = False                    # True = closed by the safety valve, not by the LLM's judgment
+    closed_cell: Optional[CellBuild] = None       # the cell this utterance closed (the new utterance belongs to the new segment)
 
 
 @dataclass
 class FeedMsg:
-    """feed_batch 的一个原子成员(一条消息:说话人 + 文本/图片)。"""
+    """One atomic member of a feed_batch (one message: speaker + text and/or image)."""
     speaker: str
     text: str = ""
     image: Optional[bytes] = None
@@ -489,12 +521,13 @@ class FeedMsg:
 
 @dataclass
 class BatchStepResult:
-    """feed_batch 一批后的中间态:整批原子——要么整批并入旧段,要么整批开启新段。"""
+    """The intermediate state after one feed_batch: the batch is atomic — either the whole batch joins
+    the old segment, or the whole batch opens a new one."""
     evidence_ids: list[str]
     records: list[EvidenceRecord]
-    boundary: Optional[BoundaryDecision] = None   # None = 段首批(无界可判)或安全阀强制闭合
-    forced_close: bool = False                    # True = 安全阀闭合,非 LLM 判定
-    closed_cell: Optional[CellBuild] = None       # 本批触发闭合的 cell(闭合的是旧段,不含本批)
+    boundary: Optional[BoundaryDecision] = None   # None = the first batch of a segment (no boundary to judge) or a forced close by the safety valve
+    forced_close: bool = False                    # True = closed by the safety valve, not by the LLM's judgment
+    closed_cell: Optional[CellBuild] = None       # the cell this batch closed (what closes is the old segment, which does not include this batch)
     # Things that partially succeeded. A write is never rejected for a missing
     # optional capability, but it must not silently do less than asked either —
     # an image stored without understanding contributes nothing to retrieval,
@@ -503,11 +536,14 @@ class BatchStepResult:
 
 
 class SessionWriter:
-    """一段会话的写入状态机:逐句 feed,段闭合时 W2 建 cell;session 末强制闭合。
+    """The write state machine for one session: fed utterance by utterance, building a cell through W2
+    whenever a segment closes, and force-closing at the end of the session.
 
-    无状态化:未闭合段存 seg_store(服务侧注入 Redis 实现 → 跨副本共享/重部署不丢;
-    缺省进程内私有实例,单进程脚本语义不变)。本实例只保留 cells 累积——批量脚本
-    的进度视图;服务侧每次请求新建 writer,列表随请求生灭,不再常驻。
+    Made stateless: the open segment lives in seg_store (the service injects a Redis implementation,
+    so it is shared across replicas and survives a redeploy; the default is a process-private instance,
+    which keeps single-process script semantics unchanged). This instance only accumulates `cells` —
+    a progress view for batch scripts; the service creates a new writer per request, so that list
+    lives and dies with the request rather than sticking around.
     """
 
     def __init__(self, llm: ChatLLM, embedder: Embedder,
@@ -520,28 +556,32 @@ class SessionWriter:
         self.evidence_store = evidence_store
         self.cell_store = cell_store
         self.atom_store = atom_store
-        self.chain_store = chain_store   # None=build_cell 里从 atom_store 派生(同库同 user)
+        self.chain_store = chain_store   # None means build_cell derives it from atom_store (same DB, same user)
         self.session_id = session_id
         self.user_id = user_id
         self.max_turns = max_turns
-        self.seg_store = seg_store or MemorySegStore()   # 未注入=私有进程内段状态(单进程语义)
-        self.cells: list[CellBuild] = []                 # 本实例产出的 cell(批量脚本进度用)
-        # 图片输入依赖(可选;未注入=不支持图片,纯文本链路不受影响)
+        self.seg_store = seg_store or MemorySegStore()   # not injected = private in-process segment state (single-process semantics)
+        self.cells: list[CellBuild] = []                 # the cells this instance produced (a progress view for batch scripts)
+        # Image input dependencies (optional; without them images are unsupported and the pure-text
+        # path is unaffected)
         self.media_store = media_store
         self.mllm = mllm
 
     @property
     def seg(self) -> list[EvidenceRecord]:
-        """当前未闭合段(从 seg_store 实时读,副本;兼容旧调用方断言)。"""
+        """The current open segment (read live from seg_store as a copy; kept for compatibility with
+        older callers' assertions)."""
         return self.seg_store.load(self.user_id, self.session_id)
 
     def _ingest_image(self, image: bytes, content_type: str, speaker: str,
                       context: Optional[list[EvidenceRecord]] = None) -> tuple[Optional[str], str, str]:
-        """存图 + 带上下文看图。返回 (content_ref, sha256, 图片理解文本);任一步失败降级。
+        """Store the image and look at it with context. Returns (content_ref, sha256, the image
+        understanding text); a failure at any step degrades gracefully.
 
-        看图目的(purpose)= 当前段已有对话 + 本批已备好的前几句——让 MLLM 带着
-        「这段在聊什么」看图,而非漫无目的描述。存储失败仍尝试用内存字节看图
-        (原图没留底但理解不丢)。
+        The viewing purpose is the dialogue already in the current segment plus the utterances of this
+        batch prepared so far — so the MLLM looks at the image knowing what this segment is about,
+        rather than describing it aimlessly. If storage fails, we still try to look at the image from
+        the in-memory bytes (the original is not kept, but the understanding is not lost).
         """
         content_ref, sha256 = None, ""
         if self.media_store is not None:
@@ -549,8 +589,8 @@ class SessionWriter:
                 stored = self.media_store.save_image(
                     image, owner=self.user_id or "user", content_type=content_type)
                 content_ref, sha256 = stored.key, stored.sha256
-            except Exception as e:   # noqa: BLE001  存储失败不阻塞:仍可看图,只是没留底
-                logger.warning(f"图片存 OSS 失败,原图不留底(理解仍尝试): {e}")
+            except Exception as e:   # noqa: BLE001  a storage failure does not block: we can still look at the image, we just keep no copy
+                logger.warning(f"failed to store the image in the object store, no copy kept (understanding is still attempted): {e}")
         img_text = ""
         if self.mllm is not None and getattr(self.mllm, "available", False):
             ctx = _transcript((context or [])[-_BOUNDARY_WINDOW:]) if context else ""
@@ -561,16 +601,19 @@ class SessionWriter:
 
     def _prepare(self, m: FeedMsg, *, now_dt: datetime,
                  source_extra: dict | None, context: list[EvidenceRecord]) -> EvidenceRecord:
-        """W0:一条消息 → 证据落库 + 内存 rec。带图先走存图/看图(失败降级,不阻塞)。"""
+        """W0: one message -> evidence persisted + an in-memory record. A message with an image first
+        goes through storing and viewing it (failures degrade and never block)."""
         modality, content_ref, sha256 = "text", None, ""
         content_inline = m.text
         if m.image:
-            # 有图即标 image/mixed(与存储是否成功无关:即便原图没留底,这仍是一条图片消息)
+            # An image means the modality is image/mixed, regardless of whether storage succeeded:
+            # even with no stored original, this is still an image message
             modality = "mixed" if m.text.strip() else "image"
             content_ref, sha256, img_text = self._ingest_image(
                 m.image, m.image_content_type, m.speaker, context)
             if img_text:
-                # 图片理解文本并进原话:用户配文在前,看图事实在后(供 W1/W2 一并读)
+                # The image understanding text is merged into the utterance: the user's caption first,
+                # the observed facts after (so W1 and W2 read them together)
                 content_inline = (m.text + "\n" if m.text.strip() else "") + f"[图片] {img_text}"
         evidence_id = append_utterance(self.evidence_store, session_id=self.session_id,
                                        speaker=m.speaker, text=content_inline, now_dt=now_dt,
@@ -585,23 +628,29 @@ class SessionWriter:
                    source_extra: dict | None = None,
                    task_type: list[str] | None = None,
                    scenario: str = "") -> BatchStepResult:
-        """喂一整批(原子):全批 W0 落证据 → (段非空时)W1 判整批去留 → 闭合则 W2 → 入段。
+        """Feed one whole batch (atomically): W0 persists the whole batch as evidence -> (when the
+        segment is non-empty) W1 judges the batch as a whole -> W2 runs if it closes -> the batch
+        joins the segment.
 
-        批的地位等于以前的一句:要么整批并入当前段,要么整批开启新段——批内(如一对
-        QA)永远不被切开。带图消息逐条存图/看图,看图上下文含本批已备好的前几句。
+        A batch now plays the role one utterance used to: either the whole batch joins the current
+        segment, or the whole batch opens a new one — the inside of a batch (say a QA pair) is never
+        split. Messages with images are stored and viewed one by one, and the viewing context
+        includes the utterances of this batch prepared so far.
         """
         now_dt = now_dt or now()
         recs: list[EvidenceRecord] = []
-        # W0 阶段(持写锁)段不会变,读一次即可;看图上下文 = 当前段 + 本批已备好的前几句
+        # During W0 the segment cannot change (the write lock is held), so one read is enough; the
+        # image-viewing context is the current segment plus the utterances of this batch prepared so far
         ctx_seg = self.seg_store.load(self.user_id, self.session_id)
         for m in msgs:
             recs.append(self._prepare(m, now_dt=now_dt, source_extra=source_extra,
                                       context=ctx_seg + recs))
 
-        seg = ctx_seg   # W0 只写证据库不动段,直接复用
+        seg = ctx_seg   # W0 only writes to the evidence store and does not touch the segment, so reuse it
         boundary, forced, closed = None, False, None
         if seg:
-            # 安全阀:段已超限,或并入本批后将超限 → 先闭合旧段再接批,不调 LLM
+            # Safety valve: the segment is already over the limit, or would be after adding this batch
+            # -> close the old segment first and then take the batch, with no LLM call
             if len(seg) >= self.max_turns or len(seg) + len(recs) > self.max_turns:
                 forced = True
             else:
@@ -616,7 +665,7 @@ class SessionWriter:
                                     chain_store=self.chain_store, task_type=task_type,
                                     scenario=scenario)
                 self.cells.append(closed)
-                seg = []                             # 闭合即清段;下方 save 整体覆写键
+                seg = []                             # closing clears the segment; the save below overwrites the key wholesale
         self.seg_store.save(self.user_id, self.session_id, seg + recs)
         return BatchStepResult(evidence_ids=[r.id for r in recs], records=recs,
                                boundary=boundary, forced_close=forced, closed_cell=closed)
@@ -625,7 +674,8 @@ class SessionWriter:
              now_dt: Optional[datetime] = None, source_extra: dict | None = None,
              image: bytes | None = None, image_content_type: str = "image/jpeg",
              task_type: list[str] | None = None, scenario: str = "") -> StepResult:
-        """喂一句话(单句便利壳:等价 feed_batch 一条,内部脚本/评测沿用)。"""
+        """Feed one utterance (a single-message convenience wrapper, equivalent to a feed_batch of one;
+        kept for internal scripts and benchmarks)."""
         r = self.feed_batch([FeedMsg(speaker=speaker, text=text, image=image,
                                      image_content_type=image_content_type)],
                             now_dt=now_dt, source_extra=source_extra, task_type=task_type,
@@ -636,7 +686,8 @@ class SessionWriter:
 
     def end_session(self, *, task_type: list[str] | None = None,
                     scenario: str = "") -> list[CellBuild]:
-        """session 结束:未闭合段强制闭合(W1 分段覆盖整个会话的保证)。task_type 用于尾段 episode 分类。"""
+        """End of session: force-close the open segment (this is what guarantees W1's segmentation
+        covers the entire session). task_type is used to classify the trailing segment's episode."""
         seg = self.seg_store.load(self.user_id, self.session_id)
         if seg:
             closed = build_cell(self.llm, self.embedder, self.evidence_store,
@@ -645,5 +696,5 @@ class SessionWriter:
                                 task_type=task_type, scenario=scenario)
             self.cells.append(closed)
             self.seg_store.clear(self.user_id, self.session_id)
-            logger.info(f"session 末强制闭合 session={self.session_id} cells={len(self.cells)}")
+            logger.info(f"session end forced close session={self.session_id} cells={len(self.cells)}")
         return self.cells

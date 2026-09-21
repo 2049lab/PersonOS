@@ -9,14 +9,14 @@ def test_append_and_get(db):
     got = store.get(eid)
     assert got is not None
     assert got.content_inline == "上周三打篮球扭了下右腿"
-    assert got.sha256 == sha256_of("上周三打篮球扭了下右腿")  # 自动补哈希
+    assert got.sha256 == sha256_of("上周三打篮球扭了下右腿")  # the hash is filled in automatically
 
 
 def test_dedup_by_sha256(db):
     store = EvidenceStore(db)
     a = store.append(EvidenceRecord(content_inline="同样的话"))
     b = store.append(EvidenceRecord(content_inline="同样的话"))
-    assert a == b  # 内容相同 → 去重,返回同一 id
+    assert a == b  # identical content is deduplicated and returns the same id
     assert len(store.list()) == 1
 
 
@@ -30,15 +30,18 @@ def test_list_order_newest_first(db):
 
 
 def test_search_keyword_and_semantics_and_order(db):
-    """关键词同句 AND、时序返回;这是唯一不经索引的检索(atoms 漏抽时的兜底路)。"""
+    """Keywords are ANDed within a single sentence and results come back in time order. This is
+    the only retrieval path that does not go through the index — the fallback for when atom
+    extraction missed something."""
     store = EvidenceStore(db)
     store.append(EvidenceRecord(content_inline="I broke my favourite bowl"))
     store.append(EvidenceRecord(content_inline="the bowl is blue"))
     store.append(EvidenceRecord(content_inline="broke a pen"))
+    # Both words must appear in the same sentence to count as a hit.
     assert [r.content_inline for r in store.search_keyword(["bowl", "broke"])] == \
-        ["I broke my favourite bowl"]                     # 两词同句才算命中
-    assert len(store.search_keyword(["bowl"])) == 2        # 单词两句命中
-    assert store.search_keyword([]) == []                  # 空关键词不发 SQL
+        ["I broke my favourite bowl"]
+    assert len(store.search_keyword(["bowl"])) == 2        # one word matches two sentences
+    assert store.search_keyword([]) == []                  # empty keywords issue no SQL
 
 
 def test_search_keyword_holder_filter_and_like_escape(db):
@@ -46,4 +49,5 @@ def test_search_keyword_holder_filter_and_like_escape(db):
     store.append(EvidenceRecord(holder="Melanie", content_inline="100% bowl"))
     store.append(EvidenceRecord(holder="user", content_inline="100% bowl too"))
     assert [r.holder for r in store.search_keyword(["bowl"], holder="Melanie")] == ["Melanie"]
-    assert len(store.search_keyword(["100%"])) == 2        # % 不当通配符,按字面命中
+    # % is not treated as a wildcard; it matches literally.
+    assert len(store.search_keyword(["100%"])) == 2

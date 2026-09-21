@@ -1,13 +1,19 @@
-"""深轨(融合架构 §4):单 agent 六工具翻阅记忆,langchain JSON 协议 harness。
+"""The deep track (fused architecture §4): a single agent with six tools that leafs through memory,
+harnessed by langchain's JSON protocol.
 
-与快链分工:快链一次检索一次作答,快而浅;深轨是"看得见记忆长什么样"的 agent——
-拿交接包开局(任务/快链已得/判级缺口/目录/当前时间),用工具自主翻格、翻原话、(克制地)写回,
-自己给出终答。入口:run_recall mode=deep 直达;mode=auto 且 R3 判 partial/empty 时升级。
+How it divides labour with the fast path: the fast path retrieves once and answers once — fast and
+shallow; the deep track is an agent that CAN SEE what memory looks like — it starts from a handoff
+package (task / what the fast path already found / the gap adjudication named / the catalogue /
+the current time), uses its tools to open cells, read raw transcripts and (sparingly) write back, and
+produces the final answer itself. Entry points: run_recall with mode=deep goes straight here;
+mode=auto escalates when R3 returns partial or empty.
 
-口径贯穿:atoms 只是检索面——agent 一切可见材料不含 atom 文本,search_atoms 用 atoms 定位
-但返回的是整格材料(topic+episode);open_cell 只带"已抽 N 条索引"的数量。
+One convention runs through it: atoms are only a retrieval face — none of the material the agent can
+see contains atom text; search_atoms uses atoms to locate but returns whole-cell material
+(topic + episode); open_cell only reports the COUNT of extracted index atoms.
 
-Trace:每步工具调用记 INFO + steps 透出(评测/工作台透视"深轨走到了哪")。
+Trace: every tool call logs an INFO line and is surfaced in `steps` (so benchmarking and the
+workbench can see how far the deep track got).
 """
 
 from __future__ import annotations
@@ -44,7 +50,8 @@ from .retrieval import (
 )
 from .write_path import _match_evidence_refs
 
-# langchain 1.x:classic agents(JSON 协议,不依赖网关 tool-call)在 langchain-classic
+# langchain 1.x: the classic agents (JSON protocol, no dependency on gateway tool-calling) live in
+# langchain-classic
 from langchain_classic.agents import AgentExecutor
 from langchain_classic.agents.format_scratchpad import format_log_to_messages
 from langchain_classic.agents.output_parsers import JSONAgentOutputParser
@@ -58,20 +65,22 @@ from langchain_core.runnables import RunnablePassthrough
 from langchain_core.tools import StructuredTool
 from langchain_core.tools.render import render_text_description
 
-_MAX_STEPS = 9         # agent 工具调用上限(每步可批量并行调用;每步观察附剩余预算提示)
-_REMEMBER_CAP = 8      # 单会话 remember 写回上限(护栏;超出拒写)
-_CATALOG_SIZE = 10     # 开局目录:时间倒序近 N 格
-_PAGE_CELLS = 10       # find_cells 每页格数
-_PAGE_LINES = 30       # get_cell_evidence 每页句子数
-_DEFAULT_LIMIT = 5     # search_atoms 默认返回格数
-_MAX_LIMIT = 8         # 上限(agent 可调,非固定)
+_MAX_STEPS = 9         # cap on the agent's tool calls (each step may batch several calls; every observation carries a remaining-budget hint)
+_REMEMBER_CAP = 8      # cap on remember write-backs per session (a guard; writes past it are refused)
+_CATALOG_SIZE = 10     # the opening catalogue: the N most recent cells in reverse chronological order
+_PAGE_CELLS = 10       # cells per page in find_cells
+_PAGE_LINES = 30       # utterances per page in get_cell_evidence
+_DEFAULT_LIMIT = 5     # default number of cells search_atoms returns
+_MAX_LIMIT = 8         # the cap (the agent can tune the limit; it is not fixed)
 
 
 def _coerce_int(v, default: int) -> int:
-    """schema 入参容错:模型偶尔把 page/limit 传成字符串("abc"/None),静默回落默认值。
+    """Argument-schema tolerance: the model occasionally passes page/limit as a string ("abc") or
+    None, so fall back to the default silently.
 
-    放在 pydantic 入参层而不是靠 handle_tool_error——那层只接工具函数内异常,
-    入参校验错误会直接穿出 AgentExecutor 打断整轮对话。
+    This lives at the pydantic argument layer rather than relying on handle_tool_error — that layer
+    only catches exceptions raised inside the tool function, whereas an argument validation error
+    would escape straight out of AgentExecutor and cut the whole round short.
     """
     try:
         return int(v)
@@ -79,13 +88,14 @@ def _coerce_int(v, default: int) -> int:
         return default
 
 
-# —— 短编号注册表(R5 h2id 模式在深轨的复用)——
+# -- The short-handle registry (the deep track's reuse of R5's h2id pattern) --
 
 class HandleRegistry:
-    """cell 真 id ↔ 短编号(c1..cN)的会话内注册表。
+    """A per-session registry mapping a cell's real id <-> its short handle (c1..cN).
 
-    编号按【首次进入上下文】的顺序分配(开局目录 c1=最新),此后稳定:agent 通篇引用
-    c3 就是同一格,终答 cited 回译成真 id 交给上层。
+    Handles are assigned in order of FIRST ENTRY INTO THE CONTEXT (in the opening catalogue c1 is the
+    most recent) and are stable from then on: whenever the agent writes c3 it means the same cell, and
+    the `cited` of the final answer is translated back into real ids for the caller.
     """
 
     def __init__(self):
@@ -107,7 +117,7 @@ class HandleRegistry:
         return len(self._id2h)
 
 
-# —— 渲染器(工具返回的文本形态)——
+# -- Renderers (the textual shape of what the tools return) --
 
 def _fmt_ts(dt: datetime | None) -> str:
     dt = ensure_aware(dt)
@@ -115,9 +125,11 @@ def _fmt_ts(dt: datetime | None) -> str:
 
 
 def cell_full(cell: MemCell, handle: str, n_atoms: int, n_lines: int) -> str:
-    """一格完整材料:分隔行 + 元信息头(与快链 cell_lead 同口径)+ episode 主料 + 索引/原话提示。
+    """One cell's full material: the separator line + the metadata header (the same convention as the
+    fast path's cell_lead) + the episode as primary material + a note about its index and transcript.
 
-    atom 文本刻意不出现:它们只是检索面,给 agent 看会被当成"参考答案"混淆视听。
+    Atom text is deliberately absent: atoms are only a retrieval face, and showing them to the agent
+    would let them be read as a "reference answer" and muddy its judgment.
     """
     lines = [
         f"━━━ {handle} ━━━",
@@ -130,15 +142,18 @@ def cell_full(cell: MemCell, handle: str, n_atoms: int, n_lines: int) -> str:
 
 
 def cell_row(handle: str, cell: MemCell) -> str:
-    """目录轻量行:编号 | 起始时间(yyyy-MM-dd HH:mm:ss) | topic。"""
+    """A lightweight catalogue row: handle | start time (yyyy-MM-dd HH:mm:ss) | topic."""
     return f"{handle} | {_fmt_ts(cell.t_start)} | {cell.topic or '(no topic)'}"
 
 
 def _look_image_note(d: "DeepDeps", rec) -> str:
-    """带用户原始问题(d.task_query)重看这条图片证据的原图,返回可拼进原话行的补充事实。
+    """Look at this image evidence's original again, carrying the user's own question (d.task_query),
+    and return supplementary facts that can be appended to the transcript line.
 
-    写入时 content_inline 已含「带对话上下文」的泛化理解;这里是「带精确问题」的定向追问,
-    补 ingest 那次可能漏掉的细节(堵 caption 信息损失的坑)。任何缺失/失败都返回空串(降级)。
+    At write time, content_inline already holds a general understanding produced WITH DIALOGUE
+    CONTEXT; this is a targeted follow-up WITH A PRECISE QUESTION, filling in details the ingest pass
+    may have missed (closing the caption information-loss gap). Anything missing or failing returns an
+    empty string (degrade).
     """
     if rec.modality not in ("image", "mixed") or not rec.content_ref:
         return ""
@@ -147,20 +162,22 @@ def _look_image_note(d: "DeepDeps", rec) -> str:
     purpose = d.task_query or ""
     if not purpose.strip():
         return ""
-    # 内容类型从 OSS key 后缀推断(EvidenceRecord 不单独存 content_type)
+    # The content type is inferred from the OSS key's extension (EvidenceRecord does not store
+    # content_type separately)
     ext = rec.content_ref.rsplit(".", 1)[-1].lower() if "." in rec.content_ref else "jpg"
     ctype = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
              "webp": "image/webp", "gif": "image/gif", "heic": "image/heic"}.get(ext, "image/jpeg")
     try:
         img = d.media_store.read_bytes(rec.content_ref)
         text = d.mllm.look_image(img, purpose, content_type=ctype)
-    except Exception:   # noqa: BLE001  看图失败不影响原话展示
+    except Exception:   # noqa: BLE001  a failed image read does not affect showing the raw transcript
         return ""
     return f"  ↳[看图·针对「{purpose[:30]}」] {text}" if text else ""
 
 
 def _render_evidence_line(d: "DeepDeps", r) -> str:
-    """一条证据渲染成一行;图片证据额外带一次针对性看图补充。"""
+    """Render one piece of evidence as one line; image evidence additionally carries one targeted
+    re-reading of the image."""
     base = f"[{_fmt_ts(r.captured_at)}] {r.holder}: {r.content_inline or ''}"
     note = _look_image_note(d, r)
     return base + ("\n" + note if note else "")
@@ -168,10 +185,12 @@ def _render_evidence_line(d: "DeepDeps", r) -> str:
 
 def evidence_page(records: list, page: int, per_page: int = _PAGE_LINES,
                   d: "DeepDeps | None" = None) -> tuple[str, int]:
-    """原话分页渲染:逐行 [时刻] 说话人: 原话。说话人照证据 holder(第三人称是真名)。
+    """Render the raw transcript page by page, one line each: [timestamp] speaker: utterance. The
+    speaker follows the evidence holder (in the third person that is the real name).
 
-    d 非空且某行是图片证据时,额外带 d.task_query 重看原图,补一行针对性事实。
-    返回 (渲染文本, 总页数);空记录给一句可行动说明。
+    When `d` is given and a line is image evidence, the original is re-read with d.task_query and one
+    line of targeted facts is added.
+    Returns (rendered text, total page count); with no records it returns one actionable note.
     """
     if not records:
         return ("(no raw utterances kept for this segment: evidence may not have been captured, or was "
@@ -186,22 +205,25 @@ def evidence_page(records: list, page: int, per_page: int = _PAGE_LINES,
     return "\n".join(lines), total
 
 
-# —— 工具实现(纯函数,只碰 DeepDeps;不碰 langchain,便于直测)——
+# -- Tool implementations (pure functions that touch only DeepDeps; they do not touch langchain, which
+# makes them directly testable) --
 
 @dataclass
 class DeepDeps:
-    """深轨工具的依赖束 + 会话态(短编号注册表、写回计数)。"""
+    """The dependency bundle of the deep-track tools + the session state (handle registry, write-back
+    counter)."""
     embedder: Any
     reranker: Reranker
     atoms: AtomStore
     cells: CellStore
     evidence: EvidenceStore
-    llm: Any = None              # 织写器(search_atoms 单元组装用;None=链全降级普通格)
+    llm: Any = None              # the weaver (used by search_atoms' unit assembly; None means every chain degrades to plain cells)
     reg: HandleRegistry = field(default_factory=HandleRegistry)
     deep_write: bool = True
     remembered: int = 0
-    calls_made: int = 0          # 已用工具步数(批量算 1 步;观察尾部预算提示的数据源)
-    # 图片看图:task_query=用户原始问题(看图目的);media_store/mllm 未注入=不看图(退化为读 content_inline)
+    calls_made: int = 0          # tool steps used so far (a batch counts as 1; the data behind the budget hint at the end of each observation)
+    # Image viewing: task_query is the user's own question (the purpose of looking); without
+    # media_store/mllm injected no image is read and it degrades to reading content_inline
     task_query: str = ""
     media_store: Any = None
     mllm: Any = None
@@ -215,18 +237,22 @@ _EMPTY_HINT = ("No hits. Try: a more specific search term (person name / matter 
 
 def tool_search_atoms(d: DeepDeps, *, query: str, start_date: str = "", end_date: str = "",
                       domains: list[str] | None = None, holder: str = "", limit: int = _DEFAULT_LIMIT) -> str:
-    """按事实检索 = 可定制的快链:结构化过滤 → R1 atom 池 → 单元组装(织写/普通)→ R2 精排。
+    """Search by fact = a customizable fast path: structured filters -> the R1 atom pool -> unit
+    assembly (woven or plain) -> R2 rerank.
 
-    与 fast-recall 同机制同代码(池/组装/精排全复用),agent 只多三样东西:检索词自己写、
-    过滤条件(日期窗/域/holder)、返回单元数 limit。池 = 2×limit(agent 步窗口比一锤定音
-    的快链小)。织写单元(memcell′)按覆盖格注册 handle,块头多 cN 并列——链 id 不进
-    注册表,open_cell/get_cell_evidence/remember 只认真实 cell,长短 id 永不撞。
+    Same mechanism and same code as fast-recall (the pool, the assembly and the rerank are all
+    reused); the agent just gets three extra things: it writes the search terms itself, it sets the
+    filters (date window / domains / holder), and it sets `limit`, the number of units returned. The
+    pool is 2 x limit (an agent's per-step window is smaller than the one-shot fast path's). A woven
+    unit (memcell') registers a handle for each cell it covers, so its block header lists several cN
+    side by side — the chain id itself never enters the registry, and open_cell / get_cell_evidence /
+    remember only accept real cells, so long and short ids can never collide.
     """
     limit = max(1, min(_MAX_LIMIT, int(limit or _DEFAULT_LIMIT)))
     rw = QueryRewrite(original=query, resolved=query, domains=domains or [])
     pool = _pool_search(d.embedder, d.atoms, rewrite=rw, top_n=2 * limit,
                         start_date=start_date, end_date=end_date, holder=holder,
-                        domains_filter=domains or None)   # agent 设的域条件是硬过滤
+                        domains_filter=domains or None)   # a domain condition the agent set is a hard filter
     if not pool.atoms:
         return _EMPTY_HINT
     asm = assemble_units(pool.atoms, ChainStore(d.atoms.db, d.atoms.user_id), d.cells,
@@ -240,16 +266,18 @@ def tool_search_atoms(d: DeepDeps, *, query: str, start_date: str = "", end_date
                   if n_woven else "")
     out = (f"search_atoms hit {len(units)} unit(s) (atom pool → chain assembly → reranker)"
            f"{woven_note}:\n\n" + "\n\n".join(_unit_block(d, u) for u in units))
-    if asm.boundary:   # 与快链同口径的残缺提示(已滤掉被织写/同格覆盖的假缺料)
+    if asm.boundary:   # the same boundary note as the fast path (fake gaps covered by a weave or by the same cell are already filtered out)
         out += f"\n\nBOUNDARY\n{asm.boundary}"
     return out
 
 
 def _unit_block(d: DeepDeps, u: CellHit) -> str:
-    """一个材料单元的深轨渲染:handle = 覆盖格逐个注册(织写单元多 cN 并列)。
+    """Deep-track rendering of one material unit: the handle is built by registering each covered cell
+    (so a woven unit shows several cN side by side).
 
-    索引/原话规模按覆盖格汇总——memcell′ 是临时视图,自身的链 id 无任何存储对应,
-    下钻走成员格 handle。
+    The index and transcript sizes are summed over the covered cells — a memcell' is a temporary view
+    whose own chain id corresponds to nothing in storage, so drilling down goes through the member
+    cells' handles.
     """
     ids = _covered_ids(u)
     handle = ", ".join(d.reg.ensure(cid) for cid in ids)
@@ -264,13 +292,14 @@ def _unit_block(d: DeepDeps, u: CellHit) -> str:
 
 def tool_find_cells(d: DeepDeps, *, query: str = "", start_date: str = "", end_date: str = "",
                     domains: list[str] | None = None, page: int = 1) -> str:
-    """按条件列格:时间窗(按 cell 起始时间)+ 域过滤;有 query 时按 topic 相似度排,否则时间倒序;分页。"""
+    """List cells by condition: a time window (on the cell's start time) plus a domain filter; ordered
+    by topic similarity when a query is given, otherwise reverse chronological; paginated."""
     lo, hi = _date_window(start_date, end_date)
     domains = set(domains or [])
     selected = []
     for c in d.cells.iter_all():                   # old → new
         if (lo or hi) and not _in_window(ensure_aware(c.t_start), lo, hi):
-            continue                               # 时间筛选下无时间锚的格不可见
+            continue                               # under a time filter a cell with no time anchor is invisible
         if domains and not (set(c.domains) & domains):
             continue
         selected.append(c)
@@ -283,7 +312,7 @@ def tool_find_cells(d: DeepDeps, *, query: str = "", start_date: str = "", end_d
         ranked_ids = [cid for cid in _vec_ranking([d.embedder.embed([query])[0]], entries)
                       if cid in sel_ids]
         selected.sort(key=lambda c: ranked_ids.index(c.id)
-                      if c.id in ranked_ids else len(ranked_ids))   # 无 topic 向量的格排后面
+                      if c.id in ranked_ids else len(ranked_ids))   # cells without a topic vector go last
         order_note = "topic similarity descending (cells without topic vectors last, by time)"
     else:
         selected.reverse()
@@ -304,7 +333,7 @@ def _resolve_cell(d: DeepDeps, handle: str) -> MemCell | None:
 
 
 def tool_open_cell(d: DeepDeps, *, c: str) -> str:
-    """展开一格:叙事(episode)全文 + 索引/原话规模。"""
+    """Open one cell: the full narrative (episode) plus its index and transcript sizes."""
     if not d.reg.real(c):
         return (f"Unknown handle {c!r}: only handles that appeared in find_cells or search_atoms "
                 f"results can be opened.")
@@ -316,7 +345,8 @@ def tool_open_cell(d: DeepDeps, *, c: str) -> str:
 
 
 def tool_get_cell_evidence(d: DeepDeps, *, c: str, page: int = 1) -> str:
-    """翻某格的对话原话(逐句带说话人与时刻),每页 30 句,page 翻页。"""
+    """Page through a cell's raw dialogue (utterance by utterance with speaker and timestamp), 30
+    utterances per page, navigated with `page`."""
     if not d.reg.real(c):
         return f"Unknown handle {c!r}: locate the cell first via find_cells / search_atoms."
     cell = _resolve_cell(d, c)
@@ -333,10 +363,13 @@ def tool_get_cell_evidence(d: DeepDeps, *, c: str, page: int = 1) -> str:
 
 def tool_search_evidence(d: DeepDeps, *, keywords: list[str], holder: str = "",
                          limit: int = 15) -> str:
-    """关键词直搜原话底稿(全库,不经索引):所有关键词须同一句命中,返回逐句原话及所属格。
+    """Keyword-search the raw transcript directly (whole store, bypassing every index): all keywords
+    must hit the same utterance, and the matching utterances are returned with their owning cell.
 
-    兜底路径:search_atoms/find_cells 建立在 atoms/cells 索引上,抽取漏项时原话在
-    真相层却无路可达——这把路补上(原话是完整真相层,LIKE 扫描不吃任何抽取损失)。
+    The fallback path: search_atoms and find_cells are built on the atom and cell indexes, so when an
+    extraction misses something, the utterance sits in the ground-truth layer with no route to it —
+    this supplies that route (the raw transcript is the complete ground-truth layer, and a LIKE scan
+    suffers no extraction loss at all).
     """
     kws = [str(k).strip() for k in (keywords or []) if str(k).strip()][:4]
     if not kws:
@@ -355,7 +388,8 @@ def tool_search_evidence(d: DeepDeps, *, keywords: list[str], holder: str = "",
     for r in recs:
         cell = ev2cell.get(r.id)
         h = f"(cell {d.reg.ensure(cell.id)})" if cell else "(no cell)"
-        # 命中图片证据时带 task_query 追加一次针对性看图(_render_evidence_line 内部判 modality)
+        # When the hit is image evidence, one targeted re-reading with task_query is appended
+        # (_render_evidence_line checks the modality internally)
         lines.append(_render_evidence_line(d, r) + f" {h}")
     return (f"search_evidence hit {len(recs)} utterance(s) (keywords AND in the same utterance: "
             f"{' / '.join(kws)}):\n" + "\n".join(lines)
@@ -364,9 +398,11 @@ def tool_search_evidence(d: DeepDeps, *, keywords: list[str], holder: str = "",
 
 def tool_remember(d: DeepDeps, *, c: str, text: str = "", quote: str = "", holder: str = "user",
                   kind: str = "", domains: list[str] | None = None, episode_append: str = "") -> str:
-    """写回(克制):给某格新增一条检索索引(quote 逐字回链原话)和/或在叙事末尾追加。
+    """Write back (sparingly): add one retrieval index atom to a cell (with `quote` linking verbatim
+    back to the raw utterance) and/or append to the end of its narrative.
 
-    只新增不改写;全会话上限 _REMEMBER_CAP 条;deep_write=False 时整体只读。
+    It only adds, never rewrites; the whole session is capped at _REMEMBER_CAP entries; with
+    deep_write=False everything is read-only.
     """
     if not d.deep_write:
         return "Write-back is disabled (deep_write=False); this run is read-only."
@@ -381,7 +417,7 @@ def tool_remember(d: DeepDeps, *, c: str, text: str = "", quote: str = "", holde
     wrote = []
     if text.strip():
         records = [r for r in (d.evidence.get(ref.evidence_id) for ref in cell.evidence_refs) if r]
-        refs = _match_evidence_refs(records, quote)   # W2② 同款:逐字子串回链
+        refs = _match_evidence_refs(records, quote)   # same as W2 step 2: link back by verbatim substring
         atom = MemoryAtom(memcell_id=cell.id, text=text.strip(),
                           holder=(holder or "user").strip() or "user",
                           domains=list(domains or []), kind=kind or None,
@@ -391,19 +427,20 @@ def tool_remember(d: DeepDeps, *, c: str, text: str = "", quote: str = "", holde
         wrote.append(f"added 1 index atom (linked to {len(refs)} source utterance(s))")
     if episode_append.strip():
         new_episode = ((cell.episode or "").rstrip() + "\n" + episode_append.strip()).strip()
-        d.cells.upsert(cell.model_copy(update={"episode": new_episode}))   # embedding=None 保留 topic 向量
+        d.cells.upsert(cell.model_copy(update={"episode": new_episode}))   # embedding=None keeps the existing topic vector
         wrote.append("appended 1 passage to the episode")
     logger.info(f"deep remember cell={cell.id} wrote={wrote}")
     return ("Written back: " + "; ".join(wrote) + ". The new index is retrievable on the next search.")
 
 
-# —— langchain 接线 ——
+# -- langchain wiring --
 
 class MaasChatModel(BaseChatModel):
-    """ChatLLM 协议(MaasClient / FakeLLM)的 langchain 适配器。
+    """A langchain adapter for the ChatLLM protocol (MaasClient / FakeLLM).
 
-    基础设施仍走 .env + clients/maas.py(超时分档/重试都在那层);这里只做
-    消息映射(role)与 stop 的客户端截断——网关不传 stop,而 JSON agent 靠它防幻觉续写。
+    The infrastructure still goes through the provider layer (timeout tiers and retries all live
+    in that layer); this only maps message roles and applies `stop` client-side — the gateway does not
+    forward stop, and the JSON agent relies on it to prevent the model hallucinating a continuation.
     """
     client: Any = None
     temperature: float = 0.2
@@ -428,14 +465,18 @@ class MaasChatModel(BaseChatModel):
         return ChatResult(generations=[ChatGeneration(message=AIMessage(content=text))])
 
 
-# schema 硬化(2026-09-09,实测 19% 工具调用带 schema 外参数):高频错名收为 AliasChoices 别名,
-# time_range dict 由 before-validator 消费映射;extra="forbid" 让剩余怪参数响亮报错自纠,
-# 不再被静默丢弃(agent 以为过滤了日期其实没有 → 计数题答错的直接机制)。
+# Schema hardening (2026-09-09; measured: 19% of tool calls carried arguments outside the schema). The
+# frequent wrong names are absorbed as AliasChoices aliases and a time_range dict is consumed and
+# mapped by a before-validator; extra="forbid" makes any remaining odd argument fail loudly so the
+# agent corrects itself, instead of being silently dropped (the agent believing it filtered by date
+# when it did not is the direct mechanism behind wrong answers on counting questions).
 def _absorb_time_range(data, *, has_date_fields: bool = True):
-    """入参 dict 里的 time_range={start,end} → start_date/end_date(extra=forbid 前必须消费掉)。
+    """A time_range={start,end} in the argument dict -> start_date/end_date (it must be consumed
+    before extra=forbid sees it).
 
-    has_date_fields=False 的 schema(search_evidence 无日期过滤能力):仅 pop 掉防 forbid 报错——
-    策略段已声明该工具无日期窗,命中行的时间戳由 agent 自查。
+    For schemas with has_date_fields=False (search_evidence has no date-filtering ability), it is only
+    popped to avoid a forbid error — the strategy section already states that tool has no date window,
+    and the agent checks the timestamps of the hits itself.
     """
     if isinstance(data, dict):
         tr = data.pop("time_range", None)
@@ -448,12 +489,15 @@ def _absorb_time_range(data, *, has_date_fields: bool = True):
 
 
 def _wrap_batch(data, **required_placeholder):
-    """action_input 传裸 list = 一步内多次调用同一工具:包进 batch 字段交给执行层。
+    """A bare list as action_input means calling the same tool several times in one step: wrap it into
+    the `batch` field and hand it to the execution layer.
 
-    agent 的连发式调用(实测:连发 5 个单关键词 search_evidence)每次烧一步预算;
-    批量形态一步打完,省步数。执行层串行跑(存储层共享 pymysql 连接非线程安全),
-    省的是步数预算而非墙钟。批量形态下 schema 的必填主字段(query/c/keywords)用占位
-    值放行——真正的逐项校验在执行层对 batch 里每个参数对象做。
+    The agent's rapid-fire pattern (observed: five consecutive single-keyword search_evidence calls)
+    burns one step of budget each time; the batch form does it all in one step and saves steps. The
+    execution layer runs them serially (the storage layer's shared pymysql connection is not
+    thread-safe), so what is saved is step budget, not wall clock. In the batch form the schema's
+    required primary fields (query / c / keywords) are let through with placeholder values — the real
+    per-item validation happens in the execution layer, against each argument object inside the batch.
     """
     if isinstance(data, list):
         data = {"batch": data}
@@ -463,7 +507,8 @@ def _wrap_batch(data, **required_placeholder):
     return data
 
 
-# 批量入参字段(六 schema 共用):agent 既可 action_input 传裸 list,也可显式 {"batch": [...]}
+# The batch argument field (shared by all six schemas): the agent may pass a bare list as action_input
+# or an explicit {"batch": [...]}
 _BATCH_FIELD = Field(default=None, description="Run several calls of this tool in ONE step: "
                                                "a list of argument objects, each as specified "
                                                "above (e.g. three keyword sweeps at once)")
@@ -584,8 +629,10 @@ class _SearchEvidenceArgs(BaseModel):
     @classmethod
     def _tr(cls, data):
         data = _absorb_time_range(_wrap_batch(data, keywords=[]), has_date_fields=False)
-        # 实测模型常把 keywords 传成裸字符串("beach")——包成单元素列表,不打断自纠;
-        # 注意别名键(query/kw/keyword/…)在 before 阶段还是原样,逐个键检查
+        # In practice the model often passes keywords as a bare string ("beach") — wrap it into a
+        # one-element list rather than interrupting its self-correction.
+        # Note that the alias keys (query / kw / keyword / ...) are still unrenamed at the before
+        # stage, so each key is checked individually
         if isinstance(data, dict):
             for k in ("keywords", "query", "q", "kw", "keyword", "words", "terms"):
                 if isinstance(data.get(k), str):
@@ -623,12 +670,15 @@ class _RememberArgs(BaseModel):
 
 
 class _BatchTolerantJSONParser(JSONAgentOutputParser):
-    """action_input 传 list(一步批量调用)→ 构造 AgentAction 前包成 {"batch": [...]}。
+    """A list as action_input (one batched step) -> wrap it into {"batch": [...]} before constructing
+    the AgentAction.
 
-    langchain 的 AgentAction.tool_input 只收 str/dict,裸 list 会在基类 parse 内部
-    实例化时抛 ValidationError——必须复写整个 parse 在构造前转接(实测 agent 按批量
-    协议连发时整轮卡死在解析重试,9/9 步全是 _Exception)。批量语义本身由工具的
-    batch 字段执行,这里只做形态转接。
+    langchain's AgentAction.tool_input only accepts a str or a dict, and a bare list raises a
+    ValidationError while the base class's parse instantiates it — so the whole parse has to be
+    overridden to adapt the shape before construction (observed: when the agent fires off batched
+    calls as the protocol allows, the entire round jams on parse retries, with all 9/9 steps being
+    _Exception). The batch semantics themselves are executed by the tools' `batch` field; this only
+    adapts the shape.
     """
 
     def parse(self, text: str):
@@ -651,9 +701,11 @@ class _BatchTolerantJSONParser(JSONAgentOutputParser):
 
 def _build_agent(model: BaseChatModel, tools: list[StructuredTool],
                  scenario: str = "") -> RunnablePassthrough:
-    """复刻 create_json_chat_agent 的默认装配,仅把输出解析器换成批量容忍版。
+    """Replicate create_json_chat_agent's default assembly, swapping only the output parser for the
+    batch-tolerant one.
 
-    scenario 非空 → 系统提示词插入业务方场景段(见 _agent_prompt);空 → 逐字节不变。
+    A non-empty scenario inserts the caller-scenario section into the system prompt (see
+    _agent_prompt); an empty one leaves it byte-for-byte unchanged.
     """
     prompt = _agent_prompt(scenario).partial(tools=render_text_description(list(tools)),
                                              tool_names=", ".join(t.name for t in tools))
@@ -663,33 +715,36 @@ def _build_agent(model: BaseChatModel, tools: list[StructuredTool],
 
 
 def _tool_error_as_observation(err: Exception) -> str:
-    """工具故障 → 观察文本。框架的 handle_tool_error 只接 ToolException,
-    通用异常会穿出打断整轮 agent——所以这层兜底放我们自己的闭包里。
+    """A tool failure -> observation text. The framework's handle_tool_error only catches
+    ToolException, and a generic exception would escape and cut the whole agent round short — so this
+    backstop lives in our own closure instead.
     """
     return (f"Tool call failed: {err}. Check the arguments (field names and types per the tool spec), "
             f"or try another tool / relax the filters.")
 
 
 def _args_validation_hint(err) -> str:
-    """入参校验失败(字段名写错/类型离谱)→ 可行动的观察提示,agent 自纠。"""
+    """Argument validation failed (a misspelled field name, a wildly wrong type) -> an actionable
+    observation hint so the agent corrects itself."""
     return (f"Tool argument validation failed: {err}. Retry with field names and types exactly as "
             f"specified (the cell-handle field is named c, e.g. 'c3').")
 
 
 def build_tools(d: DeepDeps) -> list[StructuredTool]:
-    """六个工具 → langchain StructuredTool(闭包捕获 DeepDeps,agent 会话态随之走)。"""
+    """The six tools -> langchain StructuredTools (the closure captures DeepDeps, so the agent's
+    session state travels with them)."""
     def _mk(name: str, desc: str, schema: type[BaseModel], fn) -> StructuredTool:
-        def _invoke(kw: dict) -> str:                        # 绑定会话态 DeepDeps
+        def _invoke(kw: dict) -> str:                        # bind the session-state DeepDeps
             try:
                 return fn(d, **kw)
-            except Exception as e:                           # noqa: BLE001 任何故障降级为观察
-                logger.warning(f"deep 工具 {name} 故障: {e!r} args={kw}")
+            except Exception as e:                           # noqa: BLE001 any failure degrades into an observation
+                logger.warning(f"deep tool {name} failed: {e!r} args={kw}")
                 return _tool_error_as_observation(e)
 
         def _bound(**kw):
             batch = kw.pop("batch", None)
-            if batch:                                        # 一步批量:逐项校验后串行执行
-                try:                                         # (共享 pymysql 连接非线程安全,不并行)
+            if batch:                                        # one batched step: validate each item, then execute serially
+                try:                                         # (the shared pymysql connection is not thread-safe, so no parallelism)
                     calls = [{k: v for k, v in schema.model_validate(item)
                               .model_dump(exclude_none=True).items() if k != "batch"}
                              for item in batch]
@@ -699,10 +754,10 @@ def build_tools(d: DeepDeps) -> list[StructuredTool]:
                                   for i, c in enumerate(calls, 1))
             else:
                 out = _invoke(kw)
-            d.calls_made += 1                                # 批量只算一步
+            d.calls_made += 1                                # a batch counts as a single step
             left = _MAX_STEPS - d.calls_made
             tail = f"≈{left} tool steps left"
-            if left <= 2:                                    # 预算将尽:逼 agent 收手作答
+            if left <= 2:                                    # budget nearly gone: push the agent to stop and answer
                 tail += (" — budget nearly exhausted: give your Final Answer now with the best "
                          "material in hand (state honestly what is missing) instead of opening "
                          "new lines of search")
@@ -748,7 +803,7 @@ def build_tools(d: DeepDeps) -> list[StructuredTool]:
     ]
 
 
-# —— 系统提示词:全貌教育 + 多跳要诀 + JSON 输出协议 ——
+# -- The system prompt: teaching the big picture + the multi-hop method + the JSON output protocol --
 
 _AGENT_SYS = (
     "# Role\n"
@@ -840,16 +895,19 @@ _PARSE_NUDGE = ("Wrong output format: reply with a single json code block contai
                 "thought/action/action_input; for the final answer, action must be "
                 "\"Final Answer\".")
 
-# 业务方场景注入 directive(只调检索方向,不许编造)——见 llm.with_scenario
+# Directive for caller-scenario injection (it only steers the search direction; fabrication is
+# forbidden) -- see llm.with_scenario
 _SCEN_DIR_AGENT = ("Use it to steer which matters to prioritize digging into and which leads to "
                    "follow first; it never licenses fabricating facts absent from the store.")
 
 
 def _agent_prompt(scenario: str) -> ChatPromptTemplate:
-    """深轨 agent 系统提示词模板;scenario 空 → 复用常量(逐字节不变)。
+    """The deep-track agent's system prompt template; an empty scenario reuses the constant (leaving it
+    byte-for-byte unchanged).
 
-    scenario 拼进 system 前先转义花括号——_AGENT_SYS 靠 {tools}/{tool_names} 做模板变量,
-    业务方文本里的 {} 若不转义会被 ChatPromptTemplate 当变量解析而报错。
+    The braces in the scenario are escaped before it is spliced into the system prompt — _AGENT_SYS
+    relies on {tools}/{tool_names} as template variables, so unescaped {} in the caller's text would
+    be parsed by ChatPromptTemplate as variables and raise an error.
     """
     s = (scenario or "").strip()
     if not s:
@@ -862,7 +920,8 @@ def _agent_prompt(scenario: str) -> ChatPromptTemplate:
         MessagesPlaceholder("agent_scratchpad", optional=True)])
 
 
-# —— 交接包(自然语言六件套;给证据不给作答草稿,防锚定)——
+# -- The handoff package (six natural-language sections; it hands over evidence but not the draft
+# answer, to avoid anchoring) --
 
 _REVIEW_TEXT = {"answer_defect": "a draft was answered from the materials above and reviewed; "
                "even the re-answer failed itemized checks",
@@ -870,24 +929,30 @@ _REVIEW_TEXT = {"answer_defect": "a draft was answered from the materials above 
 
 
 def _covered_ids(h: CellHit) -> list[str]:
-    """材料单元覆盖的 cell id:织写单元=成员格全集(covers);普通单元=自身格。"""
+    """The cell ids a material unit covers: a woven unit covers its full set of member cells
+    (`covers`), a plain unit covers itself."""
     return h.covers or [h.cell.id]
 
 
 def _translate_handles(text: str, fast_hits: list[CellHit], d: DeepDeps) -> str:
-    """把 critique 里的快链窗口编号(mN,核判侧自用)回译成深轨目录编号 cN。
+    """Translate the fast-path window handles in a critique (mN, used on the adjudication side) into
+    deep-track catalogue handles (cN).
 
-    两套编号服务不同窗口:快链 m1..mK 按 R5/R3' 材料顺序,深轨 c1..cN 按目录注册序。
-    核判只见过自己的材料窗口,它写的 mN 只能指快链材料——按 fast_hits 顺序回译,
-    织写单元展开为其覆盖的成员格(逐个 ensure,多格逗号并列);越界/不认识的编号
-    原样保留(可见的陌生符号,而不是静默指错格)。兼容模型手滑写 cN。
+    The two numbering schemes serve different windows: the fast path's m1..mK follow the order of the
+    R5/R3' material, while the deep track's c1..cN follow catalogue registration order. Adjudication
+    only ever saw its own material window, so the mN it writes can only refer to fast-path material —
+    translated back through the order of fast_hits, with a woven unit expanded into the member cells
+    it covers (each ensured in turn, several joined by commas). An out-of-range or unrecognized
+    handle is left as-is (a visibly strange token beats silently pointing at the wrong cell). It also
+    tolerates the model slipping and writing cN.
     """
     def repl(m: re.Match) -> str:
         i = int(m.group(1))
         return (",".join(d.reg.ensure(cid) for cid in _covered_ids(fast_hits[i - 1]))
                 if 1 <= i <= len(fast_hits) else m.group(0))
 
-    # 边界用 ASCII 字母数字界定(而非 \b):中文 critique「材料m1」无空格写法 \b 不成立(CJK 同为 \w)
+    # The boundary is defined by ASCII alphanumerics rather than \b: in a Chinese critique, a
+    # no-space form like "材料m1" does not satisfy \b, because CJK characters are \w too
     return re.sub(r"(?<![A-Za-z0-9])[mc](\d+)(?![A-Za-z0-9])", repl, text)
 
 
@@ -895,13 +960,19 @@ def build_handoff(d: DeepDeps, *, query: str, now_dt: datetime,
                   rw: QueryRewrite | None, review: ReviewResult | None,
                   fast_hits: list[CellHit] | None, total_cells: int,
                   catalog: list[MemCell], profile: str = "") -> str:
-    """快链 → 深轨的交接包:①任务 ②快链已得证据 ③核判结论与缺口 ④记忆库目录 ⑤当前时间。
+    """The fast path -> deep track handoff package: (1) the task, (2) the evidence the fast path
+    already found, (3) the adjudication verdict and the gap, (4) the memory catalogue, (5) the current
+    time.
 
-    系统提示词(全貌教育)常驻,不占交接包。快链的作答草稿刻意不给:深轨要独立判断,
-    只继承"已检索到什么材料 + 核判指出的缺口"(critique 是方向,草稿是锚,给方向不给锚)。
-    critique 里的快链编号 mN 在此回译成深轨 cN——材料区用深轨编号渲染,缺口必须对得上号。
-    目录格先进注册表(c1=最新),材料区复用目录编号:深轨编号只由库内容决定,
-    与快链命中过什么、什么顺序命中无关——两套 id 体系各自独立。
+    The system prompt (which teaches the big picture) is always resident and does not take up space in
+    the handoff. The fast path's draft answer is deliberately withheld: the deep track has to judge
+    independently, inheriting only "what material was already retrieved + the gap adjudication named"
+    (a critique is a direction, a draft is an anchor — give the direction, not the anchor).
+    The fast-path handles mN inside the critique are translated here into deep-track cN — the material
+    section is rendered with deep-track handles, and the gap has to line up with them.
+    The catalogue cells enter the registry first (c1 = the most recent) and the material section
+    reuses those handles: the deep-track numbering is determined solely by the store's content and has
+    nothing to do with what the fast path hit or in what order — the two id systems are independent.
     """
     for c in catalog:
         d.reg.ensure(c.id)
@@ -924,9 +995,10 @@ def build_handoff(d: DeepDeps, *, query: str, now_dt: datetime,
 
     if fast_hits:
         top = fast_hits[:5]
-        # 织写单元的编号 = 其覆盖成员格(逗号并列);普通单元单格,行为与旧版一致
+        # A woven unit's handle is its covered member cells (comma-joined); a plain unit is a single
+        # cell, behaving exactly as before
         blocks = [cell_block(h, ", ".join(d.reg.ensure(i) for i in _covered_ids(h)))
-                  for h in top]   # 与 R3/R5 同渲染器
+                  for h in top]   # the same renderer as R3/R5
         rows = [cell_row(", ".join(d.reg.ensure(i) for i in _covered_ids(h)), h.cell)
                 for h in fast_hits[5:20]]
         more = "\n".join(rows)
@@ -954,11 +1026,12 @@ def build_handoff(d: DeepDeps, *, query: str, now_dt: datetime,
     return "\n\n".join(parts)
 
 
-# —— 编排 ——
+# -- Orchestration --
 
 @dataclass
 class DeepOutcome:
-    """一次深轨的产物:终答(MemoryAnswer,cited 已回译真 id)+ 工具轨迹 + 写回数。"""
+    """The product of one deep-track run: the final answer (a MemoryAnswer whose `cited` has already
+    been translated back into real ids) + the tool trace + the write-back count."""
     ans: MemoryAnswer
     steps: list[dict] = field(default_factory=list)   # [{tool, args, obs_head}]
     handoff: str = ""
@@ -967,7 +1040,8 @@ class DeepOutcome:
 
 
 def _parse_final(out: Any, reg: HandleRegistry) -> MemoryAnswer:
-    """executor 终态 → MemoryAnswer:支持 dict / JSON 串 / 纯文本;cited 回译真 id。"""
+    """The executor's final state -> a MemoryAnswer: accepts a dict, a JSON string, or plain text;
+    `cited` is translated back into real ids."""
     obj = out if isinstance(out, dict) else None
     if obj is None and isinstance(out, str):
         try:
@@ -979,7 +1053,7 @@ def _parse_final(out: Any, reg: HandleRegistry) -> MemoryAnswer:
         return MemoryAnswer(answer=str(obj.get("answer") or "").strip(),
                             cited_cells=[c for c in cited if c], raw=str(out))
     if isinstance(out, str) and out.startswith("Agent stopped"):
-        logger.warning(f"深轨触发步数上限,无终答 steps={len(reg)}")
+        logger.warning(f"deep track hit the step limit with no final answer steps={len(reg)}")
         return MemoryAnswer(answer="")
     return MemoryAnswer(answer=out if isinstance(out, str)
                         else json.dumps(out, ensure_ascii=False), raw=str(out))
@@ -990,19 +1064,22 @@ def run_deep(llm: ChatLLM, embedder, atoms: AtomStore, cells: CellStore, evidenc
              review: ReviewResult | None = None, fast_hits: list[CellHit] | None = None,
              reranker: Reranker | None = None, deep_write: bool | None = None,
              media_store=None, mllm=None, profile: str = "", scenario: str = "") -> DeepOutcome:
-    """深轨一次完整运行:交接包开局 → agent 六工具循环(上限 9 步,每步可批量调用)→ 终答回译。
+    """One complete deep-track run: open with the handoff package -> the agent's six-tool loop (capped
+    at 9 steps, each of which may batch calls) -> translate the handles in the final answer.
 
-    失败语义:agent 崩溃向上抛(调用方决定回退);步数耗尽 → 空答案(如实"没答出来")。
+    Failure semantics: an agent crash propagates upwards (the caller decides how to fall back); an
+    exhausted step budget yields an empty answer (an honest "could not answer it").
     """
     t0 = time.perf_counter()
-    # 看图目的 = 用户原始问题(resolved 优先,含指代消解);贯穿所有证据工具的看图点
+    # The image-viewing purpose is the user's own question (preferring `resolved`, which has
+    # references resolved); it runs through every image-viewing point of the evidence tools
     task_query = (rw.resolved if rw and rw.resolved else query) or query
     d = DeepDeps(embedder=embedder, reranker=reranker or NoopReranker(),
                  atoms=atoms, cells=cells, evidence=evidence, llm=llm,
                  deep_write=settings.deep_write if deep_write is None else deep_write,
                  task_query=task_query, media_store=media_store, mllm=mllm)
 
-    all_cells = list(cells.iter_all())               # old → new
+    all_cells = list(cells.iter_all())               # old -> new
     catalog = list(reversed(all_cells))[:_CATALOG_SIZE]
     handoff = build_handoff(d, query=query, now_dt=now_dt, rw=rw, review=review,
                             fast_hits=fast_hits, total_cells=len(all_cells), catalog=catalog,
@@ -1013,21 +1090,21 @@ def run_deep(llm: ChatLLM, embedder, atoms: AtomStore, cells: CellStore, evidenc
     agent = _build_agent(model, tools, scenario)
     executor = AgentExecutor(agent=agent, tools=tools, max_iterations=_MAX_STEPS,
                              handle_parsing_errors=_PARSE_NUDGE,
-                             return_intermediate_steps=True)   # 工具异常兜底在 build_tools 的闭包层
-    logger.info(f"deep 交接包(agent 输入)q={query!r}\n{handoff}")
+                             return_intermediate_steps=True)   # the backstop for tool exceptions lives in build_tools' closure layer
+    logger.info(f"deep handoff package (agent input) q={query!r}\n{handoff}")
     with obs.observation("deep_recall", as_type="agent", input=task_query,
-                         metadata={"max_steps": _MAX_STEPS}):   # 嵌在 recall 根 trace 下
+                         metadata={"max_steps": _MAX_STEPS}):   # nested under the recall root trace
         result = executor.invoke({"input": handoff})
     raw_steps = result.get("intermediate_steps") or []
     steps = [{"tool": a.tool, "args": a.tool_input, "obs_head": str(o)[:160]}
              for a, o in raw_steps]
-    for i, (a, o) in enumerate(raw_steps, 1):   # 完整打每步:工具 + 全参 + 工具返回(观测)全文
+    for i, (a, o) in enumerate(raw_steps, 1):   # log every step in full: the tool + all its arguments + the tool's entire returned observation
         logger.info(f"deep step{i}/{_MAX_STEPS} tool={a.tool} args={a.tool_input}\n"
-                    f"  ── 工具返回 ──\n{o}")
+                    f"  -- tool observation --\n{o}")
     ans = _parse_final(result.get("output"), d.reg)
     secs = {"deep": round(time.perf_counter() - t0, 3)}
-    logger.info(f"deep 完成 steps={len(steps)} remembered={d.remembered} "
-                f"cited={len(ans.cited_cells)} ans={len(ans.answer)}字 q={query!r}\n"
-                f"  ── 终答 ──\n{ans.answer}")
+    logger.info(f"deep finished steps={len(steps)} remembered={d.remembered} "
+                f"cited={len(ans.cited_cells)} ans_chars={len(ans.answer)} q={query!r}\n"
+                f"  -- final answer --\n{ans.answer}")
     return DeepOutcome(ans=ans, steps=steps, handoff=handoff,
                        remembered=d.remembered, secs=secs)

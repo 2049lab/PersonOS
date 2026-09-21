@@ -1,4 +1,4 @@
-"""V1 backend 骨架:mock profile 冒烟(不下模型、不联网)。"""
+"""V1 backend skeleton: a smoke test of the mock profile (no model download, no network)."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ def test_mock_face_detect_returns_normalized_emb():
     assert len(out) == 1 and isinstance(out[0], FaceDet)
     assert out[0].embedding.shape == (512,)
     assert abs(float(np.linalg.norm(out[0].embedding)) - 1.0) < 1e-5
-    # 确定性:同帧同向量
+    # Deterministic: the same frame yields the same vector.
     assert np.allclose(out[0].embedding, det.detect(frame)[0].embedding)
 
 
@@ -34,8 +34,8 @@ def test_mock_voiceprint_embed():
     vp = make_backends("mock")["voiceprint"]
     emb = vp.embed(b"pcm-bytes")
     assert emb.shape == (192,) and abs(float(np.linalg.norm(emb)) - 1.0) < 1e-5
-    assert np.allclose(emb, vp.embed(b"pcm-bytes"))          # 确定
-    assert not np.allclose(emb, vp.embed(b"other"))          # 不同输入不同向量
+    assert np.allclose(emb, vp.embed(b"pcm-bytes"))          # deterministic
+    assert not np.allclose(emb, vp.embed(b"other"))          # different input, different vector
 
 
 def test_mock_omni_chat_canned():
@@ -52,10 +52,13 @@ def test_unknown_profile_raises():
 
 
 def test_omni_video_call_uses_long_timeout(monkeypatch):
-    """带视频的剧本调用必须走长超时,纯图/文调用仍用文本口径。
+    """A screenplay call carrying video must use the long timeout; image-only and text-only
+    calls keep using the text timeout.
 
-    回归的是一个真事故:视频剧本共用 MAAS_MLLM_TIMEOUT(120s),而 2min clip 的剧本调用
-    实测就要顶穿它 → 读超时 → 重试 → 判毒消息 → **这条 clip 的记忆彻底丢**。
+    This is a regression test for a real incident: video screenplay calls shared the multimodal
+    text timeout (120s), but a screenplay call over a 2-minute clip was measured blowing right
+    through it -> read timeout -> retry -> the message got flagged as poisonous -> the memory
+    for that entire clip was lost.
     """
     import httpx
 
@@ -84,24 +87,27 @@ def test_omni_video_call_uses_long_timeout(monkeypatch):
                            "mllm_timeout": 120.0})()
 
     r.chat("p", video_url="https://oss/a.mp4")
-    r.chat("p", images_b64=["Zg=="])                  # 仲裁:纯图,无需长超时
-    assert seen == [600.0, 120.0], f"超时路由错了:{seen}"
+    r.chat("p", images_b64=["Zg=="])                  # adjudication: images only, no long timeout needed
+    assert seen == [600.0, 120.0], f"timeout routing is wrong: {seen}"
     assert isinstance(httpx.Timeout(1.0).read, float)
 
 
 def test_none_profile_is_the_default_and_explains_how_to_enable(monkeypatch):
-    """默认 none:不装依赖就碰视频时,给一句能照做的话,而不是 worker 线程深处的 ImportError。
+    """The default is none: when someone touches video without installing the dependencies,
+    give them one actionable sentence instead of an ImportError buried inside a worker thread.
 
-    这条默认值是**有意改动**(原先是 real)。理由见 factory 模块文档:real 对内网部署
-    是对的(缺依赖当场炸),但对 pip 装的库是错的——identity extra 约 2GB,纯文本用户
-    不该为此付费,更不该以导入爆炸的形式得知。
+    This default was changed DELIBERATELY (it used to be real). The reasoning is in the factory
+    module docstring: real is right for an internal deployment, where a missing dependency
+    should blow up immediately, but wrong for a pip-installed library — the identity extra is
+    roughly 2GB, and text-only users should neither pay for it nor find out about it via an
+    import explosion.
     """
     import pytest
 
     from personos.config import Config, reset_config, set_config
     from personos.identity.backends.factory import make_backends
 
-    set_config(Config())          # 全默认 = video_backend 'none'
+    set_config(Config())          # all defaults = video_backend 'none'
     try:
         with pytest.raises(RuntimeError, match=r"personos\[identity\]"):
             make_backends()

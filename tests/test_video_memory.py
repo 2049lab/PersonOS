@@ -1,10 +1,15 @@
-"""C 视频→记忆桥单测:draft 剧本行 + by_chain 归属 → 带人物归属的 evidence + build_cell。
+"""Unit tests for bridge C, video to memory: draft screenplay lines plus by_chain ownership
+become evidence attributed to people, then build_cell.
 
-FakeLLM(episode→atoms 两段)+ 真 SIT(db fixture=rollback 回退)。验证:
-- 行证据 holder=展示名(Bob/user/env)、source.character_id 正确;
-- raw_clip 原始媒体证据落库(modality=video、无 content_inline);
-- build_cell 产 memcell + atoms、atom.holder 沿用展示名、evidence_refs 回链行证据;
-- "剧本行→文本 evidence"后完全走现有 build_cell,与文本零区别。
+Uses FakeLLM (two stages, episode then atoms) against the real shared database (the db fixture
+rolls everything back). Verifies:
+- Line evidence carries holder = the display name (Bob / user / env) and the right
+  source.character_id;
+- The raw_clip original media evidence is persisted (modality=video, no content_inline);
+- build_cell produces a memcell and atoms, atom.holder keeps the display name, and
+  evidence_refs link back to the line evidence;
+- After "screenplay line to text evidence", everything goes through the existing build_cell
+  with zero difference from plain text.
 """
 
 from __future__ import annotations
@@ -31,7 +36,7 @@ def test_flush_session_to_memory(db):
     store = CharacterStore(db, U)
     ev, cells, atoms, chains = (EvidenceStore(db, U), CellStore(db, U),
                                 AtomStore(db, U), ChainStore(db, U))
-    # 库:Bob(具名)+ wearer 档
+    # Seed the store: Bob (named) plus a wearer record.
     bob = store.create_character(session_id=S)
     store.add_name_claim(bob, "Bob", "explicit_dialogue")
     wearer = store.create_character(session_id=S, is_wearer=True)
@@ -54,7 +59,7 @@ def test_flush_session_to_memory(db):
         llm=FakeLLM([_EPISODE, _ATOMS]), embedder=FakeEmbedder(),
         clip_keys={0: "oss/clip0.mp4"})
 
-    # 证据落库:1 raw_clip + 3 行
+    # Evidence persisted: 1 raw_clip plus 3 lines.
     recs = ev.by_session(S)
     by_kind = {(r.source or {}).get("kind"): r for r in recs}
     raw = by_kind["raw_clip"]
@@ -63,14 +68,15 @@ def test_flush_session_to_memory(db):
     speech = [r for r in recs if (r.source or {}).get("kind") == "speech"]
     s1 = next(r for r in speech if r.source["cast_id"] == "S1")
     sw = next(r for r in speech if r.source["cast_id"] == "SW")
-    assert s1.holder == "Bob" and s1.source["character_id"] == bob      # 展示名 + 精确 id
-    assert sw.holder == "user" and sw.source["character_id"] == wearer  # SW→user
+    assert s1.holder == "Bob" and s1.source["character_id"] == bob      # display name plus the exact id
+    assert sw.holder == "user" and sw.source["character_id"] == wearer  # SW maps to user
     env = next(r for r in recs if (r.source or {}).get("kind") == "environment")
     assert env.holder == "env"
-    # 行证据都回指 raw_clip + modality=video
+    # Every line of evidence points back at the raw_clip and carries modality=video.
     assert s1.source["raw_evidence_id"] == raw.id and s1.modality == "video"
 
-    # build_cell 产物:memcell + atom 沿用展示名 + 回链行证据
+    # What build_cell produced: a memcell, atoms keeping the display name, and links back to
+    # the line evidence.
     assert cb is not None and cb.cell is not None
     assert len(cb.atoms) == 1 and cb.atoms[0].holder == "Bob"
     assert cb.atoms[0].evidence_refs and cb.atoms[0].evidence_refs[0].evidence_id == s1.id
@@ -88,11 +94,11 @@ def test_flush_no_lines_returns_none(db):
 
 
 def test_unnamed_gets_stable_handle(db):
-    """无名人物 → 稳定短标 人物#N。"""
+    """An unnamed person gets a stable short handle of the form "person #N"."""
     store = CharacterStore(db, U)
     ev, cells, atoms, chains = (EvidenceStore(db, U), CellStore(db, U),
                                 AtomStore(db, U), ChainStore(db, U))
-    anon = store.create_character(session_id=S)          # 无名
+    anon = store.create_character(session_id=S)          # no name
     draft = MemoryDraftStore(U)
     draft.ensure_chain(S, "S1")
     draft.stage_lines(S, 0, [(0.0, 1.0, "S1", "speech", "hello there")])
@@ -107,31 +113,37 @@ def test_unnamed_gets_stable_handle(db):
 
 
 def test_rewrite_ids_word_boundary_and_longest_first():
-    """id 改写:只碰完整 token、长 key 优先、mapping 外的 id 原样留着。"""
+    """Id rewriting: only whole tokens are touched, longer keys win, and ids absent from the
+    mapping are left exactly as they are."""
     from personos.identity.screenplay import rewrite_ids
 
     m = {"P1": "Alice", "P12": "Bob", "SW": "user"}
     assert rewrite_ids("P1 enters; P12 sits; SW films", m) == "Alice enters; Bob sits; user films"
-    assert rewrite_ids("P12 is not P1", m) == "Bob is not Alice"        # 长 key 不被 P1 切一半
-    assert rewrite_ids("SPAM P1X nothing", m) == "SPAM P1X nothing"     # 词边界:不碰 P1X/SPAM
-    assert rewrite_ids("P3 unknown", m) == "P3 unknown"                 # 不在表里的原样留
+    assert rewrite_ids("P12 is not P1", m) == "Bob is not Alice"        # a longer key is not cut in half by P1
+    assert rewrite_ids("SPAM P1X nothing", m) == "SPAM P1X nothing"     # word boundaries: P1X and SPAM are untouched
+    assert rewrite_ids("P3 unknown", m) == "P3 unknown"                 # not in the table, so left as is
     assert rewrite_ids("", m) == "" and rewrite_ids("x", {}) == "x"
 
 
 def test_flush_rewrites_ids_in_text_and_marks_actions(db):
-    """行文本里的 cast id → 展示名;action 行加标记;无名人物按**出场顺序**编号且可复现。
+    """Cast ids inside the line text become display names, action lines get a marker, and
+    unnamed people are numbered by ORDER OF APPEARANCE, reproducibly.
 
-    回归真问题:episode 里出现过 "P1 enters holding an orange basketball"、
-    "where P2 is seated" —— 归属改写只动了 holder,文本里的裸 id 一路漏进 episode/atom,
-    同一个人有三种叫法(holder 叫 人物#1、文本里叫 P1、别人嘴里叫 Alice)。
-    另:动作行与台词行渲染成同一形状("holder: text"),会被 episode LLM 读成这个人说的话。
+    Regression for a real problem: episodes contained things like "P1 enters holding an orange
+    basketball" and "where P2 is seated". The ownership rewrite only touched holder, so bare
+    ids in the text leaked all the way through into episodes and atoms, and the same person
+    ended up with three names (holder called them person #1, the text called them P1, and
+    other people called them Alice).
+
+    Separately, action lines and speech lines rendered into the same shape ("holder: text"),
+    which made the episode LLM read the action as something that person said.
     """
     store = CharacterStore(db, U)
     ev, cells, atoms, chains = (EvidenceStore(db, U), CellStore(db, U),
                                 AtomStore(db, U), ChainStore(db, U))
     bob = store.create_character(session_id=S)
     store.add_name_claim(bob, "Bob", "explicit_dialogue")
-    anon = store.create_character(session_id=S)          # 无名:应拿 人物#N
+    anon = store.create_character(session_id=S)          # unnamed: should get person #N
     wearer = store.create_character(session_id=S, is_wearer=True)
     store.mark_wearer(wearer)
     store.set_session_wearer(S, wearer)
@@ -140,7 +152,8 @@ def test_flush_rewrites_ids_in_text_and_marks_actions(db):
     for cast in ("S1", "S2", "SW"):
         draft.ensure_chain(S, cast)
     draft.stage_lines(S, 0, [
-        # S2(无名)先出场 → 应是 人物#1;文本里的 S1/S2/SW 都要被换掉
+        # S2 (unnamed) appears first, so it should become person #1; every S1/S2/SW in the text
+        # must be replaced.
         (0.0, 1.0, "S2", "action", "S2 enters holding a basketball while SW films"),
         (1.0, 2.0, "S1", "speech", "S2, you are so stinky"),
         (2.0, 3.0, "ENV", "environment", "S1 is seated at the table"),
@@ -156,17 +169,21 @@ def test_flush_rewrites_ids_in_text_and_marks_actions(db):
     texts = {(r.source or {}).get("cast_id"): (r.content_inline or "")
              for r in ev.by_session(S) if (r.source or {}).get("kind") != "raw_clip"}
     assert "S1" not in texts["S2"] and "S2" not in texts["S2"] and "SW" not in texts["S2"], \
-        f"文本里仍残留裸 id:{texts['S2']!r}"
+        f"bare ids still left in the text: {texts['S2']!r}"
     assert texts["S2"] == "(action) 人物#1 enters holding a basketball while user films", texts["S2"]
-    assert texts["S1"] == "人物#1, you are so stinky", texts["S1"]     # 先出场的 S2 = 人物#1
-    assert texts["ENV"] == "Bob is seated at the table", texts["ENV"]  # env 行不加 action 标记
+    # S2 appeared first, so it is person #1.
+    assert texts["S1"] == "人物#1, you are so stinky", texts["S1"]
+    # An env line gets no action marker.
+    assert texts["ENV"] == "Bob is seated at the table", texts["ENV"]
 
 
 def test_anon_person_gets_one_intro_line_with_description(db):
-    """无名人物:在对话之前**单列一行**外观说明,且每人只列一次;有名字的不列。
+    """An unnamed person gets ONE SEPARATE LINE describing their appearance, placed before the
+    dialogue, and only once per person; people who have a name get no such line.
 
-    为什么要:没有这行,记忆里的「人物#1」就是个空壳编号——episode/atom 读到它完全不知道
-    是谁,既判断不了跨会话是否同一人,作答时也只能干巴巴复述编号。
+    Why this matters: without it, "person #1" in the memory is a hollow number — an episode or
+    atom reading it has no idea who that is, so it can neither judge whether this is the same
+    person across sessions nor say anything better than the bare number when answering.
     """
     store = CharacterStore(db, U)
     ev, cells, atoms, chains = (EvidenceStore(db, U), CellStore(db, U),
@@ -181,14 +198,15 @@ def test_anon_person_gets_one_intro_line_with_description(db):
     draft = MemoryDraftStore(U)
     for cast in ("S1", "S2", "SW"):
         draft.ensure_chain(S, cast)
-    # 链上的外观描述(剧本 cast.desc → chains.observe_clip 写入 desc_text)
+    # The appearance description carried on the chain (screenplay cast.desc, written into
+    # desc_text by chains.observe_clip).
     draft.update_chain(draft.chain_ref(S, "S2"),
                        desc_text="a woman in a pink dress with a ponytail")
     draft.update_chain(draft.chain_ref(S, "S1"), desc_text="a man in a grey hoodie")
     draft.stage_lines(S, 0, [
         (0.0, 1.0, "S2", "speech", "You ruined it"),
         (1.0, 2.0, "S1", "speech", "Sorry"),
-        (2.0, 3.0, "S2", "speech", "Again!"),          # 同一人再次出现,不得再列一行
+        (2.0, 3.0, "S2", "speech", "Again!"),          # the same person again: no second intro line
     ])
     by_chain = {draft.chain_ref(S, "S1"): bob, draft.chain_ref(S, "S2"): anon,
                 draft.chain_ref(S, "SW"): wearer}
@@ -199,7 +217,9 @@ def test_anon_person_gets_one_intro_line_with_description(db):
         llm=FakeLLM([_EPISODE, _ATOMS]), embedder=FakeEmbedder(), clip_keys={})
 
     intros = [r for r in ev.by_session(S) if (r.source or {}).get("kind") == "cast_intro"]
-    assert len(intros) == 1, f"无名人物应恰好一行说明(Bob 有名字不列):{[r.content_inline for r in intros]}"
+    assert len(intros) == 1, \
+        f"an unnamed person should get exactly one intro line (Bob has a name, so none): {[r.content_inline for r in intros]}"
     assert intros[0].content_inline == "人物#1 is a woman in a pink dress with a ponytail"
-    assert intros[0].holder == "env", "说明是旁白,不该挂在人物名下(否则像是他自己说的)"
+    assert intros[0].holder == "env", \
+        "the description is narration and must not be attributed to the person, or it reads as something they said"
     assert (intros[0].source or {}).get("character_id") == anon

@@ -1,7 +1,10 @@
-"""用户注册表:token ↔ user。多租户的入口(注册签发 token,调用方凭 token 定位自己的记忆)。
+"""The user registry: token to user. This is the entry point for multi-tenancy —
+registration issues a token, and the caller uses it to find their own memories.
 
-users 表与业务表同库;token 只在注册响应里给一次全文,库内明文存
-(P0 内网部署;上生产前换哈希存+可吊销,见 deploy-xhs 待办)。
+The users table lives in the same database as the business tables. The token is
+returned in full exactly once, in the registration response, and is stored in
+plain text. That is acceptable only for an internal deployment; before a real
+production rollout it should be stored hashed and be revocable.
 """
 
 from __future__ import annotations
@@ -20,11 +23,15 @@ class UserStore:
         self.db = db
 
     def register(self, user_id: str | None = None) -> dict:
-        """注册一个用户:user_id 可指定(重复则报错)或自动生成;签发随机 token。"""
+        """Register a user.
+
+        user_id may be supplied, in which case a duplicate raises, or generated
+        automatically. Either way a random token is issued.
+        """
         user_id = (user_id or "").strip() or f"u_{ULID()}"
         row = self.db.fetch_one("SELECT 1 FROM users WHERE user_id=%s", (user_id,))
         if row:
-            raise ValueError(f"user_id 已存在: {user_id}")
+            raise ValueError(f"user_id already exists: {user_id}")
         token = secrets.token_urlsafe(24)
         try:
             self.db.execute(
@@ -32,8 +39,9 @@ class UserStore:
                 (token, user_id, now().isoformat()),
             )
         except IntegrityError:
-            # SELECT-then-INSERT 窗口期并发注册:UNIQUE(user_id) 兜底,保持 409 语义
-            raise ValueError(f"user_id 已存在: {user_id}")
+            # A concurrent registration landing in the window between the SELECT and
+            # the INSERT is caught by UNIQUE(user_id), which keeps the 409 semantics.
+            raise ValueError(f"user_id already exists: {user_id}")
         return {"user_id": user_id, "token": token}
 
     def user_id_by_token(self, token: str) -> str | None:

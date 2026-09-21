@@ -1,6 +1,9 @@
-"""⑦ commit_session 单测:真 SIT(db fixture=rollback_scope 原子回退)+ MemoryDraft + MockOmni。
+"""Unit tests for commit_session against the shared integration database (the db fixture wraps each test in a
+rollback scope), plus MemoryDraft and MockOmni.
 
-覆盖:NEW 建档+学云、命中既有档、SW→wearer 指针、终审调用失败回退链假设、同框碰撞组降级。
+Covers: registering a NEW character and updating its prototype cloud, matching an existing character, the
+SW -> wearer pointer, falling back to the chain hypothesis when the final adjudication call fails, and degrading
+one chain of a co-present collision group.
 """
 
 from __future__ import annotations
@@ -40,7 +43,9 @@ def _setup(db):
 
 
 def _seed_chain(draft, cast, *, desc="a person", presence=(0,), face_i=0, q=0.8, best_face_q=0.8):
-    """建一条 pending 链 + 暂存一份带向量的脸证据(media None → oss_key 空,不影响学云)。"""
+    """Create a pending chain and stage one face evidence carrying an embedding. media is None, so the object-store
+    key stays empty, which does not affect prototype learning.
+    """
     draft.ensure_chain(S, cast)
     ref = draft.chain_ref(S, cast)
     draft.update_chain(ref, desc_text=desc, presence=list(presence), best_face_q=best_face_q)
@@ -52,33 +57,33 @@ def _seed_chain(draft, cast, *, desc="a person", presence=(0,), face_i=0, q=0.8,
 def test_commit_new_registration_and_learn(db):
     store, cloud, draft, book, registry = _setup(db)
     ref = _seed_chain(draft, "S1", face_i=1)
-    omni = MockOmni("BIND|S1|NEW\nEND")                     # 空库 → 只能 NEW
+    omni = MockOmni("BIND|S1|NEW\nEND")                     # empty library, so NEW is the only possible verdict
     report = commit_session(store, cloud, registry, book, session_id=S, omni=omni)
     assert len(report["registered"]) == 1
     cid = report["by_chain"][ref]
     assert cid == report["registered"][0]
     assert store.get_character(cid) is not None
-    assert len(store.active_assets(cid, "face")) == 1      # 暂存素材已落库
+    assert len(store.active_assets(cid, "face")) == 1      # the staged asset was persisted
     mean, tau, n = store.load_prototype(cid, "face")
-    assert mean is not None and n == 1                      # 学云生效
+    assert mean is not None and n == 1                      # the prototype cloud was updated
     assert draft.get_chain(ref)["status"] == "committed"
 
 
 def test_commit_match_existing(db):
     store, cloud, draft, book, registry = _setup(db)
-    a = store.create_character(session_id="s0")             # 库里已有 char a
+    a = store.create_character(session_id="s0")             # character a already exists in the library
     ref = _seed_chain(draft, "S1", face_i=0)
     omni = MockOmni("BIND|S1|%s\nEND" % a)
     report = commit_session(store, cloud, registry, book, session_id=S, omni=omni)
     assert report["by_chain"][ref] == a and report["registered"] == []
-    assert len(store.active_assets(a, "face")) == 1         # 素材追加到既有档
+    assert len(store.active_assets(a, "face")) == 1         # the asset was appended to the existing character
 
 
 def test_commit_wearer_pointer(db):
     store, cloud, draft, book, registry = _setup(db)
     draft.ensure_chain(S, "SW")
     ref = draft.chain_ref(S, "SW")
-    draft.update_chain(ref, presence=[0])                   # SW 无脸,仅声纹场景:这里只验 wearer 指针
+    draft.update_chain(ref, presence=[0])                   # SW has no face, only a voiceprint; this only checks the wearer pointer
     omni = MockOmni("BIND|SW|NEW\nEND")
     report = commit_session(store, cloud, registry, book, session_id=S, omni=omni)
     wearer = report["wearer"]
@@ -91,14 +96,17 @@ def test_commit_call_failure_falls_back_to_hypothesis(db):
     store, cloud, draft, book, registry = _setup(db)
     a = store.create_character(session_id="s0")
     ref = _seed_chain(draft, "S1")
-    draft.update_chain(ref, hypothesis=a, hypo_method="omni_rerank")   # 已有假设
+    draft.update_chain(ref, hypothesis=a, hypo_method="omni_rerank")   # a hypothesis is already on the chain
     report = commit_session(store, cloud, registry, book, session_id=S, omni=_FailOmni())
     assert report["fallbacks"][ref] == "hypothesis"
-    assert report["by_chain"][ref] == a                     # 回退到链假设 a
+    assert report["by_chain"][ref] == a                     # falls back to the chain hypothesis a
 
 
 def test_name_merge_guardrails():
-    """名字兜底:同名+非同框+都NEW → 并到最长链;同框/已绑档 → 不并(护栏)。纯 draft,无网。"""
+    """Name-based fallback merging: chains that share a name, never appear in the same clip, and are both NEW get
+    merged into the longest chain. Chains that are co-present, or already bound to a registered character, are left
+    alone by the guards. Pure draft state, no network.
+    """
     from personos.identity.commit import _merge_same_name_chains
     draft = MemoryDraftStore(U)
     book = ChainBook(draft, media_store=None)
@@ -110,22 +118,24 @@ def test_name_merge_guardrails():
         draft.save_roster_entry(S, cast, character_id=None, card={"name": name})
         return ref
 
-    # Bob 分裂成两条非同框链(presence 不交)→ 应合并,保留 presence 更长的 S1
+    # Bob is split across two chains that never co-occur (disjoint presence), so they should merge and keep S1,
+    # which has the longer presence.
     r1 = _chain("S1", "Bob", [0, 1, 2])
     r3 = _chain("S3", "Bob", [5])
-    # Alice 两条但同框(presence 交)→ 护栏②不并
+    # Two Alice chains that are co-present (overlapping presence), so the second guard blocks the merge.
     r2 = _chain("S2", "Alice", [0])
     r4 = _chain("S4", "Alice", [0])
-    # Mike 两条非同框但已绑不同注册档 → 护栏①不并(尊重模型区分两个真 Mike)
+    # Two Mike chains that never co-occur but are already bound to different registered characters, so the first
+    # guard blocks the merge -- the model deliberately told two real Mikes apart.
     r5 = _chain("S5", "Mike", [1], hyp="char_m1")
     r6 = _chain("S6", "Mike", [7], hyp="char_m2")
 
     report: dict = {}
     _merge_same_name_chains(book, S, report)
 
-    assert draft.canonical_chain(r3) == r1                 # Bob 并到最长的 S1
-    assert draft.canonical_chain(r2) != draft.canonical_chain(r4)   # Alice 同框未并
-    assert draft.canonical_chain(r5) != draft.canonical_chain(r6)   # Mike 已绑档未并
+    assert draft.canonical_chain(r3) == r1                 # Bob merged into S1, the longest chain
+    assert draft.canonical_chain(r2) != draft.canonical_chain(r4)   # Alice not merged: co-present
+    assert draft.canonical_chain(r5) != draft.canonical_chain(r6)   # Mike not merged: already bound
     merges = report.get("name_merges", [])
     assert len(merges) == 1 and merges[0]["name"] == "Bob" and merges[0]["kept"] == r1
 
@@ -133,12 +143,13 @@ def test_name_merge_guardrails():
 def test_commit_copresent_collision_degrades_one(db):
     store, cloud, draft, book, registry = _setup(db)
     a = store.create_character(session_id="s0")
-    # S1、S2 同框(presence 交集 [0]),终审都判 a → 应降级一条
+    # S1 and S2 are co-present (presence intersection [0]) and the final adjudication binds both to a, so one of
+    # them must be degraded.
     r1 = _seed_chain(draft, "S1", presence=(0,), best_face_q=0.9, face_i=0)
     r2 = _seed_chain(draft, "S2", presence=(0,), best_face_q=0.5, face_i=1)
     omni = MockOmni("BIND|S1|%s\nBIND|S2|%s\nEND" % (a, a))
     report = commit_session(store, cloud, registry, book, session_id=S, omni=omni)
     finals = {report["by_chain"][r1], report["by_chain"][r2]}
-    assert a in finals and len(finals) == 2                 # 一条留 a,一条降级建新档
-    assert report["by_chain"][r1] == a                      # best_face_q 高者(S1)留
-    assert len(report["registered"]) == 1                   # 降级的那条建了新档
+    assert a in finals and len(finals) == 2                 # one keeps a, the other is degraded into a new character
+    assert report["by_chain"][r1] == a                      # the higher best_face_q (S1) keeps a
+    assert len(report["registered"]) == 1                   # the degraded chain registered a new character

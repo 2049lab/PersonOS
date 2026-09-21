@@ -209,21 +209,21 @@ r = c.post("/api/v1/recall", json={"session_id": "s", "query": "x", "mode": "bog
 check("mode=bogus 400", r.status_code == 400 and "mode" in r.json().get("error", ""), r.text[:120])
 
 print("== 10. 上游故障 502 兜底 ==", flush=True)
-orig_chat, orig_embed = rt_mod.rt.maas.chat, rt_mod.rt.maas.embed
+orig_chat, orig_embed = rt_mod.rt.llm.chat, rt_mod.rt.embedder.embed
 
 
 def boom(*a, **kw):
     raise RuntimeError("simulated upstream outage")
 
 
-rt_mod.rt.maas.chat = boom
-rt_mod.rt.maas.embed = boom
+rt_mod.rt.llm.chat = boom
+rt_mod.rt.embedder.embed = boom
 try:
     r = c.post("/api/v1/recall", json={"session_id": "chat-001", "query": "我住哪?"}, headers=H)
     check("上游故障 → 502 JSON(非裸 500)",
           r.status_code == 502 and "不可用" in r.json().get("error", ""), r.text[:160])
 finally:
-    rt_mod.rt.maas.chat, rt_mod.rt.maas.embed = orig_chat, orig_embed
+    rt_mod.rt.llm.chat, rt_mod.rt.embedder.embed = orig_chat, orig_embed
 r = c.post("/api/v1/recall", json={"session_id": "chat-001", "query": "我住哪?"}, headers=H)
 check("恢复后 recall 200", r.status_code == 200, r.text[:120])
 

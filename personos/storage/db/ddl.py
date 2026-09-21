@@ -17,7 +17,7 @@ from __future__ import annotations
 import re
 
 _DDL = [
-    # 对外令牌表:token 注册签发,调用方持久保存
+    # The public token table: a token is issued at registration and the caller keeps it.
     """
     CREATE TABLE IF NOT EXISTS users (
         token       VARCHAR(64) NOT NULL,
@@ -60,8 +60,12 @@ _DDL = [
         KEY idx_atoms_chain (user_id, chain_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
-    # atom 链(派生视图,只分组不消解):链级信息;成员关系在 atoms 三列上(一 atom 至多一链)。
-    # 存量库加列走 scripts/mysql_schema.sql 的 ALTER(本 DDL 仅全新库生效,_init_schema 只查表存在性)。
+    # atom chains are a derived view that groups without resolving. This table holds
+    # the chain-level information; membership lives in three columns on atoms, and an
+    # atom belongs to at most one chain.
+    # Adding a column to an existing database goes through the ALTER statements in
+    # scripts/mysql_schema.sql. This DDL only takes effect on a brand-new database,
+    # because _init_schema checks table existence and nothing more.
     """
     CREATE TABLE IF NOT EXISTS atom_chains (
         id           VARCHAR(64) NOT NULL,
@@ -77,7 +81,8 @@ _DDL = [
         KEY idx_chains_user (user_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
-    # MemCell:一段话题对话的加工产物。topic 向量单独列存,段粒度检索面。
+    # A MemCell is what one topical stretch of conversation gets processed into. The
+    # topic vector gets its own column, giving a retrieval surface at segment granularity.
     """
     CREATE TABLE IF NOT EXISTS memcells (
         id              VARCHAR(64) NOT NULL,
@@ -93,9 +98,13 @@ _DDL = [
         KEY idx_cells_type (user_id, episode_type, t_start)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
-    # 会话对话历史的滚动压缩缓存(派生物,非真相源;evidence 仍原样保留)。
-    # 每会话单条、覆盖式:summary=已压缩的更早历史,covered=已折进 summary 的"轮"数(水位)。
-    # 主键 (user_id, session_id):同会话名在不同用户下互不相干。
+    # A rolling compressed cache of a session's conversation history. It is derived,
+    # not a source of truth; evidence is still kept verbatim.
+    # One row per session, overwritten in place: summary is the already-compressed
+    # earlier history, and covered is how many turns have been folded into it — the
+    # high-water mark.
+    # The primary key (user_id, session_id) means the same session name under two
+    # different users has nothing to do with itself.
     """
     CREATE TABLE IF NOT EXISTS session_context (
         user_id     VARCHAR(128) NOT NULL DEFAULT '',
@@ -106,9 +115,12 @@ _DDL = [
         PRIMARY KEY (user_id, session_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
-    # 异步任务登记簿(202+轮询):之前在 rt.tasks 内存 dict,重部署/多副本即丢。
-    # 生命周期短;done/error 行由清扫按 updated_at 过期删(MySQL 无原生 TTL)。
-    # idx(status,updated_at) 供僵尸任务收割(running 超时判 worker lost)。
+    # The async task register, for the 202-plus-polling pattern. This used to be an
+    # in-memory dict, which was lost on every redeploy and invisible to other replicas.
+    # Rows are short-lived; done and error rows are deleted by a sweep once updated_at
+    # is old enough, since MySQL has no native TTL.
+    # idx(status, updated_at) is what makes reaping zombie tasks cheap — a running task
+    # that times out is judged worker-lost.
     """
     CREATE TABLE IF NOT EXISTS tasks (
         task_id     VARCHAR(64) NOT NULL,
@@ -125,9 +137,13 @@ _DDL = [
         KEY idx_tasks_status (status, updated_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
-    # 用户画像版本:每次 consolidate 整版留档;当前画像 = 该 user 最新一版(单行读,无一致性问题)。
-    # profile_json 是全量画像(traits + facts,含 f_id);up_to_cell_id 是消费到的 cell 游标(下次取其后)。
-    # 画像是派生视图(可从 cell 重蒸馏),user_id 强隔离——严禁跨用户串信息。
+    # User profile versions: every consolidate archives a whole version, and the
+    # current profile is that user's latest one — a single-row read, so there is no
+    # consistency problem.
+    # profile_json is the complete profile (traits plus facts, each with an f_id), and
+    # up_to_cell_id is the cursor over consumed cells, so the next run starts after it.
+    # A profile is a derived view and can be re-distilled from the cells. user_id
+    # isolation is strict here: information must never cross between users.
     """
     CREATE TABLE IF NOT EXISTS profile_versions (
         id            VARCHAR(64) NOT NULL,
@@ -141,9 +157,11 @@ _DDL = [
         KEY idx_user_created (user_id, created_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
-    # —— 视频身份层三表 ——
-    # 此前只存在于设计文档、靠手工在实例上建,于是任何新部署(以及 SQLite)都缺表。
-    # 结构取自线上实际表,不是照抄文档:文档会过期,实例不会。
+    # —— The three video identity-layer tables ——
+    # These used to exist only in a design document and were created by hand on each
+    # instance, so every new deployment (and SQLite entirely) was missing them.
+    # The structure below was read off the real running tables rather than copied from
+    # the document, because a document goes stale and a live instance does not.
     """
     CREATE TABLE IF NOT EXISTS characters (
         id            VARCHAR(64) NOT NULL,

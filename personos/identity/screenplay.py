@@ -1,16 +1,30 @@
-"""一路剧本 protocol:JSON schema prompt + 解析校验(合并对话/动作/环境为单路)。
+"""The single-pass screenplay protocol: a JSON-schema prompt plus parsing and validation.
 
-为什么用 JSON 而非竖线定长文本:定长文本靠字段位置,模型少一段(如漏 kind)或用裸数字 id
-就整行错位,得靠 parser 打补丁;JSON 键名显式,qwen 遵循度高、json.loads 解析稳,几乎不用兜底
-(定案 §4 + 评审:尽量让 MLLM 直接输出对,不做补丁兜底)。
+Dialogue, action and environment all come back in one pass.
 
-相对 mneme 的改造(定案 §4):
-- **一路**产出:一个 Omni prompt 同时出 对话/动作/环境(line 的三种 kind),不分三路;
-- **salience 门控**:只为有承载力的人建 cast(说话/与佩戴者互动/被喊名/显著动作),路人进环境行;
-- **横向三分位 pos**(对齐 mneme):nom 的 pos 用 left/center/right(人在画面主要左右分开,不引纵向);
-  素材归属挑框后再做一致性校验(挑中的脸实际三分位≠提名则拒,宁缺毋滥),见 harvest.pick_face。
+Why JSON rather than fixed-width pipe-delimited text: fixed-width text identifies
+fields by position, so the moment the model drops a segment (say it omits kind) or
+writes a bare numeric id, the whole row shifts and the parser has to patch it up.
+JSON names its keys explicitly, the model follows it closely, json.loads is a
+stable parse, and we almost never need a fallback. The principle is to get the
+multimodal model to emit something correct directly rather than patching output
+after the fact.
 
-输出:单个 JSON 对象 {casts, lines, noms, voices, conts}。字段见 build_clip_prompt 里的 schema。
+Design choices worth calling out:
+
+- **one pass**: a single prompt produces dialogue, action and environment (the
+  three line kinds) together, instead of three separate passes;
+- **salience gating**: a cast entry is created only for load-bearing people —
+  those who speak, interact with the wearer, are addressed by name, or perform a
+  notable action. Passers-by go into environment lines instead;
+- **horizontal-thirds pos**: a nomination's pos is left/center/right. People in
+  frame separate mostly left-to-right, so there is no vertical axis. After the box
+  is picked, asset attribution re-checks it for agreement — if the chosen face's
+  actual third does not match the nomination we refuse rather than guess. See
+  harvest.pick_face.
+
+Output is a single JSON object {casts, lines, noms, voices, conts}; the fields are
+documented by the schema inside build_clip_prompt.
 """
 
 from __future__ import annotations
@@ -27,17 +41,24 @@ NAME_EVIDENCE_LEVELS = ("none", "spoken", "visible_text", "self_introduction",
 LINE_KINDS = ("speech", "action", "environment")
 
 def rewrite_ids(text: str, mapping: dict[str, str]) -> str:
-    """把行文本里**裸露的人物 id** 换成 mapping 给的名字。
+    """Replace **bare person ids inside line text** with the names given by mapping.
 
-    为什么必须做:剧本 MLLM 写 action/environment 行时会在文本里直呼 id——
-    "P1 enters holding a basketball"、"where P2 is seated"。归属改写只动 holder,
-    这些 id 就一路漏进 evidence → episode → atom,同一个人在记忆里出现三种叫法
-    (holder 叫「人物#1」、文本里叫 P1、别人嘴里叫 Alice),检索和作答都分不清是同一人。
+    Why this is necessary: when the screenplay model writes action and environment
+    lines it addresses people by id right in the prose — "P1 enters holding a
+    basketball", "where P2 is seated". Rewriting attribution only touches the
+    holder, so those ids leak straight through evidence -> episode -> atom, and one
+    person ends up with three names in memory: whatever the holder calls them,
+    "P1" in the text, and "Alice" in someone else's mouth. Retrieval and answering
+    can then no longer tell that these are the same person.
 
-    分两段做,各在信息齐的地方:clip 处理时 local id(P1)→会话 cast id(S1,有 cast_map);
-    会话末 flush 时 cast id(S1)→展示名(有终审归属)。
+    It happens in two stages, each where the information is complete: while
+    processing a clip, local id (P1) -> session cast id (S1), which is what
+    cast_map gives us; at end-of-session flush, cast id (S1) -> display name,
+    which is what final adjudication gives us.
 
-    只替换 mapping 里确实有的 key,且要求词边界——不碰正常词汇;长 key 优先,防 P1 把 P12 切一半。
+    Only keys actually present in mapping are replaced, and word boundaries are
+    required so ordinary words are left alone. Longer keys go first, so that P1
+    cannot chop P12 in half.
     """
     if not text or not mapping:
         return text
@@ -50,10 +71,10 @@ def rewrite_ids(text: str, mapping: dict[str, str]) -> str:
 
 _LOCAL_ID_RE = re.compile(r"^P[0-9]+$|^S[0-9]+$|^SW$")
 _PREV_RE = re.compile(r"^S[0-9]+$|^SW$|^none$")
-_POS_VALUES = ("left", "center", "right")   # 横向三分位(对齐 mneme _pick_face)
+_POS_VALUES = ("left", "center", "right")   # the horizontal thirds
 
 
-# ── 数据结构(移植 mneme types 的剧本部分)──────────────────────────
+# ── Data structures ──────────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class CastDecl:
@@ -78,7 +99,7 @@ class Nomination:
     local_id: str
     t: float
     desc: str = ""
-    pos: str = ""                 # 横向三分位 left/center/right(多脸消歧;缺失=不按位置挑框)
+    pos: str = ""                 # horizontal third left/center/right, used to disambiguate between faces; empty means do not pick by position
 
 
 @dataclass(frozen=True)
@@ -97,15 +118,19 @@ class ClipScript:
     cont: dict[str, str] = field(default_factory=dict)
     cont_evidence: dict[str, str] = field(default_factory=dict)
     issues: list[str] = field(default_factory=list)
-    parsed_ok: bool = False       # JSON 成功解析(替代竖线协议的 saw_end)
+    parsed_ok: bool = False       # the JSON parsed; this replaces the old pipe protocol's saw_end
     raw: str = ""
-    cast_map: dict[str, str] = field(default_factory=dict)  # local_id -> 会话 cast,映射端回填
+    cast_map: dict[str, str] = field(default_factory=dict)  # local_id -> session cast, filled in by the mapping side
 
     def cast_decl(self, local_id: str) -> CastDecl | None:
         return next((c for c in self.casts if c.local_id == local_id), None)
 
     def session_cast_ids(self) -> list[str]:
-        """本 clip 出现的会话 cast id(cast_map 值去重保序;映射端回填后可用)。"""
+        """The session cast ids appearing in this clip.
+
+        These are the cast_map values, deduplicated while keeping order, and are
+        available once the mapping side has filled cast_map in.
+        """
         seen: list[str] = []
         for cast_id in self.cast_map.values():
             if cast_id not in seen:
@@ -113,7 +138,7 @@ class ClipScript:
         return seen
 
 
-# ── prompt(一路剧本 JSON schema;我们相对 mneme 的改造集中在此)──────
+# ── The prompt: the single-pass screenplay JSON schema ───────────────
 
 DESC_SPEC = ("rich identifying appearance — hair (color/length/style); face shape & notable "
              "features (glasses, facial hair, marks); build/height/posture; skin tone; age "
@@ -131,10 +156,16 @@ _NAME_RULES = (
 
 def build_clip_prompt(*, scene_setting: str = "",
                       roster_cards: list[dict[str, Any]] | None = None) -> tuple[str, list[str]]:
-    """构造一路剧本 JSON prompt。返回 (prompt, roster 图 b64 列表)。
+    """Build the single-pass screenplay JSON prompt.
 
-    scene_setting:调用方场景设定(眼镜第一人称 / 机器人 / 纪录片…),对齐场景理解。
-    roster_cards:本会话早前出现的 cast(名字/外观/参考图),供续接判断,不是结论。
+    Returns (prompt, list of roster image b64).
+
+    scene_setting is the caller's framing of the scene (first-person glasses,
+    a robot, a documentary...), so the model reads the footage the right way.
+
+    roster_cards are the casts seen earlier in this session, with names,
+    appearance and reference images. They are reference material for judging
+    continuation, not conclusions.
     """
     scene = scene_setting.strip() or "first-person wearable-camera"
     roster_block, images = _render_roster(roster_cards or [])
@@ -185,10 +216,13 @@ def _render_roster(cards: list[dict[str, Any]]) -> tuple[str, list[str]]:
     return "\n".join(rows), images
 
 
-# ── 解析(JSON;只做校验,不修补格式)────────────────────────────────
+# ── Parsing: validate the JSON, never repair its formatting ──────────
 
 def _extract_json(raw: str) -> str:
-    """剥 markdown 围栏 + 取第一个 {...} 到最后一个 }(容忍模型偶尔加围栏/前后缀)。"""
+    """Strip markdown fences and take from the first { to the last }.
+
+    This tolerates the model occasionally adding fences or a prefix/suffix.
+    """
     s = raw.strip()
     if s.startswith("```"):
         s = s.strip("`")
@@ -207,14 +241,18 @@ def _clamp(value: float, duration: float | None) -> float:
 
 
 def parse_clip_output(raw: str, *, duration_sec: float | None = None) -> ClipScript:
-    """解析 Omni 的 JSON 剧本。坏记录进 issues 跳过,不级联;整体 JSON 坏则 parsed_ok=False。"""
+    """Parse the model's JSON screenplay.
+
+    A bad record is recorded in issues and skipped, so one failure does not
+    cascade. If the JSON as a whole is bad, parsed_ok stays False.
+    """
     script = ClipScript(raw=raw)
     try:
         data = json.loads(_extract_json(raw))
         if not isinstance(data, dict):
             raise ValueError("top-level JSON is not an object")
     except Exception as exc:  # noqa: BLE001
-        script.issues.append(f"JSON 解析失败: {type(exc).__name__}: {exc}")
+        script.issues.append(f"JSON parse failed: {type(exc).__name__}: {exc}")
         return script
     script.parsed_ok = True
 
@@ -223,7 +261,7 @@ def parse_clip_output(raw: str, *, duration_sec: float | None = None) -> ClipScr
             _add_cast(script, c)
         except Exception as exc:  # noqa: BLE001
             script.issues.append(f"cast[{i}]: {exc}")
-    declared = {c.local_id for c in script.casts} | {WEARER_CAST_ID}  # SW 是保留的佩戴者 id,恒合法
+    declared = {c.local_id for c in script.casts} | {WEARER_CAST_ID}  # SW is the reserved wearer id and is always legal
     for i, ln in enumerate(data.get("lines") or []):
         try:
             _add_line(script, ln, duration_sec, declared)
@@ -244,7 +282,9 @@ def parse_clip_output(raw: str, *, duration_sec: float | None = None) -> ClipScr
             _add_cont(script, ct, declared)
         except Exception as exc:  # noqa: BLE001
             script.issues.append(f"cont[{i}]: {exc}")
-    # SW(佩戴者)被引用却没显式建 cast → 补一条(SW 是结构性保留 id,非格式补丁)
+    # SW (the wearer) was referenced but never declared as a cast, so add one. SW is
+    # a structurally reserved id, which makes this a completion rather than a
+    # format patch.
     if not script.cast_decl(WEARER_CAST_ID) and (
             any(l.who == WEARER_CAST_ID for l in script.lines)
             or any(v.local_id == WEARER_CAST_ID for v in script.voice_ranges)):
@@ -276,7 +316,9 @@ def _add_line(script: ClipScript, ln: dict, duration: float | None, declared: se
     kind = str(ln.get("kind", "")).strip().lower()
     if kind in {"sound", "audio", "sfx", "noise"}:
         kind = "environment"
-    # ENV 是保留 who(环境行):who=ENV 或 kind=environment 一律归环境(与 SW 保留 id 同理)
+    # ENV is the reserved who for environment lines: either who=ENV or
+    # kind=environment sends the line to environment, on the same principle as the
+    # reserved SW id.
     if raw_who.upper() == ENV_WHO or kind == "environment":
         kind, who = "environment", ENV_WHO
     elif kind not in LINE_KINDS:
@@ -303,7 +345,7 @@ def _add_nom(script: ClipScript, n: dict, duration: float | None, declared: set[
         raise ValueError(f"undeclared cast {local_id!r}")
     pos = str(n.get("pos", "")).strip().lower()
     if pos not in _POS_VALUES:
-        pos = ""   # 缺失/非法位置:保留提名,多脸消歧按"无位置"(宁缺毋滥)
+        pos = ""   # missing or illegal position: keep the nomination, but disambiguate as if it had no position rather than guessing
     script.nominations.append(Nomination(local_id=local_id, t=_clamp(_fnum(n.get("t", 0)), duration),
                                          desc=str(n.get("desc", "")), pos=pos))
 

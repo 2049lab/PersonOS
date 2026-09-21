@@ -1,8 +1,13 @@
-"""推理设备选择:gpu 优先(cuda>mps)否则 cpu(移植 mneme device.py)。
+"""Pick the inference device: prefer a GPU (cuda > mps), otherwise cpu.
 
-优先级:后端专属 env > 全局 PERSONOS_VIDEO_DEVICE > auto(cuda>mps>cpu,探测失败静默退 cpu)。
-现在 CPU 服务器 → cpu;换 GPU 服务器 → cuda 自动生效;本机 Mac → mps。
-allow_mps:某后端在 MPS 未过数值等价校验(或依赖不支持)时置 False,auto 只在 cuda/cpu 间选。
+Precedence: the backend's own env var > the global PERSONOS_VIDEO_DEVICE > auto
+(cuda > mps > cpu, silently falling back to cpu if probing fails). This way a
+CPU-only server lands on cpu, moving to a GPU server switches to cuda with no
+code change, and a local Mac gets mps.
+
+Set allow_mps=False for a backend that has not passed numerical-equivalence
+checks on MPS, or whose dependencies do not support it; auto then chooses only
+between cuda and cpu.
 """
 
 from __future__ import annotations
@@ -23,6 +28,6 @@ def pick_device(env_key: str, *, allow_mps: bool = True) -> str:
             return "cuda"
         if allow_mps and torch.backends.mps.is_available():
             return "mps"
-    except Exception:  # noqa: BLE001  torch 缺失/探测失败 → 一律退 CPU
+    except Exception:  # noqa: BLE001  torch missing or probing failed -> always fall back to CPU
         pass
     return "cpu"

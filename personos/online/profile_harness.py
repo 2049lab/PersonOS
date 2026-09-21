@@ -1,12 +1,18 @@
-"""画像补丁校验器(harness):对整理产的补丁做**纯字段机械校验**,不解析文本、不猜内容。
+"""The profile patch validator (harness): runs **purely mechanical field checks** on the patch
+produced by consolidation — it never parses the text and never guesses at content.
 
-干净结构下校验的是 LLM 能写错的东西:未知域 / 枚举 / 长度 / band 合法 / **出处短标真实**。
-带的滚动/分带由 LLM 决定、引擎兜底条数上限——都不在此校验(结构不变量不靠 harness)。
+Under this clean structure, what gets checked is what the LLM can get wrong: unknown domains,
+enum values, lengths, band validity, and **that the source handles are real**. Band rolling and band
+assignment are the LLM's call, and the item cap is the engine's backstop — neither is checked here
+(structural invariants do not rely on the harness).
 
-`valid_cell_ids`:允许作为出处的**短标**集合(本轮新 cell 的 c1..cN)——LLM 只看得到这些短标,
-引用集外的即幻觉出处。真实长 id 的回填在 profile_consolidate,harness 只认短标(见 id 映射规范)。
+`valid_cell_ids`: the set of **short handles** allowed as sources (c1..cN for this round's new
+cells) — the LLM only ever sees these short handles, so a reference outside the set is a hallucinated
+source. Mapping back to the real long ids happens in profile_consolidate; the harness only knows
+short handles (see the id mapping convention).
 
-返回错误列表(空=通过);非空由 consolidate 带逐条错误打回让 LLM 重写。
+Returns a list of errors (empty = passed); a non-empty list is sent back by consolidate, error by
+error, for the LLM to rewrite.
 """
 
 from __future__ import annotations
@@ -45,7 +51,8 @@ def _check_text(text, limit: int, where: str, errs: list, *, required: bool) -> 
 
 def validate_patch(patch: dict, *, valid_cell_ids: set[str],
                    trait_max: int = 500, fact_max: int = 500) -> list[str]:
-    """校验补丁,返回错误列表(空=通过)。valid_cell_ids 是本轮 cell 的短标集(c1..cN)。"""
+    """Validate the patch and return a list of errors (empty = passed). valid_cell_ids is the set of
+    short handles for this round's cells (c1..cN)."""
     errs: list[str] = []
     if not isinstance(patch, dict):
         return ["补丁根须为 JSON 对象"]
@@ -60,7 +67,7 @@ def validate_patch(patch: dict, *, valid_cell_ids: set[str],
             errs.append(f"traits: 未知域 {dom!r}(只允许 PMO-16 的 16 个 key)")
             continue
         if val is None:
-            continue                                    # 显式清空,合法
+            continue                                    # explicit clear, which is valid
         if not isinstance(val, dict):
             errs.append(f"traits[{dom}]: 须为对象或 null")
             continue

@@ -1,11 +1,14 @@
-"""深轨看图单测:mock media_store + mllm,验证证据渲染时带 task_query 重看图片证据。
+"""Deep track image re-inspection: with a mocked media_store and mllm, check that rendering evidence re-examines
+image evidence using task_query.
 
-覆盖:
-- 图片证据渲染时,带 d.task_query 调 mllm.look_image 并把结果拼进原话行;
-- 看图目的(purpose)= 用户原始问题(task_query),非 keywords/topic;
-- 纯文本证据不触发看图;
-- 无 content_ref / 未注入 media_store|mllm / task_query 为空 → 不看图(降级读 content_inline);
-- 看图返回空 / 抛异常 → 只展示原话,不拼补充行(不阻塞)。
+Covers:
+- when rendering image evidence, mllm.look_image is called with d.task_query and the result is appended to the
+  original-text line;
+- the look-up purpose is the user's original question (task_query), not keywords or the topic;
+- plain text evidence never triggers a look;
+- no content_ref, no injected media_store or mllm, or an empty task_query means no look, degrading to
+  content_inline alone;
+- an empty look result or a raised exception shows only the original text with no appended line, and never blocks.
 """
 
 from __future__ import annotations
@@ -56,30 +59,32 @@ def _img_rec(content_inline="[图片] 一张展馆照片", ref="personos/u/2026/
                           content_ref=ref, captured_at=_T)
 
 
-# —— 核心:带 task_query 看图 ——
+# -- Core: looking at the image with task_query --
 
 def test_image_evidence_looked_with_task_query():
-    """图片证据:带 task_query 重看,补充行拼进渲染;purpose 用的是用户原始问题。"""
+    """Image evidence is re-examined with task_query and the extra line is folded into the rendering; the purpose
+    passed to the model is the user's original question.
+    """
     ms, ml = FakeMediaStore(), FakeMllm(text="横幅显示 ArtScience Museum。")
     d = _deps(task_query="Caroline 那次画展办在哪", media_store=ms, mllm=ml)
     note = _look_image_note(d, _img_rec())
     assert "ArtScience Museum" in note
-    assert ml.purposes == ["Caroline 那次画展办在哪"]     # 看图目的=原始问题,非 keywords/topic
+    assert ml.purposes == ["Caroline 那次画展办在哪"]     # the look purpose is the original question, not keywords or the topic
     assert ms.read_keys == ["personos/u/2026/09/ab/abc.jpg"]
 
 
 def test_evidence_page_appends_look_note_for_image():
-    """evidence_page 传 d 时,图片行下方多一条针对性看图补充。"""
+    """When evidence_page is given d, the image line gets an extra, question-specific look-up note beneath it."""
     ms, ml = FakeMediaStore(), FakeMllm(text="横幅:ArtScience Museum。")
     d = _deps(task_query="画展在哪", media_store=ms, mllm=ml)
     body, _ = evidence_page([_img_rec()], page=1, d=d)
-    assert "一张展馆照片" in body            # 原话(写入时的理解)保留
-    assert "ArtScience Museum" in body       # 深轨针对性看图补充
+    assert "一张展馆照片" in body            # the original text, i.e. what was understood at write time, is kept
+    assert "ArtScience Museum" in body       # the deep track's question-specific look-up note
     assert "↳[看图" in body
 
 
 def test_text_evidence_not_looked():
-    """纯文本证据不触发看图。"""
+    """Plain text evidence never triggers an image look."""
     ms, ml = FakeMediaStore(), FakeMllm()
     d = _deps(task_query="随便问", media_store=ms, mllm=ml)
     rec = EvidenceRecord(holder="user", content_inline="纯文本", modality="text", captured_at=_T)
@@ -87,7 +92,7 @@ def test_text_evidence_not_looked():
     assert ml.purposes == []
 
 
-# —— 降级:任何缺失/失败都只读 content_inline ——
+# -- Degrading: any missing piece or failure falls back to reading content_inline only --
 
 def test_no_task_query_no_look():
     ms, ml = FakeMediaStore(), FakeMllm()
@@ -97,8 +102,8 @@ def test_no_task_query_no_look():
 
 
 def test_no_deps_no_look():
-    """未注入 media_store/mllm(纯文本部署):图片证据只读 content_inline。"""
-    d = _deps(task_query="画展在哪")           # 不给 media_store/mllm
+    """With no media_store or mllm injected (a text-only deployment), image evidence only reads content_inline."""
+    d = _deps(task_query="画展在哪")           # neither media_store nor mllm is supplied
     assert _look_image_note(d, _img_rec()) == ""
 
 
@@ -109,7 +114,9 @@ def test_mllm_unavailable_no_look():
 
 
 def test_no_content_ref_no_look():
-    """有 modality=image 但无 content_ref(原图没留底):无法回看,降级。"""
+    """modality is image but there is no content_ref, meaning the original image was never retained, so there is
+    nothing to look back at and the render degrades.
+    """
     ms, ml = FakeMediaStore(), FakeMllm()
     d = _deps(task_query="画展在哪", media_store=ms, mllm=ml)
     rec = EvidenceRecord(holder="user", content_inline="[图片] x", modality="image",
@@ -118,20 +125,24 @@ def test_no_content_ref_no_look():
 
 
 def test_look_empty_returns_no_note():
-    ms, ml = FakeMediaStore(), FakeMllm(text="")      # 看不出与目的相关
+    ms, ml = FakeMediaStore(), FakeMllm(text="")      # the model sees nothing relevant to the purpose
     d = _deps(task_query="画展在哪", media_store=ms, mllm=ml)
     assert _look_image_note(d, _img_rec()) == ""
 
 
 def test_look_exception_degrades():
-    """读原图抛异常:不炸,返回空补充(原话仍照常展示)。"""
+    """If reading the original image raises, nothing blows up: the note comes back empty and the original text is
+    still shown as usual.
+    """
     ms, ml = FakeMediaStore(fail=True), FakeMllm()
     d = _deps(task_query="画展在哪", media_store=ms, mllm=ml)
     assert _look_image_note(d, _img_rec()) == ""
 
 
 def test_evidence_page_without_d_no_look():
-    """不传 d(旧调用方 / 快链):evidence_page 退化为纯原话渲染,不看图。"""
+    """Without d (older callers, or the fast path), evidence_page degrades to rendering the original text only and
+    does not look at images.
+    """
     body, _ = evidence_page([_img_rec()], page=1)
     assert "一张展馆照片" in body
     assert "↳[看图" not in body

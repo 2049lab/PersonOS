@@ -1,7 +1,10 @@
-"""SegStore 单测:进程内实现 + Redis 实现(FakeRedis 替身,不打真集群)。
+"""SegStore unit tests: the in-process implementation and the Redis one, the latter against a
+FakeRedis double rather than a real cluster.
 
-Redis 实现的键形态:单个 STRING 存整段 JSON(SET ... EX 一条命令原子值+TTL;
-corvus 对 pipeline 响应错位,禁用 pipeline 是设计约束,见 seg_store 模块注释)。
+Key shape of the Redis implementation: a single STRING holds the whole segment as JSON, so one
+SET ... EX command sets the value and the TTL atomically. Pipelining is deliberately not used,
+because the Redis proxy in front of the cluster can misalign pipelined responses; see the
+module comments in seg_store.
 """
 
 from __future__ import annotations
@@ -24,13 +27,14 @@ def test_memory_roundtrip_and_clear():
     assert [r.content_inline for r in st.load("u1", "s2")] == ["另一会话"]
     st.clear("u1", "s1")
     assert st.load("u1", "s1") == []
-    assert st.load("u1", "s2") != []            # 别的会话不受影响
-    st.clear("u1", "s1")                        # 幂等
+    assert st.load("u1", "s2") != []            # other sessions are unaffected
+    st.clear("u1", "s1")                        # idempotent
     assert st.load("u1", "s1") == []
 
 
 def test_memory_save_empty_releases_slot():
-    """save 空列表 = 无段状态,不占注册表名额(与 clear 等价)。"""
+    """Saving an empty list means there is no segment, and it takes no slot in the registry;
+    it is equivalent to clear."""
     st = MemorySegStore()
     st.save("u1", "s1", [_rec("x")])
     st.save("u1", "s1", [])
@@ -49,34 +53,34 @@ def test_memory_user_isolation():
 
 def test_memory_cap_bounds_growth():
     st = MemorySegStore()
-    st._CAP = 8                                  # 实例级压低上限,验证淘汰逻辑
+    st._CAP = 8                                  # lower the cap on this instance to exercise eviction
     for i in range(20):
         st.save("u", f"s{i}", [_rec(f"第{i}句")])
     assert len(st._d) <= 8
-    assert len(st.load("u", "s19")) == 1         # 最新会话仍在
+    assert len(st.load("u", "s19")) == 1         # the newest session is still there
 
 
 def test_memory_cap_prefers_dropping_closed_segments():
     st = MemorySegStore()
     st._CAP = 4
-    for i in range(4):                           # 4 个已闭合(空)段
+    for i in range(4):                           # 4 closed (empty) segments
         st.save("u", f"old{i}", [_rec("x")])
         st.clear("u", f"old{i}")
-    for i in range(4):                           # 4 个开段
+    for i in range(4):                           # 4 open segments
         st.save("u", f"open{i}", [_rec("x")])
-    st.save("u", "open3", [_rec("x"), _rec("y")])   # 触发超限:应先清空段
+    st.save("u", "open3", [_rec("x"), _rec("y")])   # goes over the cap: closed segments must be dropped first
     assert len(st._d) <= 4
-    assert len(st.load("u", "open3")) == 2       # 开段未被误清
+    assert len(st.load("u", "open3")) == 2       # the open segment was not dropped by mistake
 
 
 def test_redis_roundtrip_with_ttl():
     c = FakeRedis()
     st = RedisSegStore(c, ttl_s=3600)
     st.save("u1", "s1", [_rec("你好")])
-    st.save("u1", "s1", [_rec("你好"), _rec("第二句")])   # 覆写 = 追加语义(feed 持锁读改写)
+    st.save("u1", "s1", [_rec("你好"), _rec("第二句")])   # overwriting is how appending works: feed reads, modifies and writes under the lock
     assert [r.content_inline for r in st.load("u1", "s1")] == ["你好", "第二句"]
-    key = next(iter(c.data))                     # 只有一个 STRING 键
-    assert c.ttl[key] == 3600                    # 每次 save 都续期(滑动 TTL)
+    key = next(iter(c.data))                     # there is exactly one STRING key
+    assert c.ttl[key] == 3600                    # every save renews it, giving a sliding TTL
     st.clear("u1", "s1")
     assert st.load("u1", "s1") == []
     assert key not in c.data
@@ -85,4 +89,4 @@ def test_redis_roundtrip_with_ttl():
 def test_redis_load_missing_key_empty():
     c = FakeRedis()
     st = RedisSegStore(c)
-    assert st.load("nobody", "s") == []          # 无键 = 空段,不抛
+    assert st.load("nobody", "s") == []          # a missing key means an empty segment, not an exception

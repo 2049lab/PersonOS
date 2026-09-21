@@ -22,7 +22,7 @@ def test_update_preserves_embedding(db, rng_vec):
     store = AtomStore(db)
     atom = _atom("c1", "Caroline 住上海", object_type="fact")
     store.upsert(atom, embedding=rng_vec(2))
-    # 不带 embedding 的二次 upsert(remember 只改字段)不应清空向量
+    # A second upsert without an embedding (remember only changes fields) must not wipe the vector.
     atom.holder = "Caroline"
     store.upsert(atom)
     assert store.get(atom.id).holder == "Caroline"
@@ -41,7 +41,8 @@ def test_list_by_cell_orders_and_filters(db, rng_vec):
 
 
 def test_upsert_many_is_atomic(db, rng_vec):
-    """W2 落库:单事务——中途失败整体回滚,不出现写了一半的 cell。"""
+    """W2 persistence runs in a single transaction: a failure partway through rolls the whole
+    batch back, so a half-written cell never appears."""
     store = AtomStore(db)
     store.upsert_many([(_atom("c1", "ok", object_type="fact"), rng_vec(6))])
     bad = _atom("c1", "boom", object_type="fact")
@@ -51,4 +52,4 @@ def test_upsert_many_is_atomic(db, rng_vec):
     except Exception:
         pass
     texts = [a.text for a in store.list_by_cell("c1")]
-    assert texts == ["ok"]   # 事务回滚:x 没落进去
+    assert texts == ["ok"]   # transaction rolled back: x never landed

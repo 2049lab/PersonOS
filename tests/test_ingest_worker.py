@@ -1,7 +1,9 @@
-"""消费者/调度器单测:有序 + 单飞 + 崩溃回放 + 去重 + 公平上限 + 排空 + 池隔离。
+"""Consumer and dispatcher unit tests: ordering, single-flight, crash replay, dedup, the fairness
+cap, draining, and pool isolation.
 
-用 MemoryMsgQueue + MemorySessionLock + 假 writer(记录 feed 顺序),不打真 LLM/Redis;
-锁的 Redis 变体另有 test_session_lock 覆盖,这里聚焦消费编排逻辑。
+Uses MemoryMsgQueue, MemorySessionLock and a fake writer that records the feed order, so no real LLM
+or Redis is involved; the Redis variant of the lock is covered separately in test_session_lock, and
+these tests focus on the consumption orchestration logic.
 """
 
 from __future__ import annotations
@@ -15,12 +17,14 @@ from personos.storage.session_lock import MemorySessionLock
 
 
 def _p(text: str) -> dict:
-    """ingest 载荷:一条队列消息 = 一个原子批(这里每批单条,便于验证顺序)。"""
+    """An ingest payload: one queue message is one atomic batch (one message per batch here, which
+    makes the ordering easy to check)."""
     return {"messages": [{"speaker": "user", "text": text}]}
 
 
 class FakeWriter:
-    """记录 feed_batch/end_session 的调用顺序;可注入 barrier 模拟慢消费(测单飞)。"""
+    """Records the order of feed_batch and end_session calls; a barrier can be injected to simulate
+    slow consumption for the single-flight test."""
 
     def __init__(self, log: list, key: tuple, barrier: threading.Event | None = None):
         self._log = log
@@ -58,7 +62,7 @@ def test_drain_preserves_fifo_order():
     assert rep.locked and rep.applied == 5 and rep.skipped == 0
     assert [t for _, t in log] == ["m0", "m1", "m2", "m3", "m4"]
     assert mq.is_empty("u", "s")
-    assert ("u", "s") not in mq.active_sessions()      # 排空后下看板
+    assert ("u", "s") not in mq.active_sessions()      # once drained it leaves the active board
 
 
 def test_cursor_advances():
@@ -66,51 +70,55 @@ def test_cursor_advances():
     mq.enqueue("u", "s", _p("a"))
     mq.enqueue("u", "s", _p("b"))
     consumer.drain_session("u", "s")
-    assert mq.cursor_get("u", "s") == 2                # 游标推进到最大 seq
+    assert mq.cursor_get("u", "s") == 2                # the cursor advanced to the highest seq
     assert [t for _, t in log] == ["a", "b"]
 
 
 def test_crash_leftover_replayed_via_recover():
-    """reserve 后未 ack(模拟 drain 中途崩)→ 下次 drain 先 recover 回放,不丢不乱。"""
+    """Messages reserved but never acked (simulating a crash mid-drain) are replayed by recover at the
+    start of the next drain, so nothing is lost or reordered."""
     mq, lock, consumer, log = _make()
     mq.enqueue("u", "s", _p("a"))
     mq.enqueue("u", "s", _p("b"))
-    mq.reserve("u", "s")                               # 取到 proc 但不处理(崩)
+    mq.reserve("u", "s")                               # moved into proc but never handled (crash)
     mq.reserve("u", "s")
-    assert mq.depth("u", "s") == 0 and not mq.is_empty("u", "s")   # 都在途未 ack
-    rep = consumer.drain_session("u", "s")             # 应回放 proc 里的 a、b
+    assert mq.depth("u", "s") == 0 and not mq.is_empty("u", "s")   # both in flight, unacked
+    rep = consumer.drain_session("u", "s")             # should replay a and b out of proc
     assert rep.applied == 2
     assert [t for _, t in log] == ["a", "b"]
     assert mq.is_empty("u", "s")
 
 
 def test_recover_dedup_when_cursor_already_past():
-    """在途消息 seq 已 <= 游标(上次已应用只是没 ack)→ recover 判重投跳过,不重复应用。"""
+    """If an in-flight message's seq is already <= the cursor (it was applied last time and only the ack
+    was lost), recover treats it as a redelivery and skips it instead of applying it twice."""
     mq, lock, consumer, log = _make()
     mq.enqueue("u", "s", _p("a"))
     env = mq.reserve("u", "s")
-    mq.cursor_set("u", "s", env.seq)                   # 模拟"已应用但崩在 ack 前"
+    mq.cursor_set("u", "s", env.seq)                   # simulate "applied but crashed before the ack"
     rep = consumer.drain_session("u", "s")
-    assert rep.applied == 0 and rep.skipped == 1       # 判重投,跳过
-    assert log == []                                   # 未重复 feed
+    assert rep.applied == 0 and rep.skipped == 1       # recognized as a redelivery and skipped
+    assert log == []                                   # not fed a second time
     assert mq.is_empty("u", "s")
 
 
 def test_max_drain_fairness_leaves_more():
-    """单次抢锁至多 max_drain 条,剩余留队列(more=True),不霸占线程。"""
+    """A single lock acquisition consumes at most max_drain messages and leaves the rest in the queue
+    (more=True), so one session cannot hog a thread."""
     mq, lock, consumer, log = _make(max_drain=3)
     for i in range(10):
         mq.enqueue("u", "s", _p(f"m{i}"))
     rep = consumer.drain_session("u", "s")
     assert rep.applied == 3 and rep.more is True
     assert mq.depth("u", "s") == 7
-    assert ("u", "s") in mq.active_sessions()          # 未排空,仍在看板
-    consumer.drain_session("u", "s")                   # 接力,顺序继续
+    assert ("u", "s") in mq.active_sessions()          # not drained, so still on the active board
+    consumer.drain_session("u", "s")                   # pick up where it left off, order continues
     assert [t for _, t in log][:6] == ["m0", "m1", "m2", "m3", "m4", "m5"]
 
 
 def test_single_flight_second_drain_bounces():
-    """一个线程持锁慢消费时,另一线程 drain 同会话应抢不到锁(locked=False),不并发不乱序。"""
+    """While one thread holds the lock and consumes slowly, another thread draining the same session
+    must fail to take the lock (locked=False), so there is no concurrency and no reordering."""
     barrier = threading.Event()
     mq, lock, consumer, log = _make(barrier=barrier)
     mq.enqueue("u", "s", _p("slow"))
@@ -118,8 +126,8 @@ def test_single_flight_second_drain_bounces():
     reports: list = []
     t1 = threading.Thread(target=lambda: reports.append(consumer.drain_session("u", "s")))
     t1.start()
-    time.sleep(0.1)                                    # 让 t1 抢到锁并卡在 barrier
-    rep2 = consumer.drain_session("u", "s")            # t2:同会话,应抢不到
+    time.sleep(0.1)                                    # let t1 take the lock and block on the barrier
+    rep2 = consumer.drain_session("u", "s")            # t2: same session, must not get the lock
     assert rep2.locked is False and rep2.applied == 0
     barrier.set()
     t1.join(3.0)
@@ -127,7 +135,8 @@ def test_single_flight_second_drain_bounces():
 
 
 def test_transient_failure_retries_not_lost():
-    """瞬时失败(网络抖动)不丢消息:feed 首次抛异常 → 消息留在途,下轮 recover 重放成功。"""
+    """A transient failure such as a network blip must not lose a message: the first feed raises, the
+    message stays in flight, and the next round's recover replays it successfully."""
     mq = MemoryMsgQueue()
     lock = MemorySessionLock()
     log: list = []
@@ -137,7 +146,7 @@ def test_transient_failure_retries_not_lost():
         def feed_batch(self, msgs, *, now_dt=None, source_extra=None, task_type=None, scenario=""):
             calls["n"] += 1
             if calls["n"] == 1:
-                raise RuntimeError("模拟瞬时失败(如 MAAS 抖动)")
+                raise RuntimeError("simulated transient failure, e.g. a blip on the model gateway")
             for m in msgs:
                 log.append(m.text)
 
@@ -146,24 +155,25 @@ def test_transient_failure_retries_not_lost():
 
     consumer = SessionConsumer(mq, lock, lambda u, s: FlakyWriter(), max_drain=5)
     mq.enqueue("u", "s", _p("重要消息"))
-    rep1 = consumer.drain_session("u", "s")            # 首次:feed 抛异常
-    assert rep1.applied == 0 and not mq.is_empty("u", "s")   # 未应用,消息仍在途(未丢)
-    rep2 = consumer.drain_session("u", "s")            # 二次:recover 重放 → 成功
+    rep1 = consumer.drain_session("u", "s")            # first round: feed raises
+    assert rep1.applied == 0 and not mq.is_empty("u", "s")   # not applied, message still in flight (not lost)
+    rep2 = consumer.drain_session("u", "s")            # second round: recover replays it and succeeds
     assert rep2.applied == 1 and log == ["重要消息"]
-    assert mq.is_empty("u", "s")                       # 最终恰好消费一次
+    assert mq.is_empty("u", "s")                       # consumed exactly once in the end
 
 
 def test_poison_message_skipped_after_max_retries():
-    """毒消息(必然失败)连续失败达上限 → 跳过(推进游标)+ 解除队头阻塞,后续消息继续消费。"""
+    """A poison message that always fails is skipped once it hits the retry limit: the cursor advances,
+    the head-of-line block is cleared, and the messages behind it are consumed."""
     mq = MemoryMsgQueue()
     lock = MemorySessionLock()
     log: list = []
 
     class PoisonWriter:
-        """第一条(毒)必崩;其余正常。"""
+        """The first (poison) message always blows up; the rest are handled normally."""
         def feed_batch(self, msgs, *, now_dt=None, source_extra=None, task_type=None, scenario=""):
             if msgs[0].text == "毒":
-                raise ValueError("必然失败的毒消息")
+                raise ValueError("a poison message that always fails")
             for m in msgs:
                 log.append(m.text)
 
@@ -171,34 +181,37 @@ def test_poison_message_skipped_after_max_retries():
             pass
 
     consumer = SessionConsumer(mq, lock, lambda u, s: PoisonWriter(), max_drain=10, max_retries=3)
-    mq.enqueue("u", "s", _p("毒"))          # seq=1,毒
+    mq.enqueue("u", "s", _p("毒"))          # seq=1, the poison one
     mq.enqueue("u", "s", _p("正常1"))       # seq=2
     mq.enqueue("u", "s", _p("正常2"))       # seq=3
 
-    # 前 max_retries-1 轮:毒消息卡队头,重试,后面消费不到(队头阻塞)
+    # The first max_retries-1 rounds: the poison message sits at the head and is retried, so nothing
+    # behind it can be consumed (head-of-line blocking)
     for _ in range(consumer._max_retries - 1):
         rep = consumer.drain_session("u", "s")
-        assert rep.applied == 0 and log == []          # 毒消息挡着,正常消息还没轮到
-    # 第 max_retries 轮:判毒 → 跳过 → 后续正常消息被消费
+        assert rep.applied == 0 and log == []          # the poison message blocks; the good ones have not had a turn
+    # Round max_retries: declared poison, skipped, and the good messages behind it are consumed
     rep = consumer.drain_session("u", "s")
     assert rep.poisoned == 1
-    assert log == ["正常1", "正常2"]                    # 队头解阻,后续消息恰好消费
+    assert log == ["正常1", "正常2"]                    # head-of-line unblocked, the rest consumed exactly once
     assert mq.is_empty("u", "s")
-    assert mq.cursor_get("u", "s") == 3                # 游标推进过毒消息(seq=1)与后续
+    assert mq.cursor_get("u", "s") == 3                # the cursor moved past the poison message (seq=1) and the rest
 
 
 def test_poison_counter_resets_across_distinct_messages():
-    """失败计数按 msg_id 独立:一条毒消息被跳过后,不影响另一条消息的重试预算。"""
+    """Failure counts are per msg_id: skipping one poison message does not eat into another message's
+    retry budget."""
     mq = MemoryMsgQueue()
     m1, _ = mq.enqueue("u", "s", _p("a"))
     m2, _ = mq.enqueue("u", "s", _p("b"))
     assert mq.mark_failed("u", "s", m1) == 1
     assert mq.mark_failed("u", "s", m1) == 2
-    assert mq.mark_failed("u", "s", m2) == 1           # m2 独立计数,不受 m1 影响
+    assert mq.mark_failed("u", "s", m2) == 1           # m2 counts independently, unaffected by m1
 
 
 def test_heartbeat_renews_lock_during_long_apply():
-    """H2 修复:心跳在单条超长 apply 期间续锁(而非处理完才续),防锁中途过期被别副本抢入。"""
+    """The H2 fix: the heartbeat renews the lock *during* one very long apply, rather than only after
+    it finishes, so the lock cannot expire mid-apply and let another replica take over."""
     mq = MemoryMsgQueue()
 
     class SpyLock(MemorySessionLock):
@@ -215,7 +228,7 @@ def test_heartbeat_renews_lock_during_long_apply():
     def wf(u, s):
         class W:
             def feed_batch(self, msgs, *, now_dt=None, source_extra=None, task_type=None, scenario=""):
-                time.sleep(0.15)                           # 单条超长(> renew 间隔)
+                time.sleep(0.15)                           # one very long message (longer than the renew interval)
             def end_session(self, *, task_type=None, scenario=""):
                 pass
         return W()
@@ -223,38 +236,40 @@ def test_heartbeat_renews_lock_during_long_apply():
     consumer = SessionConsumer(mq, lock, wf, max_drain=5, renew_interval_s=0.05)
     mq.enqueue("u", "s", _p("x"))
     consumer.drain_session("u", "s")
-    assert lock.renews >= 1                                # 处理期间心跳至少续过一次
+    assert lock.renews >= 1                                # the heartbeat renewed at least once while processing
 
 
 def test_after_drain_hook_fires_only_when_applied():
-    """关段钩子:有消息落库才回调(带 user/session);抢不到锁/空转不回调。"""
+    """The end-of-drain hook fires only when messages were actually stored, and carries the user and
+    session; it does not fire when the lock was not acquired or there was nothing to do."""
     mq = MemoryMsgQueue()
     lock = MemorySessionLock()
     calls: list = []
     consumer = SessionConsumer(mq, lock, lambda u, s: FakeWriter([], (u, s)),
                                after_drain=lambda u, s, sc="": calls.append((u, s)))
-    # 空会话 drain:无消息应用 → 不回调
+    # Draining an empty session applies no messages, so there is no callback
     consumer.drain_session("u", "empty")
     assert calls == []
-    # 有消息 → 回调一次,带正确 user/session
+    # With a message, the hook fires once with the right user and session
     mq.enqueue("u", "s", _p("hi"))
     consumer.drain_session("u", "s")
     assert calls == [("u", "s")]
 
 
 def test_after_drain_hook_exception_does_not_break_consume():
-    """钩子抛异常不影响消费结果(画像触发失败绝不拖垮 ingest)。"""
+    """An exception from the hook must not affect the consumption result -- a failed profile trigger
+    can never drag down ingest."""
     mq = MemoryMsgQueue()
     lock = MemorySessionLock()
     log: list = []
 
     def boom(u, s, sc=""):
-        raise RuntimeError("画像触发炸了")
+        raise RuntimeError("the profile trigger blew up")
 
     consumer = SessionConsumer(mq, lock, lambda u, s: FakeWriter(log, (u, s)), after_drain=boom)
     mq.enqueue("u", "s", _p("hi"))
     rep = consumer.drain_session("u", "s")
-    assert rep.applied == 1 and [t for _, t in log] == ["hi"]   # 消费照常成功
+    assert rep.applied == 1 and [t for _, t in log] == ["hi"]   # consumption still succeeds
 
 
 def test_session_end_kind():
@@ -274,9 +289,11 @@ def test_different_sessions_independent():
 
 
 def test_end_to_end_queue_to_evidence(db):
-    """真链路:入队一批 → drain → 真 SessionWriter 落 evidence(W0)。验证消费管线接通写入侧。
+    """The real pipeline: enqueue a batch, drain it, and let a real SessionWriter store the evidence
+    (W0). This checks that the consumption pipeline is actually wired to the write side.
 
-    单批入首段:seg 为空,detect_boundary 不调 LLM(代码短路),build_cell 不触发 → 无需 LLM 响应。
+    A single batch into the first segment: seg is empty, so detect_boundary short-circuits without
+    calling the LLM and build_cell never fires, which is why no LLM responses are needed.
     """
     from personos.online.write_path import SessionWriter
     from personos.storage.atom_store import AtomStore
@@ -302,14 +319,15 @@ def test_end_to_end_queue_to_evidence(db):
 
     assert rep.applied == 1
     recs = ev.by_session("sess")
-    assert [r.content_inline for r in recs] == ["我明天要去打篮球"]        # W0 证据已落库
-    assert [r.content_inline for r in seg.load("u_it", "sess")] == ["我明天要去打篮球"]  # 段已存
+    assert [r.content_inline for r in recs] == ["我明天要去打篮球"]        # the W0 evidence is stored
+    assert [r.content_inline for r in seg.load("u_it", "sess")] == ["我明天要去打篮球"]  # the segment is persisted
 
 
 # —— Dispatcher ——
 
 class _InlinePool:
-    """同步执行的假池:submit 即刻跑完(测调度逻辑,不引入线程时序)。"""
+    """A fake pool that runs synchronously: submit finishes immediately, so the dispatch logic can be
+    tested without thread timing."""
 
     def __init__(self):
         self.submitted = 0
@@ -320,7 +338,8 @@ class _InlinePool:
 
 
 class _HoldPool:
-    """把作业存起来不立即执行(测 in-flight 去重):run_all 手动放行。"""
+    """Stores jobs instead of running them right away, for the in-flight dedup test: run_all releases
+    them manually."""
 
     def __init__(self):
         self.jobs = []
@@ -335,30 +354,32 @@ class _HoldPool:
 
 
 def test_dispatcher_inflight_dedup_no_redundant_submit():
-    """在派中的会话不重复派:job 未完成期间,再 run_once 不会对同会话二次提交(防饥饿根因)。"""
+    """A session already dispatched is not dispatched again: while its job is unfinished, another
+    run_once will not submit the same session twice -- this was the root cause of starvation."""
     mq, lock, consumer, log = _make()
     mq.enqueue("u", "s", _p("x"))
     pool = _HoldPool()
     disp = Dispatcher(mq, consumer, pool, cap=4)
-    assert disp.run_once() == 1                        # 派了 s(挂起,未执行)
-    assert disp.run_once() == 0                        # s 在派中 → 不重复派
-    pool.run_all()                                     # 放行:drain 完成,清 in-flight
+    assert disp.run_once() == 1                        # s was dispatched (pending, not yet executed)
+    assert disp.run_once() == 0                        # s is in flight, so it is not dispatched again
+    pool.run_all()                                     # release: the drain completes and clears in-flight
     assert mq.is_empty("u", "s")
-    mq.enqueue("u", "s", _p("y"))                       # 新消息 → 可再次派
+    mq.enqueue("u", "s", _p("y"))                       # a new message makes it dispatchable again
     assert disp.run_once() == 1
 
 
 def test_two_consumers_single_flight_cross_pod():
-    """两个消费者共享同一队列+锁(模拟两个 pod):同会话并发消费仍严格有序、恰好一次。"""
+    """Two consumers share one queue and one lock (simulating two pods): concurrent consumption of the
+    same session is still strictly ordered and exactly once."""
     mq = MemoryMsgQueue()
-    lock = MemorySessionLock()                         # 共享锁 = 跨 pod 的 Redis 锁语义
+    lock = MemorySessionLock()                         # a shared lock stands in for the cross-pod Redis lock semantics
     log: list = []
     guard = threading.Lock()
 
     def wf(u, s):
         class W:
             def feed_batch(self, msgs, *, now_dt=None, source_extra=None, task_type=None, scenario=""):
-                time.sleep(0.002)                      # 放大并发窗口
+                time.sleep(0.002)                      # widen the concurrency window
                 with guard:
                     for m in msgs:
                         log.append(int(m.text))
@@ -379,7 +400,7 @@ def test_two_consumers_single_flight_cross_pod():
     t1 = threading.Thread(target=worker, args=(c1,))
     t2 = threading.Thread(target=worker, args=(c2,))
     t1.start(); t2.start(); t1.join(10); t2.join(10)
-    assert log == list(range(30))                      # 两 pod 抢消费,仍有序+无重+无丢
+    assert log == list(range(30))                      # two pods competing, still ordered with no duplicates and no losses
 
 
 def test_dispatcher_run_once_drains_active_sessions():
@@ -391,19 +412,20 @@ def test_dispatcher_run_once_drains_active_sessions():
     n = disp.run_once()
     assert n == 2 and pool.submitted == 2
     assert {t for _, t in log} == {"a", "b"}
-    assert disp.run_once() == 0                        # 都排空了,看板空,不再派
+    assert disp.run_once() == 0                        # everything drained, the board is empty, nothing more to dispatch
 
 
 def test_dispatcher_backpressure_when_pool_full():
-    """池容量=1 且作业不归还名额(模拟满池):一轮最多派 1 个,不无限堆积。"""
+    """Pool capacity 1 and jobs that never give their slot back (a full pool): at most one dispatch per
+    round, so work does not pile up without bound."""
     mq, lock, consumer, log = _make()
     for i in range(5):
         mq.enqueue("u", f"s{i}", _p(f"m{i}"))
 
     class _NoLeavePool:
         def submit(self, fn, *args):
-            pass                                       # 不执行 → gate 名额不归还
+            pass                                       # never runs, so the gate slot is never returned
 
     disp = Dispatcher(mq, consumer, _NoLeavePool(), cap=1)
-    assert disp.run_once() == 1                        # 只派出 1 个就满
-    assert disp.run_once() == 0                        # 仍满,派不出
+    assert disp.run_once() == 1                        # one dispatch fills the pool
+    assert disp.run_once() == 0                        # still full, nothing can be dispatched

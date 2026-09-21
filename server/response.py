@@ -1,18 +1,26 @@
-"""对外响应统一信封 {code, data, msg} + 中心化装配(不逐个改端点)。
+"""A single response envelope {code, data, msg} for the public API, assembled centrally
+so no endpoint has to be changed one by one.
 
-约定(与调用方对齐):
-- **成功**:HTTP 走 REST 语义(200/201/202),body `code=0`、`data=<业务载荷>`、`msg="ok"`。
-- **失败**:HTTP 走语义状态码(4xx/5xx),body `code=<该 HTTP 状态号>`(HTTP 同族粗码)、
-  `data=null`、`msg=<人可读原因>`。
+The contract (agreed with callers):
+- **Success**: the HTTP status follows REST semantics (200/201/202), and the body has
+  `code=0`, `data=<payload>`, `msg="ok"`.
+- **Failure**: the HTTP status carries the meaning (4xx/5xx), and the body has
+  `code=<that HTTP status number>` (a coarse code in the same family as HTTP),
+  `data=null`, `msg=<human-readable reason>`.
 
-中心化两件套(零改动各 handler):
-1. `EnvelopeRoute`:自定义 APIRoute,把每个 handler **返回**的响应(成功 dict 或旧式
-   `JSONResponse({"error": ...})`)统一包成信封;保留原状态码与响应头(如 Retry-After)。
-2. `install(app)`:注册全局异常处理器,接管框架/依赖 **抛出** 的 HTTPException(401/404…)、
-   请求校验错误(422)、以及未预期异常(500)——这些不经过 handler 的返回值,route 层兜不到。
+Two pieces do this centrally, with zero changes to any handler:
+1. `EnvelopeRoute`: a custom APIRoute that wraps whatever each handler **returns** (a
+   success dict, or the older style `JSONResponse({"error": ...})`) into the envelope,
+   preserving the original status code and headers (such as Retry-After).
+2. `install(app)`: registers global exception handlers that take over HTTPExceptions
+   **raised** by the framework or dependencies (401/404...), request validation errors
+   (422) and unexpected exceptions (500) — none of which pass through a handler's return
+   value, so the route layer cannot catch them.
 
-两者只对 `/api/v1` 生效;平台探针(/healthz、/readyz)保持原样(k8s 不解析信封)。
-公共构造器 `ResponseUtils.ok/error` 供内部与处理器共用(Java ResponseUtils 风格)。
+Both apply only to `/api/v1`; the platform probes (/healthz, /readyz) stay as they are,
+since the orchestrator doesn't parse the envelope.
+The shared constructors `ResponseUtils.ok/error` are used by internal code and the
+exception handlers alike.
 """
 
 from __future__ import annotations
@@ -37,7 +45,8 @@ def _envelope(code: int, data: Any, msg: str) -> dict:
 
 
 class ResponseUtils:
-    """公共响应构造器(Java ResponseUtils 风格):内部与异常处理器共用一份信封逻辑。"""
+    """Shared response constructors: internal code and the exception handlers use one
+    and the same envelope logic."""
 
     @staticmethod
     def ok(data: Any = None, msg: str = "ok", *, status_code: int = 200,
@@ -48,7 +57,8 @@ class ResponseUtils:
     @staticmethod
     def error(http_status: int, msg: str, *, code: int | None = None,
               data: Any = None, headers: dict | None = None) -> JSONResponse:
-        """失败信封。code 缺省 = HTTP 状态号(HTTP 同族粗码);msg 为人可读原因。"""
+        """The failure envelope. code defaults to the HTTP status number (a coarse code
+        in the same family as HTTP); msg is the human-readable reason."""
         return JSONResponse(status_code=http_status, headers=headers,
                             content=_envelope(code if code is not None else http_status, data, msg))
 
@@ -58,7 +68,8 @@ def _is_enveloped(body: Any) -> bool:
 
 
 def _err_msg(body: Any, fallback: str) -> str:
-    """从旧式错误体里取人可读原因:优先 error / detail / msg,取不到用 fallback。"""
+    """Pull a human-readable reason out of an older-style error body: prefer error /
+    detail / msg, and use the fallback when none of them is there."""
     if isinstance(body, dict):
         for k in ("error", "detail", "msg", "message"):
             v = body.get(k)
@@ -70,31 +81,36 @@ def _err_msg(body: Any, fallback: str) -> str:
 
 
 def _wrap_response(resp) -> Any:
-    """把 handler 返回的响应包成信封。非 JSON / 已是信封 → 原样返回。
+    """Wrap the response a handler returned into the envelope. Non-JSON, or already an
+    envelope -> returned unchanged.
 
-    保留原状态码与响应头(Retry-After 等限流头必须透传);成功 code=0,失败 code=HTTP 状态号。
+    The original status code and headers are preserved (rate-limit headers such as
+    Retry-After must pass through); success uses code=0, failure uses the HTTP status
+    number as the code.
     """
     body_bytes = getattr(resp, "body", None)
     media = (getattr(resp, "media_type", "") or "").lower()
     if body_bytes is None or ("json" not in media and media != ""):
-        return resp                                  # 流式/非 JSON:不动
+        return resp                                  # Streaming / non-JSON: leave it alone
     try:
         body = json.loads(body_bytes) if body_bytes else None
     except (json.JSONDecodeError, ValueError, TypeError):
-        return resp                                  # 无法解析:原样
+        return resp                                  # Can't parse it: return as-is
     if _is_enveloped(body):
-        return resp                                  # 已是信封:不二次包
+        return resp                                  # Already an envelope: don't wrap twice
     status = resp.status_code
-    # 剥 content-length/type,由新 JSONResponse 重算;其余头(Retry-After 等)透传
+    # Strip content-length/type so the new JSONResponse recomputes them; every other
+    # header (Retry-After and friends) passes through
     headers = {k: v for k, v in resp.headers.items()
                if k.lower() not in ("content-length", "content-type")}
     if status < 400:
         return ResponseUtils.ok(data=body, status_code=status, headers=headers or None)
-    return ResponseUtils.error(status, _err_msg(body, "请求失败"), headers=headers or None)
+    return ResponseUtils.error(status, _err_msg(body, "request failed"), headers=headers or None)
 
 
 class EnvelopeRoute(APIRoute):
-    """自定义 APIRoute:handler 正常返回的响应统一包信封(抛出的异常由全局处理器接管)。"""
+    """A custom APIRoute: responses a handler returns normally are wrapped in the
+    envelope (raised exceptions are handled by the global handlers)."""
 
     def get_route_handler(self):
         original = super().get_route_handler()
@@ -105,14 +121,15 @@ class EnvelopeRoute(APIRoute):
         return custom
 
 
-# —— 全局异常处理器:接管框架/依赖抛出的异常(handler 返回值兜不到的路径)——
+# -- Global exception handlers: they take over exceptions raised by the framework or
+# dependencies, i.e. the paths a handler's return value can never cover --
 
 def _http_exc_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
     detail = exc.detail if isinstance(exc.detail, str) else json.dumps(exc.detail, ensure_ascii=False)
     if not request.url.path.startswith(_API_PREFIX):
         return JSONResponse(status_code=exc.status_code, content={"detail": detail},
-                            headers=getattr(exc, "headers", None))   # 非业务接口:保持原样
-    return ResponseUtils.error(exc.status_code, detail or "请求失败",
+                            headers=getattr(exc, "headers", None))   # Not a business endpoint: leave it as-is
+    return ResponseUtils.error(exc.status_code, detail or "request failed",
                                headers=getattr(exc, "headers", None))
 
 
@@ -120,21 +137,22 @@ def _validation_handler(request: Request, exc: RequestValidationError) -> JSONRe
     errs = exc.errors()
     first = errs[0] if errs else {}
     loc = ".".join(str(x) for x in first.get("loc", []) if x != "body")
-    msg = f"请求参数校验失败: {loc or '?'} {first.get('msg', '')}".strip()
+    msg = f"request validation failed: {loc or '?'} {first.get('msg', '')}".strip()
     if not request.url.path.startswith(_API_PREFIX):
         return JSONResponse(status_code=422, content={"detail": errs})
     return ResponseUtils.error(422, msg)
 
 
 def _unhandled_handler(request: Request, exc: Exception) -> JSONResponse:
-    logger.exception(f"未处理异常 path={request.url.path}: {exc!r}")
+    logger.exception(f"unhandled exception path={request.url.path}: {exc!r}")
     if not request.url.path.startswith(_API_PREFIX):
         return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
-    return ResponseUtils.error(500, "服务内部错误")   # 不外泄堆栈/内部细节(已落日志)
+    return ResponseUtils.error(500, "internal server error")   # Never leak the stack or internal details (they are already in the logs)
 
 
 def install(app: FastAPI) -> None:
-    """在 app 上注册三类全局异常处理器(仅 /api/v1 返信封,其余保持默认)。"""
+    """Register the three kinds of global exception handler on the app (only /api/v1
+    returns the envelope; everything else keeps the default behavior)."""
     app.add_exception_handler(StarletteHTTPException, _http_exc_handler)
     app.add_exception_handler(RequestValidationError, _validation_handler)
     app.add_exception_handler(Exception, _unhandled_handler)

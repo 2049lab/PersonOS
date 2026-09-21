@@ -1,10 +1,13 @@
-"""证据存储:append-only、不可变。唯一真相源(DESIGN §1)。
+"""Evidence storage: append-only and immutable. This is the single source of truth.
 
-铁律:只 insert,永不 update/delete(delete 走治理层的 forget,非本 store 日常能力)。
+The rule is absolute: insert only, never update or delete. Deletion goes through
+the governance layer's forget, and is not something this store does day to day.
 
-多租户:实例按 user 绑定(构造注入 user_id),所有读写自动限定在该 user 内——
-调用方拿到的就是这个 user 的 store,不存在"忘带 user_id"的泄露面。user_id="" 为
-兼容旧库/单租户场景的默认命名空间。
+For multi-tenancy, an instance is bound to one user through the constructor, and
+every read and write is confined to that user automatically. The caller receives a
+store that is already that user's, so there is no surface on which someone can
+"forget to pass user_id" and leak. user_id="" is the default namespace, kept for
+compatibility with older databases and single-tenant use.
 """
 
 from __future__ import annotations
@@ -29,15 +32,19 @@ class EvidenceStore:
         self.user_id = user_id
 
     def append(self, rec: EvidenceRecord, embedding: Optional[np.ndarray] = None) -> str:
-        """追加一条证据。若 (本user内) sha256 已存在则视为重复,返回既有 id(去重、幂等)。
+        """Append one piece of evidence.
 
-        embedding:证据文本向量,供 fact 层查不到时的 evidence 兜底语义检索(S3b)。
+        If that sha256 already exists for this user it counts as a duplicate and
+        the existing id is returned, which makes this deduplicating and idempotent.
+
+        embedding is the vector of the evidence text, used for the evidence-level
+        semantic fallback search when the fact layer finds nothing.
         """
         if not rec.sha256 and rec.content_inline is not None:
             rec.sha256 = sha256_of(rec.content_inline)
         existing = self.by_sha256(rec.sha256) if rec.sha256 else None
         if existing:
-            logger.debug(f"证据去重命中 sha={rec.sha256[:8]} -> {existing.id}")
+            logger.debug(f"evidence deduplicated sha={rec.sha256[:8]} -> {existing.id}")
             return existing.id
         emb_blob = np.asarray(embedding, dtype=np.float32).tobytes() if embedding is not None else None
         self.db.execute(
@@ -46,11 +53,11 @@ class EvidenceStore:
             (rec.id, self.user_id, rec.sha256, rec.holder, rec.modality,
              rec.captured_at.isoformat(), rec.model_dump_json(), blob_param(emb_blob)),
         )
-        logger.info(f"证据入库 id={rec.id} user={self.user_id or '(默认)'} holder={rec.holder} len={len(rec.content_inline or '')}")
+        logger.info(f"evidence stored id={rec.id} user={self.user_id or '(default)'} holder={rec.holder} len={len(rec.content_inline or '')}")
         return rec.id
 
     def all_with_embeddings(self) -> list[tuple[EvidenceRecord, np.ndarray]]:
-        """取本 user 所有带向量的证据,供 evidence 兜底检索批量打分。"""
+        """All of this user's evidence that carries a vector, for batch scoring in the fallback search."""
         rows = self.db.fetch_all(
             "SELECT payload, HEX(embedding) AS emb FROM evidence "
             "WHERE user_id=%s AND embedding IS NOT NULL",
@@ -82,9 +89,13 @@ class EvidenceStore:
         return [EvidenceRecord.model_validate_json(r["payload"]) for r in rows]
 
     def reply_for(self, user_evidence_id: str) -> EvidenceRecord | None:
-        """取"回应某条用户证据"的助手证据(其 source.reply_to 指向它)。检索展示时用来把 Q↔A 配对。
+        """The assistant evidence that replies to a given piece of user evidence,
+        identified by its source.reply_to. Used to pair question with answer when
+        showing retrieval results.
 
-        holder 是列、可直接筛;reply_to 在 payload 里,故扫近段 assistant 证据再比对——P0 规模够用。
+        holder is a real column and can be filtered directly, but reply_to lives
+        inside payload, so we scan a window of recent assistant evidence and
+        compare. That is sufficient at the current scale.
         """
         rows = self.db.fetch_all(
             "SELECT payload FROM evidence WHERE user_id=%s AND holder='assistant' "
@@ -98,14 +109,16 @@ class EvidenceStore:
         return None
 
     def in_session(self, session_id: str, limit: int = 20) -> list[EvidenceRecord]:
-        """同一会话的证据,按时间 old→new。供 expand 展开"会话内相邻的原始信息"。"""
+        """Evidence from the same session, oldest to newest, so expand can pull in neighbouring raw material."""
         rows = self.by_session(session_id)
         return rows[:limit]
 
     def session_stats(self) -> dict[str, dict]:
-        """本 user 各 session 的证据条数 + 最近一条证据时间(ISO 串,无则空串)。
+        """Per-session evidence counts for this user, plus the time of the most
+        recent piece as an ISO string, or an empty string if there is none.
 
-        供工作台列会话:按最近活跃排序——线上排查时"刚在跑的会话"排最前。
+        This is what lets a console list sessions by recent activity, so when
+        something is being diagnosed the session that just ran sorts first.
         """
         counts: dict[str, dict] = {}
         for rec in self.iter_all():
@@ -121,13 +134,21 @@ class EvidenceStore:
         return counts
 
     def by_session(self, session_id: str) -> list[EvidenceRecord]:
-        """本会话【全部】证据,时序 old→new。供会话上下文压缩:需要看到整段历史才能滚动折叠。"""
+        """**All** of this session's evidence, oldest to newest.
+
+        Session context compression needs the entire history in view before it can
+        roll the older part up.
+        """
         recs = [r for r in self.iter_all() if (r.source or {}).get("session_id") == session_id]
         recs.sort(key=lambda r: r.captured_at)
         return recs
 
     def iter_all(self) -> list[EvidenceRecord]:
-        """本 user 全部证据(时间序)。P0 规模够用;单 user 记忆量大后再加分页/列索引。"""
+        """All of this user's evidence, in time order.
+
+        Fine at the current scale; once one user's memory grows large this will
+        need pagination and a column index.
+        """
         rows = self.db.fetch_all(
             "SELECT payload FROM evidence WHERE user_id=%s ORDER BY captured_at ASC, id ASC",
             (self.user_id,),
@@ -135,10 +156,15 @@ class EvidenceStore:
         return [EvidenceRecord.model_validate_json(r["payload"]) for r in rows]
 
     def search_keyword(self, keywords: list[str], *, holder: str = "", limit: int = 30) -> list[EvidenceRecord]:
-        """关键词直搜原话(兜底路径):全部关键词须【同一句】命中,时序返回。
+        """Search the raw utterances by keyword, as a fallback path. Every keyword
+        must hit **the same utterance**, and results come back in time order.
 
-        这是唯一不依赖任何索引的检索——atoms 漏抽时原话仍在真相层,从这里可达。
-        LIKE 打在 payload JSON 上(CJK 与普通 ASCII 词原样存,含引号/反斜杠的词命中不了)。
+        This is the only retrieval path that depends on no index at all: when atom
+        extraction misses something, the original words are still in the truth
+        layer and reachable from here.
+
+        The LIKE runs against the payload JSON. Ordinary words are stored verbatim,
+        but a term containing quotes or backslashes will not match.
         """
         kws = [k.strip() for k in keywords if k and k.strip()]
         if not kws:
@@ -158,5 +184,9 @@ class EvidenceStore:
 
 
 def _like_escape(s: str) -> str:
-    """LIKE 通配符转义(! % _),配合 ESCAPE '!'(单字符转义符,不受 sql_mode 反斜杠语义影响)。"""
+    """Escape the LIKE wildcards (!, %, _) to pair with ESCAPE '!'.
+
+    A single-character escape is used because it is unaffected by whatever
+    sql_mode decides backslashes mean.
+    """
     return s.replace("!", "!!").replace("%", "!%").replace("_", "!_")

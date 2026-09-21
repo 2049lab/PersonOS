@@ -57,13 +57,14 @@ from .storage.session_lock import LOCK_TTL_S, MemorySessionLock, RedisSessionLoc
 from .storage.task_store import TaskStore
 from .storage.user_store import UserStore
 
-_UCTX_CAP = 1024          # 用户上下文 LRU 上限;stores 重建零成本,超限逐最旧
-_SWEEP_INTERVAL_S = 300   # 任务表僵尸收割/过期清理的触发间隔
-_MAX_PENDING = 200        # 后台在途任务上限:满则拒(503),见 admission.AdmissionGate
+_UCTX_CAP = 1024          # LRU cap on user contexts; rebuilding stores is free, so evict the oldest past the cap
+_SWEEP_INTERVAL_S = 300   # How often the task table sweep runs (reaping zombies, clearing expired rows)
+_MAX_PENDING = 200        # Cap on in-flight background tasks: reject (503) when full, see admission.AdmissionGate
 
 
 class UserContext:
-    """某 user 的绑定上下文:stores 自动过滤到该 user(写入状态机已无实例态)。"""
+    """One user's bound context: its stores filter to that user automatically (the write
+    state machine no longer holds instance state)."""
 
     def __init__(self, user_id: str, db: Database):
         self.user_id = user_id
@@ -80,7 +81,8 @@ class Memory:
         setup_logging(settings.log_dir)
         self.db = Database()
         self.users = UserStore(self.db)
-        # 默认(无 user 体系时的单租户视图)——兼容旧脚本;服务 API 一律走 for_user
+        # Defaults (the single-tenant view for setups without a user system) — kept for
+        # older scripts; the service API always goes through for_user
         self.evidence = EvidenceStore(self.db)
         self.atoms = AtomStore(self.db)
         self.cells = CellStore(self.db)
@@ -89,62 +91,82 @@ class Memory:
         # even though one endpoint usually serves both.
         self.llm = build_provider("llm", "openai")
         self.embedder = build_provider("embedder", "openai")
-        self.maas = self.llm            # legacy alias, still referenced below
         reranker_provider = "openai" if settings.rerank_api_key and settings.rerank_model else "noop"
         scorer = build_provider("reranker", reranker_provider) if reranker_provider == "openai" else None
         # R2: wrap the scorer so a failed rerank degrades to pass-through order
         # instead of blocking the main path (see ScoringReranker).
         self.reranker = ScoringReranker(scorer) if scorer else build_provider("reranker", "noop")
         self.task_store = TaskStore(self.db)
-        # 图片输入:MLLM 看图客户端(未配 key 时 available=False,写入侧自动降级为纯文本);
-        # OSS 存储懒建(首次带图 ingest 时装配,凭证缺失则 media_store 保持 None,原图不留底但不阻塞)。
+        # Image input: the multimodal client that looks at images (available=False when
+        # no key is configured, in which case the write path degrades to text only).
+        # Object storage is built lazily — wired up on the first ingest that carries an
+        # image; if credentials are missing media_store stays None, so the original
+        # image isn't kept but nothing is blocked.
         self.mllm = build_provider("mllm", "openai" if settings.mllm_api_key else "none")
         self._media_store = None
         self._media_guard = threading.Lock()
-        # —— 跨副本会话态(seg/锁):首次使用时才装配(懒建池,import 不触网) ——
+        # -- Cross-replica session state (segments / locks): wired up on first use
+        # (the pool is built lazily, so importing never touches the network) --
         self._warn_redis_env_mismatch()
         self._state_guard = threading.Lock()
         self._seg_store: SegStore | None = None
         self._session_lock: SessionLock | None = None
-        # —— 异步基建:后台线程池(状态流转全部落 tasks 表)+ 在途上限闸 ——
-        # 遗留后台任务池(submit_task;ingest 已改队列消费,此池仅零星低频任务)。不用 4 的小值
+        # -- Async plumbing: a background thread pool (every state transition is written
+        # to the tasks table) plus the in-flight cap gate --
+        # The legacy background task pool (submit_task; ingest now runs off the queue, so
+        # this pool only handles occasional low-frequency tasks). Not a small value like 4.
         self._executor = obs.ContextThreadPoolExecutor(max_workers=16, thread_name_prefix="rt-bg")
         self._admission = AdmissionGate(_MAX_PENDING)
         self._sweep_at = 0.0
-        # —— 有序消费任务系统(Phase B):按类型分池 + 会话队列 + 调度器 ——
-        # ingest_exec 跑 dispatcher 派的 drain 作业。recall 不再单开池:sync 端点已占一个 anyio
-        # 线程,再 submit 到别池阻塞等 = 双线程占用无收益;改为当前线程内跑,仅用 recall_gate 限流隔离。
-        # 保上下文池:每个 drain 任务在提交线程(dispatcher,无活跃 span)的复制上下文里跑,
-        # 隔离 worker 线程复用残留的 OTel 上下文——否则并发下前一任务的 span 残留会污染后一任务,
-        # 使 build_cell 的 episode_weave/atom_extract/chain_assign 脱离 ingest 根 → 孤儿 trace。
+        # -- Ordered-consumption task system (Phase B): a pool per kind + session queues
+        # + a dispatcher --
+        # ingest_exec runs the drain jobs the dispatcher hands out. recall no longer gets
+        # its own pool: the sync endpoint already occupies one anyio thread, and
+        # submitting to another pool and blocking on it would occupy two threads for no
+        # gain; it now runs on the current thread and only uses recall_gate for rate
+        # limiting and isolation.
+        # These are context-preserving pools: each drain task runs inside a copy of the
+        # submitting thread's context (the dispatcher, which has no active span), which
+        # isolates it from OTel context left behind in a reused worker thread —
+        # otherwise, under concurrency, the previous task's leftover span pollutes the
+        # next one and build_cell's episode_weave/atom_extract/chain_assign detach from
+        # the ingest root, becoming orphan traces.
         self.ingest_exec = obs.ContextThreadPoolExecutor(max_workers=settings.ingest_pool_size,
                                                          thread_name_prefix="ingest")
-        # 视频消费独立池:clip 处理是重活(落盘 + 本地人脸/声纹推理 + 2-3min MLLM),与文本共用
-        # 一个池会把 worker 全占满、把文本消费饿死。调度按会话队头 kind 分派到这里。
+        # A separate pool for video consumption: processing a clip is heavy work (writing
+        # to disk + local face/voiceprint inference + 2-3 min of multimodal inference),
+        # and sharing one pool with text would occupy every worker and starve text
+        # consumption. The dispatcher routes work here based on the kind at the head of
+        # the session queue.
         self.video_exec = obs.ContextThreadPoolExecutor(max_workers=settings.video_pool_size,
                                                         thread_name_prefix="video")
         self.recall_gate = AdmissionGate(settings.recall_pool_size)
         self._msgq: MsgQueue | None = None
         self._consumer: SessionConsumer | None = None
         self._dispatcher: Dispatcher | None = None
-        # —— 画像整理池(不走队列):关段后触发 → 提交本池 → per-user 单飞锁(pseudo-session
-        # "profile")。上一次没跑完,下次触发抢锁失败即返回,再下次触发自愈(幂等,读全部新 cell)。
+        # -- Profile consolidation pool (does not go through the queue): triggered after a
+        # segment closes -> submitted to this pool -> per-user single-flight lock (on the
+        # pseudo-session "profile"). If the previous run hasn't finished, the next trigger
+        # fails to take the lock and simply returns, and the trigger after that heals it
+        # (the work is idempotent — it reads all new cells).
         self.profile_exec = obs.ContextThreadPoolExecutor(max_workers=settings.profile_pool_size,
                                                           thread_name_prefix="profile")
-        # user -> 绑定上下文(LRU 上限;超限逐最旧)
+        # user -> bound context (LRU capped; the oldest is evicted past the cap)
         self._uctx_guard = threading.Lock()
         self._uctx: OrderedDict[str, UserContext] = OrderedDict()
-        # —— 视频身份 backends:进程级懒加载单例(重模型 InsightFace/ECAPA,全 drain 线程共享一份;
-        # env PERSONOS_VIDEO_BACKEND gate,缺省 real)。draft 会话草稿按 user 缓存
-        # (Redis 实现无状态、Memory 实现须持久于同实例)。
+        # -- Video identity backends: a process-wide lazily loaded singleton (the heavy
+        # InsightFace/ECAPA models are loaded once and shared by every drain thread;
+        # gated by the env var PERSONOS_VIDEO_BACKEND, default real). Session drafts are
+        # cached per user (the Redis implementation is stateless; the in-memory one must
+        # persist within the same instance).
         self._video_backends: dict | None = None
         self._video_guard = threading.Lock()
         self._draft_guard = threading.Lock()
         self._draft_stores: "OrderedDict[str, Any]" = OrderedDict()
 
-    # —— 多租户 ——
+    # -- Multi-tenancy --
     def for_user(self, user_id: str) -> UserContext:
-        """取某 user 的绑定上下文(LRU 缓存):其 stores 只作用于该 user。"""
+        """Get a user's bound context (LRU cached): its stores act on that user only."""
         with self._uctx_guard:
             ctx = self._uctx.get(user_id)
             if ctx is None:
@@ -157,18 +179,21 @@ class Memory:
             return ctx
 
     def ctx_by_token(self, token: str) -> UserContext | None:
-        """凭调用方 token 定位其上下文;未知 token → None(由 API 层回 401)。"""
+        """Resolve a caller's context from its token; an unknown token -> None (the API
+        layer turns that into a 401)."""
         uid = self.users.user_id_by_token(token)
         return self.for_user(uid) if uid else None
 
     def close_user(self, user_id: str) -> None:
-        # stores 共享全局池化连接,无 per-user 连接可关;仅从 LRU 中显式摘除
+        # The stores share the globally pooled connection, so there is no per-user
+        # connection to close; we only drop the entry from the LRU explicitly.
         with self._uctx_guard:
             self._uctx.pop(user_id, None)
 
     def writer_for(self, user_id: str, session_id: str,
                    max_turns: int = MAX_SEGMENT_TURNS) -> SessionWriter:
-        """构一个写入状态机(无实例态:段状态在 seg_store,跨请求/跨副本共享)。"""
+        """Build a write state machine (no instance state: segment state lives in
+        seg_store and is shared across requests and replicas)."""
         ctx = self.for_user(user_id)
         return SessionWriter(self.llm, self.embedder, ctx.evidence, ctx.cells, ctx.atoms,
                              session_id=session_id, user_id=user_id, max_turns=max_turns,
@@ -176,18 +201,20 @@ class Memory:
                              media_store=self._media(), mllm=self.mllm)
 
     def _media(self):
-        """OSS 存储懒建:凭证缺失/oss2 缺失 → 返回 None(带图 ingest 仍能看图,只是原图不留底)。"""
+        """Build the object storage client lazily: missing credentials or a missing SDK
+        -> return None (an ingest with images can still look at them, the originals just
+        aren't kept)."""
         if self._media_store is None:
             with self._media_guard:
                 if self._media_store is None:
                     try:
                         self._media_store = media_store_from_settings(settings)
                     except Exception as e:   # noqa: BLE001
-                        logger.warning(f"OSS 媒体存储未装配(图片将不留底): {e}")
-                        self._media_store = False   # 标记已尝试,避免每次重试
+                        logger.warning(f"media object storage not wired up (images will not be kept): {e}")
+                        self._media_store = False   # Mark that we tried, so we don't retry on every call
         return self._media_store or None
 
-    # —— 跨副本会话态 ——
+    # -- Cross-replica session state --
     def _seg(self) -> SegStore:
         if self._seg_store is None:
             with self._state_guard:
@@ -196,9 +223,12 @@ class Memory:
         return self._seg_store
 
     def session_lock(self, user_id: str, session_id: str):
-        """per-(user,session) 写锁:同一会话的 ingest 与 session-end 抢同一把,永不交错。
+        """Per-(user, session) write lock: ingest and session-end for the same session
+        contend for the same lock, so they never interleave.
 
-        Redis 实现 = 跨副本互斥;未配 REDIS_CLUSTER 时进程内(单副本)。返回上下文管理器。
+        The Redis implementation gives cross-replica mutual exclusion; without
+        REDIS_CLUSTER configured it is in-process (single replica). Returns a context
+        manager.
         """
         if self._session_lock is None:
             with self._state_guard:
@@ -206,21 +236,25 @@ class Memory:
                     self._seg_store, self._session_lock = self._make_state()
         return self._session_lock(user_id, session_id)
 
-    # —— 视频身份消费依赖 ——
+    # -- Dependencies for video identity consumption --
     def video_backends(self) -> dict:
-        """视频身份 backends 进程级懒加载单例(重模型只加载一次,全 drain 线程共享)。
-        profile 取 env PERSONOS_VIDEO_BACKEND(**缺省 real**;mock 仅供测试——它会编造剧本
-        与假人脸向量,生产跑 mock = 往真库写伪造记忆)。"""
+        """Process-wide lazily loaded singleton of the video identity backends (the heavy
+        models are loaded once and shared by every drain thread).
+        The profile comes from the env var PERSONOS_VIDEO_BACKEND (**default real**; mock
+        is for tests only — it fabricates scripts and fake face vectors, so running mock
+        in production means writing forged memories into the real database)."""
         if self._video_backends is None:
             with self._video_guard:
                 if self._video_backends is None:
                     from .identity.backends.factory import make_backends
-                    self._video_backends = make_backends()   # env gate 在 make_backends 内
-                    logger.info("视频身份 backends 装配完成(进程单例)")
+                    self._video_backends = make_backends()   # the env gate lives inside make_backends
+                    logger.info("video identity backends ready (process-wide singleton)")
         return self._video_backends
 
     def _draft_for(self, user_id: str):
-        """会话草稿存储(按 user 缓存):Redis 实现无状态(缓存仅省构造),Memory 实现须同实例持久。"""
+        """Session draft storage (cached per user): the Redis implementation is stateless
+        (caching only saves construction), while the in-memory one must persist within
+        the same instance."""
         with self._draft_guard:
             d = self._draft_stores.get(user_id)
             if d is None:
@@ -233,7 +267,8 @@ class Memory:
             return d
 
     def video_deps(self, user_id: str):
-        """装配视频消费的一整套依赖(VideoDeps):backends=进程单例,其余 per-user。"""
+        """Assemble the full dependency set for video consumption (VideoDeps): backends
+        is the process-wide singleton, everything else is per user."""
         from .identity.cloud import CloudEngine
         from .identity.store import CharacterStore
         from .online.video_ingest import VideoDeps
@@ -241,15 +276,19 @@ class Memory:
         store = CharacterStore(self.db, user_id)
         return VideoDeps(
             store=store, cloud=CloudEngine(store), draft=self._draft_for(user_id),
-            backends=self.video_backends(), media_store=self._media(), maas=self.llm,
+            backends=self.video_backends(), media_store=self._media(), llm=self.llm,
             evidence=ctx.evidence, cells=ctx.cells, atoms=ctx.atoms, chains=ctx.chains)
 
     def visual_deps(self, user_id: str):
-        """装配召回侧视觉改写的依赖(VisualDeps)。
+        """Assemble the dependencies for visual query rewriting on the recall side
+        (VisualDeps).
 
-        与视频消费共用同一份 backends 单例(重模型全进程只此一份)和同一套身份资产,
-        区别是**不写草稿**——看图改写是读路径,不产生任何身份变更。
-        draft 传 None:只用到 registry.candidate_card,那条路径不碰 draft。
+        It shares the same backends singleton as video consumption (the heavy models
+        exist once per process) and the same identity assets; the difference is that it
+        **writes no drafts** — looking at an image to rewrite a query is a read path and
+        produces no identity changes.
+        draft is passed as None: only registry.candidate_card is used, and that path
+        never touches the draft.
         """
         from .identity.cloud import CloudEngine
         from .identity.registry import AnchorRegistry
@@ -262,15 +301,17 @@ class Memory:
                                                   media_store=self._media()))
 
     def _make_state(self) -> tuple[SegStore, SessionLock]:
-        """按配置装配 (seg_store, session_lock)。Redis 故障不吞:首次使用时如实抛。"""
+        """Build (seg_store, session_lock) according to configuration. A Redis failure is
+        not swallowed: it is raised as-is on first use."""
         if settings.redis_cluster:
             client = get_redis()
             return RedisSegStore(client), RedisSessionLock(client)
         return MemorySegStore(), MemorySessionLock()
 
-    # —— 有序消费任务系统(Phase B) ——
+    # -- Ordered-consumption task system (Phase B) --
     def msg_queue(self) -> MsgQueue:
-        """会话消息队列(懒建):Redis 实现=跨副本;未配 REDIS_CLUSTER 时进程内单副本。"""
+        """The session message queue (built lazily): the Redis implementation spans
+        replicas; without REDIS_CLUSTER configured it is in-process, single replica."""
         if self._msgq is None:
             with self._state_guard:
                 if self._msgq is None:
@@ -280,28 +321,32 @@ class Memory:
 
     def _get_consumer(self) -> SessionConsumer:
         if self._consumer is None:
-            # 先在锁外把依赖建好:msg_queue()/_seg() 各自会取 _state_guard,
-            # 若在本方法持锁时再调它们 → 非重入 Lock 自锁(踩过的坑)
+            # Build the dependencies outside the lock first: msg_queue() and _seg() each
+            # take _state_guard themselves, and calling them while this method holds the
+            # lock would deadlock on the non-reentrant Lock (we got burned by this).
             mq = self.msg_queue()
-            self._seg()   # 确保 session_lock 已装配(与 seg 同源)
+            self._seg()   # Make sure session_lock is wired up (it comes from the same place as seg)
             with self._state_guard:
                 if self._consumer is None:
                     self._consumer = SessionConsumer(
                         mq, self._session_lock, self.writer_for,
                         max_drain=settings.max_drain_per_cycle,
                         max_retries=settings.max_ingest_retries,
-                        renew_interval_s=LOCK_TTL_S / 3,   # 心跳续锁间隔 = 锁 TTL 的 1/3
-                        after_drain=self.trigger_profile,  # 关段后触发画像整理(不阻塞 ingest)
-                        video_deps=self.video_deps,        # 视频消息消费依赖(backends 懒加载)
-                        task_store=self.task_store)        # clip 永久失败留痕(可查/可告警)
+                        renew_interval_s=LOCK_TTL_S / 3,   # Lease renewal interval = 1/3 of the lock TTL
+                        after_drain=self.trigger_profile,  # Trigger profile consolidation after a segment closes (without blocking ingest)
+                        video_deps=self.video_deps,        # Dependencies for consuming video messages (backends load lazily)
+                        task_store=self.task_store)        # Leave a record when a clip fails permanently (queryable, alertable)
         return self._consumer
 
-    # —— 画像整理触发(不走队列,一 user 一把单飞锁) ——
+    # -- Profile consolidation trigger (not queued; one single-flight lock per user) --
     def trigger_profile(self, user_id: str, session_id: str = "", scenario: str = "") -> None:
-        """SessionConsumer 关段后回调:算触发条件,达标则提交 profile 池。
+        """Callback SessionConsumer runs after closing a segment: evaluate the trigger
+        conditions and, if they are met, submit to the profile pool.
 
-        在 ingest 线程内调用,必须快且绝不抛(画像失败只影响新鲜度,不能拖垮 ingest 消费)。
-        scenario:触发它的那批 ingest 的业务场景描述(per-request 场景透传给画像整理,不落库)。
+        It is called on the ingest thread, so it must be fast and must never raise (a
+        failed profile only costs freshness; it must not drag ingest consumption down).
+        scenario: the business-scenario description of the ingest batch that triggered
+        this (a per-request value passed through to consolidation, never persisted).
         """
         try:
             ctx = self.for_user(user_id)
@@ -309,26 +354,32 @@ class Memory:
             cur = ps.current()
             cells = ctx.cells.cells_after(cur.up_to_cell_id if cur else "")
             if not cells:
-                return                                   # 没有新 cell(段未闭合)→ 不触发
+                return                                   # No new cells (no segment closed) -> don't trigger
             ep_chars = sum(len(c.episode or "") for c in cells)
-            version_count = cur.version if cur else 0    # 版本不删,号即计数
+            version_count = cur.version if cur else 0    # Versions are never deleted, so the number is the count
             if not should_consolidate(n_new=len(cells), ep_chars=ep_chars,
                                       version_count=version_count,
                                       ep_chars_trigger=settings.profile_ep_chars_trigger):
                 return
-            # 直接提交:池 worker 数即真并发上限,超出的排队(绝不丢)。per-user 单飞锁去重
-            # (重复提交只是廉价空跑)。此前用 gate 满即 return 丢弃,而会话末次关段没有"下次"
-            # 自愈 → 并发 > 池容量时稳定漏做若干 user 的画像,故去掉丢弃语义。
+            # Submit unconditionally: the pool's worker count is the real concurrency
+            # cap and anything beyond it queues up (nothing is ever dropped). The
+            # per-user single-flight lock deduplicates (a duplicate submission is just a
+            # cheap no-op run). We used to drop the work by returning when a gate was
+            # full, but the last segment close of a session has no "next time" to heal
+            # it — so whenever concurrency exceeded the pool capacity, some users'
+            # profiles were reliably skipped. Hence the drop semantics are gone.
             self.profile_exec.submit(self._run_user_profile, user_id, scenario)
         except Exception:   # noqa: BLE001
-            logger.exception(f"画像触发失败 user={user_id}(不影响 ingest)")
+            logger.exception(f"profile trigger failed user={user_id} (ingest unaffected)")
 
     def _run_user_profile(self, user_id: str, scenario: str = "") -> None:
-        """在 profile 池执行:抢 per-user 单飞锁 → 整理出版本 → 释放。抢不到即返回(下次触发自愈)。"""
+        """Runs on the profile pool: take the per-user single-flight lock -> consolidate
+        into a new version -> release. If the lock can't be taken, just return (the next
+        trigger heals it)."""
         try:
             token = self._session_lock.try_acquire(user_id, "profile") if self._session_lock else None
             if not token:
-                return                                   # 另一个整理在跑,交给它(幂等)
+                return                                   # Another consolidation is running; leave it to that one (idempotent)
             try:
                 ctx = self.for_user(user_id)
                 run_user_consolidation(self.llm, cells_store=ctx.cells, atoms_store=ctx.atoms,
@@ -337,22 +388,25 @@ class Memory:
             finally:
                 self._session_lock.release(user_id, "profile", token)
         except Exception:   # noqa: BLE001
-            logger.exception(f"画像整理失败 user={user_id}")
+            logger.exception(f"profile consolidation failed user={user_id}")
 
     def enqueue_message(self, user_id: str, session_id: str, payload: dict,
                         *, kind: str = "ingest") -> tuple[str, int]:
-        """入队一条会话消息(ingest/session_end),立即返回 (msg_id, seq)。消费由 dispatcher 异步驱动。"""
+        """Enqueue one session message (ingest/session_end) and return (msg_id, seq)
+        immediately. Consumption is driven asynchronously by the dispatcher."""
         return self.msg_queue().enqueue(user_id, session_id, payload, kind=kind)
 
     def queue_depth(self, user_id: str, session_id: str) -> int:
         return self.msg_queue().depth(user_id, session_id)
 
     def drain_once(self, user_id: str, session_id: str):
-        """同步消费一个会话(单副本/测试/本地脚本用;不依赖后台 dispatcher)。"""
+        """Consume one session synchronously (for a single replica, tests, or local
+        scripts; does not rely on the background dispatcher)."""
         return self._get_consumer().drain_session(user_id, session_id)
 
     def start_dispatcher(self) -> None:
-        """启动后台调度器(FastAPI 启动钩子调用;测试/脚本不调 → 用 drain_once 手动驱动)。"""
+        """Start the background dispatcher (called from the FastAPI startup hook; tests
+        and scripts don't call it and drive things manually with drain_once)."""
         if self._dispatcher is None:
             self._dispatcher = Dispatcher(
                 self.msg_queue(), self._get_consumer(), self.ingest_exec,
@@ -383,14 +437,17 @@ class Memory:
         logger.info(f"Cross-replica session state on Redis "
                     f"(env={env}, key prefix {env}:personos:*)")
 
-    # —— 异步基建(状态落 tasks 表,跨副本可查) ——
+    # -- Async plumbing (state lands in the tasks table, queryable from any replica) --
     def submit_task(self, kind: str, user_id: str, session_id: str, fn) -> str:
-        """把 fn 丢后台线程池执行,状态落 tasks 表供任意副本查询。返回 task_id。
+        """Run fn on the background thread pool, writing its state to the tasks table so
+        any replica can query it. Returns the task_id.
 
-        在途满时抛 TaskOverloaded(API 层转 503)——先拒绝再建行,不留卡 pending 的孤儿行。
+        Raises TaskOverloaded when in-flight capacity is full (the API layer turns that
+        into a 503) — we reject before creating the row, so no orphan row is left stuck
+        in pending.
         """
         if not self._admission.try_enter():
-            raise TaskOverloaded(f"后台任务在途已满(≤{_MAX_PENDING}),请稍后重试")
+            raise TaskOverloaded(f"background tasks in flight are at capacity (<={_MAX_PENDING}), retry later")
         tid = uuid.uuid4().hex
         self.task_store.create(tid, kind, user_id, session_id)
         self._maybe_sweep()
@@ -400,28 +457,29 @@ class Memory:
             try:
                 res = fn()
                 self.task_store.mark_done(tid, res)
-            except Exception as e:  # noqa: BLE001  后台失败登记进任务表,不崩线程池
-                logger.exception(f"后台任务失败 kind={kind} user={user_id} session={session_id}")
+            except Exception as e:  # noqa: BLE001  A background failure is recorded in the tasks table, never crashing the pool
+                logger.exception(f"background task failed kind={kind} user={user_id} session={session_id}")
                 self.task_store.mark_error(tid, str(e))
             finally:
                 self._admission.leave()
 
         try:
             self._executor.submit(run)
-        except Exception:   # 提交失败(如进程收尾 shutdown):名额必须归还
+        except Exception:   # Submission failed (e.g. the process is shutting down): the permit must be returned
             self._admission.leave()
             raise
         return tid
 
     def _maybe_sweep(self) -> None:
-        """低频触发任务表清扫(僵尸收割+过期清理);竞态无害(幂等操作)。"""
+        """Low-frequency trigger for the task table sweep (reaping zombies, clearing
+        expired rows); a race here is harmless because the operation is idempotent."""
         if time.time() - self._sweep_at < _SWEEP_INTERVAL_S:
             return
         self._sweep_at = time.time()
         try:
             self.task_store.sweep()
-        except Exception:  # noqa: BLE001  清扫失败不影响提交,下个周期重试
-            logger.exception("任务表清扫失败")
+        except Exception:  # noqa: BLE001  A failed sweep doesn't affect submission; the next cycle retries
+            logger.exception("task table sweep failed")
 
     def get_task(self, task_id: str) -> dict | None:
         return self.task_store.get(task_id)

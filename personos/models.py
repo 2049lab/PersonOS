@@ -1,7 +1,8 @@
-"""领域数据模型(对应 DESIGN §2,P0 文字阶段子集)。
+"""Domain data models (matching DESIGN section 2, the P0 text-phase subset).
 
-只建模在线链路用得到的字段;多模态/离线专属字段留默认值占位,后续阶段填。
-时间统一用带时区的 datetime,序列化为 ISO 字符串。
+Only the fields the online path needs are modeled; multimodal / offline-only fields are
+left as defaults for now and filled in later phases. All times are timezone-aware
+datetimes, serialized as ISO strings.
 """
 
 from __future__ import annotations
@@ -13,7 +14,8 @@ from zoneinfo import ZoneInfo
 from pydantic import BaseModel, Field, field_validator
 from ulid import ULID
 
-# 用户常住新加坡,时间语境按 SGT(UTC+8,与上海/北京同步);记录一律带时区
+# The time context is UTC+8 (the zone used by the deployment); every record is
+# timezone-aware.
 TZ = ZoneInfo("Asia/Shanghai")
 
 
@@ -22,10 +24,12 @@ def now() -> datetime:
 
 
 def ensure_aware(dt) -> Optional[datetime]:
-    """把 datetime / ISO 字符串规整成带时区的 datetime;naive 视为本地 TZ。
+    """Normalize a datetime / ISO string into a timezone-aware datetime; a naive value
+    is treated as being in the local TZ.
 
-    统一时间的"时区身份",避免 naive 与 aware datetime 相比较时抛 TypeError
-    (LLM 常给出无时区日期;update 的 patch 又可能塞进原始字符串)。
+    This gives every timestamp the same "timezone identity" and avoids the TypeError
+    raised when comparing a naive datetime with an aware one (the LLM often returns
+    dates without a timezone, and an update patch may push a raw string in).
     """
     if dt is None:
         return None
@@ -43,16 +47,16 @@ def _ulid(prefix: str) -> str:
     return f"{prefix}_{ULID()}"
 
 
-# —— 证据层(不可变真相源)——
+# -- Evidence layer (the immutable source of truth) --
 class EvidenceRecord(BaseModel):
     id: str = Field(default_factory=lambda: _ulid("ev"))
     modality: Literal["text", "image", "audio", "video", "mixed"] = "text"
     holder: str = "user"                       # user | assistant | third_party
-    content_inline: Optional[str] = None       # 文字直接内联
-    content_ref: Optional[str] = None          # ext: 媒体指针
-    sha256: str = ""                           # 内容哈希,去重与完整性
+    content_inline: Optional[str] = None       # text stored inline
+    content_ref: Optional[str] = None          # ext: pointer to the media
+    sha256: str = ""                           # content hash, for dedup and integrity
     source: dict[str, Any] = Field(default_factory=dict)  # system/session_id/message_id/turn_index/span
-    captured_at: datetime = Field(default_factory=now)    # 系统何时收到(recorded_at)
+    captured_at: datetime = Field(default_factory=now)    # when the system received it (recorded_at)
     sensitivity: Literal["public", "normal", "sensitive", "secret"] = "normal"
     local_only: bool = False
     notes: Optional[str] = None
@@ -63,7 +67,8 @@ class EvidenceRef(BaseModel):
     span: Optional[str] = None
 
 
-# K 轴:记忆类型受控词表(facet 导航)。code → "label: typical examples";code 稳定、说明可演进。
+# K axis: the controlled vocabulary of memory types (facet navigation). Maps code ->
+# "label: typical examples"; the codes are stable while the descriptions may evolve.
 KindLiteral: dict[str, str] = {
     "K01": "fact/attribute: birth year, languages spoken, device model",
     "K02": "relationship/role: A is the user's partner, B is a mentor",
@@ -81,7 +86,8 @@ KindLiteral: dict[str, str] = {
     "K14": "assessment/feedback: evaluation of a piece of advice, a tool, an experience",
 }
 
-# D 轴:生活域受控词表(写入判域 + 检索判域共用,保证两端词面一致)。
+# D axis: the controlled vocabulary of life domains (shared by domain classification at
+# write time and at retrieval time, so both ends use identical wording).
 DOMAIN_VOCAB: dict[str, str] = {
     "D01": "identity & life context: basic identity, life stage, places, roles",
     "D02": "values, beliefs & meaning: worldview, value ranking, definition of success, life philosophy",
@@ -103,26 +109,34 @@ DOMAIN_VOCAB: dict[str, str] = {
 
 
 def _vocab_label(desc: str) -> str:
-    """词表条目 → 标签名(":"前的名称部分)。"""
+    """Vocabulary entry -> label name (the part before the ":")."""
     return desc.partition(":")[0].strip()
 
 
-# code → 名称(供前端/工具输出渲染标签;词表演进只改 value,不动 code)
+# code -> name (so the frontend/tool output can render labels; when the vocabulary
+# evolves only the value changes, never the code)
 KIND_LABELS: dict[str, str] = {c: _vocab_label(d) for c, d in KindLiteral.items()}
 DOMAIN_LABELS: dict[str, str] = {c: _vocab_label(d) for c, d in DOMAIN_VOCAB.items()}
 
 
 def vocab_menu(vocab: dict[str, str], indent: str = "  ") -> str:
-    """词表 → 提示词菜单(逐行:code=名称(典型示例))。所有 prompt 站点共用,保证词面一致。"""
+    """Vocabulary -> prompt menu, one line per entry: code=name(typical examples). Every
+    prompt site shares this, so the wording stays identical everywhere."""
     lines = [f"{c}={_vocab_label(d)}({d.partition(':')[2].strip()})" for c, d in vocab.items()]
     return ("\n" + indent).join(lines)
 
 
-# —— 提示词共享规范块(单一来源;reconcile / deep_recall / light_dream 各环节引用,防止多处复述漂移)——
+# -- Shared prompt spec blocks (single source of truth; referenced by reconcile,
+# deep_recall and light_dream so the same rules aren't restated in several places and
+# allowed to drift apart) --
 
-# 自限界命题写法:记忆原子 text 的统一规范(W2② 批量提取 / 深轨 remember 写回共用一份)。
-# 双时间格式是硬要求:相对语义与绝对日期同时进文本,检索与作答都不再做日历算术。
-# 语言跟随是硬要求:存储内容语言跟随源对话语言,kill 跨语检索断层。
+# How to write a self-bounded proposition: the one spec for memory atom text, shared by
+# W2 (2) batch extraction and the deep track's remember write-back.
+# The dual time format is a hard requirement: relative wording and the absolute date
+# both go into the text, so neither retrieval nor answering has to do calendar
+# arithmetic.
+# Language following is a hard requirement: stored content follows the source dialogue's
+# language, which kills the cross-language retrieval gap.
 ATOM_TEXT_SPEC = """Write each `text` as ONE atomic fact — third person, self-contained subject-verb-object:
   · Smallest retrievable unit: one atom = one minimal fact that can be independently retrieved and independently
     holds true. Split a turn into its distinct INDEPENDENTLY-QUERYABLE facts ("works late every Tue & Thu" +
@@ -149,7 +163,8 @@ with existing memory is decided at answer time, never at write time.
 Bad example: "likes americano" — no subject, no time.
 Good example: "Caroline said her everyday favorite is americano (as of 2026-08)"."""
 
-# D/K 轴菜单(写入抽取与后续巩固环节的提示词共用)。
+# D/K axis menus (shared by the prompts of write-time extraction and the later
+# consolidation stages).
 AXIS_MENU = (
     "- kind (K axis, exactly one Kxx code or null; never output the label):\n  "
     + vocab_menu(KindLiteral) + "\n"
@@ -159,28 +174,31 @@ AXIS_MENU = (
 
 
 def normalize_domains(value: Any) -> list[str]:
-    """任意输入 → 合法 D 轴 code 列表(去重保序)。"""
+    """Any input -> a list of valid D axis codes (deduplicated, order preserved)."""
     if not isinstance(value, list):
         return []
     return list(dict.fromkeys(x for x in value if isinstance(x, str) and x in DOMAIN_VOCAB))
 
 
 def normalize_kind(value: Any) -> Optional[str]:
-    """任意输入 → 合法 K 轴 code 或 None。"""
+    """Any input -> a valid K axis code, or None."""
     return value if isinstance(value, str) and value in KindLiteral else None
 
 
-# —— MemCell:一段话题对话的加工产物(组织单元;融合架构 §1)——
+# -- MemCell: the processed output of one topical stretch of dialogue (the unit of
+# organization; fused architecture section 1) --
 class MemCell(BaseModel):
     id: str = Field(default_factory=lambda: _ulid("cell"))
     session_id: str = ""
-    topic: str = ""                            # 一句话主题(段粒度检索面,带 embedding)
-    episode: str = ""                          # 第三人称叙事(作答主料;仅可被深轨 remember 修订)
-    domains: list[str] = Field(default_factory=list)   # D 轴 0-3 个(W2① 判)
-    episode_type: str = "unknown"              # 调用方 task_type 词表分类(未传/选不中=unknown);按类型分页检索用
-    t_start: Optional[datetime] = None         # 该段对话起止(边界检测给出)
+    topic: str = ""                            # One-sentence topic (the segment-level retrieval surface, embedded)
+    episode: str = ""                          # Third-person narrative (the main material for answering; only the
+                                               # deep track's remember may revise it)
+    domains: list[str] = Field(default_factory=list)   # 0-3 D axis codes (decided in W2 (1))
+    episode_type: str = "unknown"              # Classification against the caller's task_type vocabulary (not
+                                               # provided / no match = unknown); used for paged retrieval by type
+    t_start: Optional[datetime] = None         # Start/end of this stretch of dialogue (from boundary detection)
     t_end: Optional[datetime] = None
-    evidence_refs: list[EvidenceRef] = Field(default_factory=list)  # 该段覆盖的 utterance(时序)
+    evidence_refs: list[EvidenceRef] = Field(default_factory=list)  # Utterances this segment covers, in order
 
     @field_validator("domains", mode="before")
     @classmethod
@@ -188,60 +206,73 @@ class MemCell(BaseModel):
         return normalize_domains(v)
 
 
-# —— 原子层:指向 cell 的检索单元(融合架构 §1;旧打分/生命周期/supersede 字段已删)——
+# -- Atom layer: the retrieval unit that points at a cell (fused architecture section 1;
+# the old scoring / lifecycle / supersede fields have been removed) --
 class MemoryAtom(BaseModel):
     id: str = Field(default_factory=lambda: _ulid("atom"))
-    memcell_id: str = ""                       # 归属 cell
+    memcell_id: str = ""                       # The cell this atom belongs to
     object_type: Literal["claim", "fact", "event"] = "fact"
-    text: str = ""                             # 规范见 ATOM_TEXT_SPEC(双时间格式写进文本)
-    holder: str = "user"                       # 谁说的/谁的属性
-    evidence_refs: list[EvidenceRef] = Field(default_factory=list)  # 出处原话
+    text: str = ""                             # See ATOM_TEXT_SPEC (the dual time format goes into the text)
+    holder: str = "user"                       # Who said it / whose attribute it is
+    evidence_refs: list[EvidenceRef] = Field(default_factory=list)  # The original wording it came from
 
-    # 链归属(docs/atom-chain-design.md):atoms 表链三列是唯一事实源,此处为展示副本——
-    # ChainStore 双写维护;AtomStore 读取时以列覆盖,防过期 payload 误导。''=游离
+    # Chain membership (docs/atom-chain-design.md): the three chain columns on the atoms
+    # table are the single source of truth; these are display copies — ChainStore keeps
+    # them in sync with a dual write, and AtomStore overrides them with the column values
+    # on read so a stale payload can't mislead anyone. '' = not on a chain.
     chain_id: str = ""
-    prev_atom_id: str = ""                     # 链上前驱(链首='')
-    next_atom_id: str = ""                     # 链上后继(链尾='')
+    prev_atom_id: str = ""                     # Predecessor on the chain ('' at the head)
+    next_atom_id: str = ""                     # Successor on the chain ('' at the tail)
 
-    occurrence_time: Optional[datetime] = None  # 该事实对应的对话时间
+    occurrence_time: Optional[datetime] = None  # The dialogue time this fact corresponds to
     recorded_at: datetime = Field(default_factory=now)
     updated_at: datetime = Field(default_factory=now)
-    source: str = "w2"                      # 写入来源:w2 批量抽取 | deep 深轨写回(旧库缺省视为 w2)
+    source: str = "w2"                      # Where the write came from: w2 = batch extraction | deep = deep-track
+                                            # write-back (rows from the old schema default to w2)
 
-    domains: list[str] = Field(default_factory=list)  # D 轴 0-3 个
-    kind: Optional[str] = None                        # K 轴单选(K01..K14)
+    domains: list[str] = Field(default_factory=list)  # 0-3 D axis codes
+    kind: Optional[str] = None                        # A single K axis code (K01..K14)
 
     @field_validator("domains", mode="before")
     @classmethod
     def _coerce_domains(cls, v):
-        """D 轴兜底:只保留 D01..D16,去重保序;旧词面/LLM 自造域直接丢弃。"""
+        """D axis guard: keep only D01..D16, deduplicated and in order; wording from an
+        older vocabulary or a domain the LLM invented is dropped."""
         return normalize_domains(v)
 
     @field_validator("kind", mode="before")
     @classmethod
     def _coerce_kind(cls, v):
-        """K 轴兜底:LLM 或旧库给出词表外的值时归 None,保证加载不崩。"""
+        """K axis guard: a value outside the vocabulary — from the LLM or from old rows —
+        falls back to None, so loading never blows up."""
         return normalize_kind(v)
 
 
-# —— atom 链:同「事情」原子事实的时间线(docs/atom-chain-design.md)——
-# 派生视图、只分组不消解(D-C3):链内新旧陈述不选赢家,冲突消费仍在作答时。
-# 链序 = 追加序 = 对话事实抽取的自然顺序(D-C7);双向链表挂在 atoms 三列上。
+# -- atom chain: the timeline of atomic facts about the same "thing"
+# (docs/atom-chain-design.md) --
+# A derived view that only groups and never resolves (D-C3): within a chain we pick no
+# winner between the older and newer statement; conflicts are still consumed at answer
+# time. Chain order = append order = the natural order in which facts were extracted
+# from the dialogue (D-C7); the doubly linked list lives in the three atoms columns.
 class ChainInfo(BaseModel):
     id: str = Field(default_factory=lambda: _ulid("chn"))
     user_id: str = ""
-    title: str = ""                    # 建链时判链 LLM 生成的一行短语(如「Caroline 练瑜伽的地点」),建后不变
-    origin_cell_id: str = ""           # 建链时首成员所在 cell(溯源)
+    title: str = ""                    # A one-line phrase the chain-deciding LLM produced when the chain was
+                                       # created (e.g. "where Caroline practices yoga"); never changes afterwards
+    origin_cell_id: str = ""           # The cell the first member lived in when the chain was created (provenance)
     n_atoms: int = 0
-    head_atom_id: str = ""             # 链首
-    tail_atom_id: str = ""             # 链尾(新成员唯一追加点)
+    head_atom_id: str = ""             # Head of the chain
+    tail_atom_id: str = ""             # Tail of the chain (the only place new members are appended)
     created_at: datetime = Field(default_factory=now)
     updated_at: datetime = Field(default_factory=now)
 
 
-# —— 时间锚点:把"记录/发生"的绝对时间显影到【喂给 embedding / LLM】的文本前缀 ——
-# 存储原文不动(证据不可变、原子角度中立);只在检索用的 embed 文本与展示文本里加锚点,
-# 让时间线全程可见(下游 LLM 能判新旧、把"上周"对齐到绝对日期)。
+# -- Time anchor: surface the absolute "recorded/occurred" time as a prefix on the text
+# that is fed to the embedding model / the LLM --
+# The stored text itself is untouched (evidence is immutable and an atom stays neutral);
+# the anchor is added only to the embed text used for retrieval and to the display text,
+# which keeps the timeline visible throughout (so a downstream LLM can tell old from new
+# and align "last week" to an absolute date).
 def _stamp(dt: Optional[datetime]) -> str:
     dt = ensure_aware(dt)
     if dt is None:
@@ -250,12 +281,14 @@ def _stamp(dt: Optional[datetime]) -> str:
 
 
 def atom_anchor(a: "MemoryAtom") -> Optional[datetime]:
-    """原子的时间锚:发生时刻优先,回退记录时刻(valid_from 已随打分字段删除)。"""
+    """An atom's time anchor: prefer the occurrence time, fall back to the recorded time
+    (valid_from was removed along with the scoring fields)."""
     return a.occurrence_time or a.recorded_at
 
 
 def stamped_atom_text(a: "MemoryAtom") -> str:
-    """原子的带锚 embed 文本(到天):`[YYYY-MM-DD] 命题`。text 存储不变,仅此处显影。"""
+    """An atom's anchored embed text, at day granularity: `[YYYY-MM-DD] proposition`.
+    The stored text is unchanged; the anchor only shows up here."""
     p = _stamp(atom_anchor(a))
     return f"{p} {a.text}" if p else a.text
 

@@ -1,12 +1,19 @@
-"""AnchorRegistry(⑥b):cast 映射 / 候选构造 / 名字采集 + roster 更新。
+"""AnchorRegistry: cast mapping, candidate construction, name harvesting and roster updates.
 
-移植自 mneme anchor/registry.py,逐处对齐:
-- cast 映射:local 角色 → 会话 cast(roster 续接 + CONT,信任模型的续接输出);
-- 候选构造:小库直通 / 大库概率云粗召回 + 精确名命中 + extra_cards(pending 链卡);
-- 名字采集 + roster 更新(会话末归并进档在 commit.py)。
+- cast mapping: local character -> session cast, via the roster and CONT records,
+  trusting the model's own continuation output;
+- candidate construction: a small library passes through whole, a large one goes
+  through probability-cloud coarse recall, plus exact name hits, plus extra_cards
+  (the pending chain cards);
+- name harvesting and roster updates. Merging names into the profile at
+  end-of-session happens in commit.py.
 
-不做绑定/注册(归属只是链假设,见 chains.py);不调模型(编排层注入 verdict),故纯逻辑可单测。
-有意偏离:持久档在 MySQL CharacterStore;会话 roster 在 DraftStore;候选卡素材从 OSS 取 b64。
+This module neither binds nor enrolls — attribution here is only a chain
+hypothesis, see chains.py — and it never calls a model, since the orchestration
+layer injects the verdict. That keeps it pure logic, and unit-testable.
+
+Where things live: persistent profiles in the MySQL-backed CharacterStore,
+the session roster in DraftStore, and candidate-card assets read out of OSS as b64.
 """
 
 from __future__ import annotations
@@ -31,12 +38,20 @@ class AnchorRegistry:
         self.small_library_max = small_library_max
         self.arbiter_top_k = arbiter_top_k
 
-    # ── cast 映射:local 角色 → 会话 cast ────────────────────────────
+    # ── Cast mapping: local character -> session cast ────────────────
     def map_casts(self, session_id: str, script: ClipScript) -> dict[str, str]:
-        """回填 script.cast_map。信任模型续接输出,两种续接形式都接受:
-        - CAST 直接复用 roster id(S#)→ 隐式续接;
-        - CAST P# + CONT prev=S# → 显式续接。
-        prev=none/缺失/未知 id → 铸新 S#。佩戴者恒 SW(从不可见,不参与 CONT)。"""
+        """Fill in script.cast_map.
+
+        We trust the model's continuation output and accept both forms it can
+        take:
+
+        - a cast that reuses a roster id (S#) directly, which is an implicit
+          continuation;
+        - a cast P# plus a CONT with prev=S#, which is an explicit one.
+
+        prev=none, a missing prev, or an unknown id all mint a fresh S#. The
+        wearer is always SW: never visible, and never part of a CONT.
+        """
         roster = self.draft.load_roster(session_id)
         used = {cid for cid in roster if cid != WEARER_CAST_ID}
         mapping: dict[str, str] = {}
@@ -56,7 +71,7 @@ class AnchorRegistry:
                 mapping[cast.local_id] = prev
                 used.add(prev)
             elif cast.local_id in roster:
-                mapping[cast.local_id] = cast.local_id     # 复用 roster id = 隐式续接
+                mapping[cast.local_id] = cast.local_id     # reusing a roster id is an implicit continuation
                 used.add(cast.local_id)
             else:
                 if prev not in ("none", WEARER_CAST_ID) and prev not in roster:
@@ -66,12 +81,14 @@ class AnchorRegistry:
         script.cast_map = mapping
         return mapping
 
-    # ── 候选构造(小库全量直通)──────────────────────────────────────
+    # ── Candidate construction: a small library passes through whole ──
     def build_candidates(self, unbound_cast_ids: list[str],
                          evidence_by_cast: dict[str, CastEvidence], script: ClipScript,
                          *, extra_cards: Optional[dict[str, list[CandidateCard]]] = None,
                          ) -> dict[str, list[CandidateCard]]:
-        """extra_cards:每 cast 的附加候选(如 pending 链卡),不占小库席位、不走粗召回。"""
+        """extra_cards holds per-cast additional candidates, such as pending chain
+        cards. They take no small-library seat and skip coarse recall.
+        """
         extras = extra_cards or {}
         characters = self.store.list_active_characters(include_wearer=True)
         if not characters:
@@ -87,7 +104,7 @@ class AnchorRegistry:
                 ranked = self.clouds.coarse_recall(evidence, list(cards_by_id), k=self.arbiter_top_k)
                 chosen = [cid for cid, _score in ranked]
                 declared = self._decl_for_cast(script, cast_id)
-                if declared and declared.name:            # 精确名命中直通(不受分数限制)
+                if declared and declared.name:            # an exact name hit passes through regardless of score
                     for cid in cards_by_id:
                         if declared.name in self.store.names_for(cid) and cid not in chosen:
                             chosen.append(cid)
@@ -96,11 +113,15 @@ class AnchorRegistry:
         return out
 
     def candidate_card(self, character: dict[str, Any]) -> CandidateCard:
-        """人物 → 候选卡(名字/描述 + 脸/全身/声音素材 b64)。
+        """Character -> candidate card: name and description plus face, body shot
+        and voice assets as b64.
 
-        公开:召回侧的视觉改写(online/visual_query)也要按同一口径组装候选卡——
-        抄一份必然漂(素材 key 的取法、last_seen_session 在 payload 里这类细节最容易抄错)。
-        只依赖 store + media_store,不碰 clouds/draft/ClipScript。
+        This is deliberately public, because the retrieval side's visual rewrite
+        (online/visual_query) has to build candidate cards the same way. A second
+        copy would drift — details like how the asset key is fetched, or the fact
+        that last_seen_session lives inside payload, are exactly what gets copied
+        wrong. It depends only on store and media_store, and touches neither
+        clouds, draft nor ClipScript.
         """
         cid = character["id"]
         names = self.store.names_for(cid)
@@ -127,10 +148,11 @@ class AnchorRegistry:
                     return decl
         return None
 
-    # ── 名字采集(会话末把绑定档的名字归并;此处采集台账)─────────────
+    # ── Name harvesting. Merging names into the bound profile happens at
+    #    end-of-session; here we only record them into the ledger ──────
     def harvest_names(self, session_id: str, script: ClipScript,
                       bindings: dict[str, str]) -> dict[str, list[str]]:
-        """bindings: {cast_id -> character_id}。把本 clip 的名字 claim 记到绑定档。"""
+        """bindings is {cast_id -> character_id}. Record this clip's name claims onto the bound profile."""
         harvested: dict[str, list[str]] = {}
         for cast in script.casts:
             if not cast.name or cast.name_evidence == "none":
@@ -143,7 +165,7 @@ class AnchorRegistry:
             harvested.setdefault(character_id, []).append(cast.name)
         return harvested
 
-    # ── roster 更新(会话续接名册,存 DraftStore)─────────────────────
+    # ── Roster updates: the session's continuation register, kept in DraftStore ──
     def update_roster(self, session_id: str, clip_index: int, script: ClipScript,
                       bindings: dict[str, str], evidence_by_cast: dict[str, CastEvidence]) -> None:
         roster = self.draft.load_roster(session_id)
@@ -162,8 +184,12 @@ class AnchorRegistry:
                 if line.kind == "speech" and script.cast_map.get(line.who) == cast_id:
                     key_lines.append(line.text)
             card["key_lines"] = key_lines[-3:]
-            # SW 卡只带 name/lines 作 s1 上下文(区分近麦说话 vs 画外音);佩戴者物理不可见→不带脸。
-            # roster 素材内联 b64(仅每 cast 最佳一张,量有界):供下一 clip 剧本 prompt 的 ROSTER 块看图。
+            # The SW card carries only name and lines, as context for telling
+            # close-mic speech apart from off-screen voice. The wearer is
+            # physically invisible, so it carries no face.
+            # Roster assets are inlined as b64 — only the single best one per cast,
+            # so the volume stays bounded — for the ROSTER block of the next clip's
+            # screenplay prompt to actually look at.
             if cast_id != WEARER_CAST_ID:
                 best_q = float(card.get("best_q") or -1.0)
                 best = evidence.best_face() if evidence else None

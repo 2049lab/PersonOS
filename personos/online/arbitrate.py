@@ -1,8 +1,12 @@
-"""R3' 核判(融合架构 §5 决策 1/2):R5 草稿答完之后,对「草稿 + 同款材料」逐条核对。
+"""R3' adjudication (fused architecture §5, decision 1/2): after R5 produces a draft answer, check
+that draft against the same materials, claim by claim.
 
-与作答刻意分成两个调用:核判只查不答(逐条对材料,不做印象分),作答敢下推断——两种性格
-不能混在一个 prompt。verdict 驱动双层处置:ok → 采纳草稿;answer_defect → 带指正重答一次,
-仍缺陷才升深轨;insufficient_material → 直接深轨(critique 当缺口方向)。
+Deliberately split into two calls instead of one: adjudication only checks and never answers (it
+matches each claim against the materials and gives no impression score), while answering is allowed
+to make inferences — those two temperaments cannot live in one prompt. The verdict drives a
+two-tier disposition: ok -> take the draft; answer_defect -> re-answer once with the critique
+attached, and only escalate to the deep track if it is still defective; insufficient_material ->
+go straight to the deep track (the critique becomes the gap to chase).
 """
 
 from __future__ import annotations
@@ -81,7 +85,7 @@ _REVIEW_SYS = (
 @dataclass
 class ReviewResult:
     verdict: str                        # ok | answer_defect | insufficient_material
-    critique: str = ""                  # 修正指令(defect 时喂 R5 重答;insufficient 时当深轨缺口方向)
+    critique: str = ""                  # fix instruction (fed to R5 for the re-answer on defect; used as the deep-track gap direction on insufficient)
     system: str = ""
     user: str = ""
     raw: str = ""
@@ -91,18 +95,21 @@ def review_answer(
     llm: ChatLLM, *, query: str, draft: MemoryAnswer, hits: list[CellHit],
     resolved: str = "", subject: str = "", boundary: str = "",
 ) -> ReviewResult:
-    """对 R5 草稿核判(草稿 + 同款材料,与作答同渲染器同窗口同边界)。
+    """Adjudicate the R5 draft (draft + the same materials, same renderer / window / boundary as answering).
 
-    boundary 与作答同款:枚举数条目时核判须知道还有格未展开,否则把截断面当全集。
-    材料排序也与作答同款(_R5_ORDER_ENV):作答/核判/重答三见的是同一窗口同一套 mN,
-    critique 里的编号在重答轮才能对得上号。
-    解析失败 → 保守 answer_defect:重答一次是便宜兜底,错判 ok 会放走缺陷。
+    The boundary matches the answering side: on an enumeration question the reviewer has to know
+    that some cells were left unexpanded, otherwise it mistakes the truncated view for the full set.
+    Material ordering also matches answering (_R5_ORDER_ENV): answering, adjudication and re-answering
+    all see the same window and the same set of mN handles, so the block numbers in the critique
+    still line up during the re-answer round.
+    Parse failure -> conservatively return answer_defect: one re-answer is a cheap fallback, whereas
+    a mistaken "ok" lets the defect through.
     """
     order = os.environ.get(_R5_ORDER_ENV, "").strip() or "relevance"
     hits = _order_hits_for_answer(hits, order)
-    handles = [f"m{i + 1}" for i in range(len(hits))]   # 与作答同一材料窗口,同一套 mN
+    handles = [f"m{i + 1}" for i in range(len(hits))]   # same material window as answering, same set of mN handles
     block = "\n\n".join(cell_block(h, hd) for h, hd in zip(hits, handles)) or "(no materials)"
-    bnd = f"\n\nBOUNDARY\n{boundary}" if boundary else ""   # 与作答侧同款头,核判能对上号
+    bnd = f"\n\nBOUNDARY\n{boundary}" if boundary else ""   # same header as the answering side, so adjudication lines up with it
     rd = (f"\n\nResolved question (references resolved)\n{resolved}" if resolved and resolved != query else "")
     subj = f"\n\nQUESTION SUBJECT\n{subject or '(not determined)'}"
     draft_txt = (draft.answer or "").strip() or "(the draft is EMPTY — treat as a refusal)"
@@ -113,23 +120,25 @@ def review_answer(
         obj, raw = chat_json(llm, messages, max_tokens=800, stage="review_answer")
         verdict = str(obj.get("verdict") or "").strip()
         if verdict not in ("ok", "answer_defect", "insufficient_material"):
-            raise ValueError(f"未知 verdict: {verdict!r}")
+            raise ValueError(f"unknown verdict: {verdict!r}")
         critique = str(obj.get("critique") or "").strip()
         if verdict == "ok":
-            critique = ""                       # ok 契约:无指正
+            critique = ""                       # ok contract: no critique
         elif verdict == "insufficient_material" and not critique:
-            # 真机踩坑:草稿已如实拒答时核判常不写指正;但 critique 是深轨交接的缺口方向,
-            # 空值丢方向——从问题合成一句客观缺口,让深轨带着方向翻库。
+            # Hit in production: when the draft has already honestly refused, the reviewer often
+            # writes no critique. But the critique is the gap direction handed to the deep track,
+            # and an empty one loses that direction — so synthesize one objective gap statement from
+            # the question, giving the deep track something to aim at when it re-scans the store.
             critique = (f"none of the {len(hits)} retrieved cells contains the core answer to "
                         f"the question ({query!r}); deeper search is needed")
         res = ReviewResult(verdict=verdict, critique=critique,
                            system=_REVIEW_SYS, user=user, raw=raw)
     except Exception as e:
-        logger.warning(f"review 解析失败,保守判 answer_defect: {e}")
+        logger.warning(f"review parse failed, conservatively ruling answer_defect: {e}")
         res = ReviewResult(verdict="answer_defect",
                            critique="review parse failure; one conservative re-answer",
                            system=_REVIEW_SYS, user=user,
                            raw=getattr(e, "raw", "") or str(e))
-    logger.info(f"R3' 核判 verdict={res.verdict} cells={len(hits)} q={query!r} "
+    logger.info(f"R3' review verdict={res.verdict} cells={len(hits)} q={query!r} "
                 f"critique={res.critique!r}")
     return res

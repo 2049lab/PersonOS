@@ -1,4 +1,5 @@
-"""渲染器单测:空画像→空串 / full 含特征+事实 / traits 模式省略事实 / 事实日期在正文。"""
+"""Renderer unit tests: an empty profile renders to an empty string, full mode includes both traits
+and facts, traits mode omits the facts, and a fact's date appears in the body text."""
 
 from __future__ import annotations
 
@@ -17,14 +18,14 @@ def _profile() -> UserProfile:
 
 def test_none_and_empty_render_to_blank():
     assert render(None) == ""
-    assert render(UserProfile.empty()) == ""         # 无内容 → 空串(消费侧走无画像路径)
+    assert render(UserProfile.empty()) == ""         # no content means an empty string, so the caller takes the no-profile path
 
 
 def test_full_render_has_traits_and_facts():
     out = render(_profile(), mode="full")
-    assert "USER PROFILE" in out and "不可当作回答事实依据" in out   # 免责声明
+    assert "USER PROFILE" in out and "不可当作回答事实依据" in out   # the disclaimer line
     assert "[基本特征]" in out and "沟通风格: direct and terse(推断,印证于2026年09月01日)" in out
-    assert "[近期事实]" in out and "- 2026-09-14 had ramen" in out   # 日期在正文里
+    assert "[近期事实]" in out and "- 2026-09-14 had ramen" in out   # the date lives in the body text
 
 
 def test_traits_mode_omits_facts():

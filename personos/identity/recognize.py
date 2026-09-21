@@ -1,18 +1,27 @@
-"""MLLM 身份仲裁协议(⑥c,批量单发 verdict)+ 证据入库/学云(enroll)。
+"""The multimodal-LLM identity arbitration protocol (one batched call, one verdict)
+plus persisting evidence and learning it into the cloud (enroll).
 
-一次调用批量判本 clip 每个未绑 cast:
-- query 侧:每 cast 最清晰的脸 + 全身 + 外观描述 + 对白摘录(+ 中途评估 note)。
-- 候选侧:每个已注册 character 一张卡 = 名字 + 外观 + 最清脸 + 全身(+ 声纹)。
-- 输出空间:BIND|<cast>|<character_id> 或 BIND|<cast>|NEW。
-- verdict 即终判(无轮转投票 / 无向量否决);非法输出按 NEW 处理并记 issue(仲裁失败=登记临时新档,
-  从不阻塞,可离线合并)。
+A single call judges every unbound cast in this clip:
 
-有意偏离(对齐 mneme arbiter.py 的取舍):候选卡用 personos 的 desc 字段(非 mneme text_profile dict);
-不引 documentary profile(personos 场景是眼镜/机器人第一人称);素材 b64 由上游(ChainBook.query_card /
-registry.candidate_card)从 OSS 取好再传入,本模块不碰 OSS。
+- the query side: per cast, the sharpest face, the body shot, the appearance
+  description and a couple of quoted lines, plus any mid-run evaluation note;
+- the candidate side: one card per enrolled character — name, appearance, clearest
+  face, body shot, and a voice sample;
+- the output space: BIND|<cast>|<character_id> or BIND|<cast>|NEW;
+- the verdict is final. There is no round-robin voting and no vector veto. Illegal
+  output is treated as NEW and recorded as an issue, so a failed arbitration
+  enrolls a temporary new profile: it never blocks, and it can be merged offline.
 
-enroll_evidence:把一个 cast 的证据落到某 character(crop 传 OSS、asset 入库、向量学进概率云),
-判 NEW 建档后 enroll、判 match 后对既有档 enroll(commit.py 终审复用)。
+A couple of deliberate choices: a candidate card carries a single free-text desc
+field rather than a structured profile, and there is no documentary profile, since
+the scenes here are first-person from glasses or a robot. Asset b64 is fetched
+from OSS upstream by ChainBook.query_card and registry.candidate_card and passed
+in, so this module never touches OSS itself.
+
+enroll_evidence lands one cast's evidence onto a character: crops go to OSS,
+assets go into the database, and vectors are learned into the probability cloud.
+It runs after a NEW verdict creates a profile and after a match verdict picks an
+existing one, and final adjudication in commit.py reuses it.
 """
 
 from __future__ import annotations
@@ -64,8 +73,11 @@ END
 
 def build_arbitration_prompt(queries: list[dict[str, Any]], candidates: list[CandidateCard],
                              ) -> tuple[str, list[str], list[str]]:
-    """queries: [{cast_id, desc, name, key_lines, note?, face_b64, body_b64, voice_b64?}]。
-    返回 (prompt, images, audios)——image #N / audio #N 各自独立编号。"""
+    """queries is [{cast_id, desc, name, key_lines, note?, face_b64, body_b64, voice_b64?}].
+
+    Returns (prompt, images, audios); image #N and audio #N are numbered
+    independently of each other.
+    """
     images: list[str] = []
     audios: list[str] = []
     blocks: list[str] = [PROMPT_HEADER, "REGISTERED CHARACTERS:"]
@@ -109,8 +121,10 @@ def build_arbitration_prompt(queries: list[dict[str, Any]], candidates: list[Can
         if attached:
             rows.append(f"    attached: {', '.join(attached)}")
         blocks.append("\n".join(rows))
-    # 观测到的失败模式:模型照抄格式示例、编造候选集外的 id,使 verdict 作废。显式白名单 + 声明
-    # 无候选时 NEW 是唯一答案,钉死输出空间。
+    # Observed failure modes: the model copies the format example literally, or
+    # invents an id that is not in the candidate set, which voids the verdict. An
+    # explicit whitelist — plus stating that NEW is the only answer when there are
+    # no candidates — pins the output space down.
     if candidates:
         ids = ", ".join(card.character_id for card in candidates)
         blocks.append(
@@ -126,8 +140,12 @@ def build_arbitration_prompt(queries: list[dict[str, Any]], candidates: list[Can
 
 def parse_verdicts(raw: str, *, cast_ids: list[str], candidate_ids: list[str],
                    ) -> tuple[dict[str, str], list[str]]:
-    """返回 ({cast_id: character_id|"NEW"}, issues)。缺/越界的 cast 一律回退 NEW
-    (单发协议下唯一安全兜底:新档可逆,误认不可)。"""
+    """Returns ({cast_id: character_id | "NEW"}, issues).
+
+    A cast that is missing or out of bounds always falls back to NEW. With a
+    single-shot protocol that is the only safe fallback: a spurious new profile
+    can be undone, a misidentification cannot.
+    """
     verdicts, issues, _defaulted = parse_verdicts_detailed(
         raw, cast_ids=cast_ids, candidate_ids=candidate_ids)
     return verdicts, issues
@@ -135,10 +153,14 @@ def parse_verdicts(raw: str, *, cast_ids: list[str], candidate_ids: list[str],
 
 def parse_verdicts_detailed(raw: str, *, cast_ids: list[str], candidate_ids: list[str],
                             ) -> tuple[dict[str, str], list[str], set[str]]:
-    """parse_verdicts 详版:额外返回被默认成 NEW 的 cast 集合。
+    """The detailed form of parse_verdicts, which also returns the set of casts that
+    were defaulted to NEW.
 
-    defaulted = verdict 非模型显式给出的 cast(缺 BIND 行 / 越白名单回退 NEW)——终审据此回退到链
-    假设而非登记重复新档;显式 BIND|x|NEW 是真 verdict,不计入 defaulted。
+    A cast is "defaulted" when the verdict did not come from the model explicitly —
+    a missing BIND line, or a target outside the whitelist that fell back to NEW.
+    Final adjudication uses this to fall back to the chain hypothesis instead of
+    enrolling a duplicate new profile. An explicit BIND|x|NEW is a real verdict and
+    is not counted as defaulted.
     """
     verdicts: dict[str, str] = {}
     issues: list[str] = []
@@ -174,19 +196,23 @@ def parse_verdicts_detailed(raw: str, *, cast_ids: list[str], candidate_ids: lis
     return verdicts, issues, defaulted
 
 
-# ── enroll:证据落库 + 学云(建 NEW / 对既有 match 追加,commit 终审复用)──
+# ── enroll: persist the evidence and learn it into the cloud. Used both when
+#    creating a NEW profile and when appending to an existing match, and reused
+#    by final adjudication in commit.py ────────────────────────────────────
 def enroll_evidence(store: CharacterStore, cloud: CloudEngine, media_store: Any,
                     character_id: str, evidence: CastEvidence,
                     *, session_id: str = "", clip_index: int = 0) -> None:
-    """把一个 cast 的证据落到 character:crop 传 OSS、asset 入库、向量学进概率云。"""
+    """Land one cast's evidence onto a character: upload the crops to OSS, insert
+    the assets, and learn the vectors into the probability cloud.
+    """
     def _save_img(b64: str, ct: str) -> str:
         if media_store is None or not b64:
             return ""
         try:
             return media_store.save_image(base64.b64decode(b64), owner=store.user_id,
                                           content_type=ct).key
-        except Exception as e:  # noqa: BLE001  素材落 OSS 失败不阻塞(向量仍学)
-            logger.warning(f"素材存 OSS 失败: {e}")
+        except Exception as e:  # noqa: BLE001  a failed OSS upload must not block: the vector is still learned
+            logger.warning(f"failed to store asset in the object store: {e}")
             return ""
 
     for f in evidence.faces:
@@ -211,7 +237,7 @@ def enroll_evidence(store: CharacterStore, cloud: CloudEngine, media_store: Any,
             try:
                 voice_key = media_store.save_audio(v.wav_bytes, owner=store.user_id)
             except Exception as e:  # noqa: BLE001
-                logger.warning(f"声纹 wav 存 OSS 失败: {e}")
+                logger.warning(f"failed to store voiceprint wav in the object store: {e}")
         store.add_asset(character_id, "voice", quality=v.q, embedding=v.embedding,
                         payload={"oss_key": voice_key, "t0": v.t0, "t1": v.t1,
                                  "session": session_id, "clip": clip_index})

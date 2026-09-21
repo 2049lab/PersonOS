@@ -1,10 +1,12 @@
-"""把记忆变更事件转发给业务层(可选)。
+"""Forward memory-change events to the application layer (optional).
 
-默认不启用:未配 MEMORY_EVENT_URL 时 subscribe 都不会挂,零开销。
-配了才转发——所以这段代码对只跑记忆服务的人完全透明。
+Off by default: without MEMORY_EVENT_URL configured, no subscriber is even registered, so the cost
+is zero. Forwarding only happens once it is configured — which makes this code completely invisible
+to anyone running just the memory service.
 
-为什么放在记忆服务里:事件源在这里。但它只知道「有个 URL 要通知」,
-不知道 webhook、订阅关系、签名给谁看——那些都在业务层。
+Why it lives in the memory service: the events originate here. But all it knows is "there is a URL
+to notify" — it knows nothing about webhooks, subscription relationships, or who the signature is
+meant for; those all live in the application layer.
 """
 
 from __future__ import annotations
@@ -38,12 +40,12 @@ def _post(user_id: str, event: str, payload: dict[str, Any]) -> None:
             headers={"Content-Type": "application/json", "X-Internal-Signature": sig},
             timeout=_TIMEOUT,
         )
-    except Exception as e:  # noqa: BLE001  业务层挂了不该影响记忆写入
-        logger.warning(f"记忆事件转发失败 event={event}: {e}")
+    except Exception as e:  # noqa: BLE001  the application layer being down must not affect memory writes
+        logger.warning(f"memory event forwarding failed event={event}: {e}")
 
 
 def install() -> None:
-    """在服务启动时调用。未配置则什么都不做。"""
+    """Call this at service startup. Does nothing when not configured."""
     if not _URL or not _SECRET:
         return
     subscribe(
@@ -51,4 +53,4 @@ def install() -> None:
             target=_post, args=(uid, ev, pl), daemon=True
         ).start()
     )
-    logger.info(f"记忆事件转发已启用 → {_URL}")
+    logger.info(f"memory event forwarding enabled -> {_URL}")

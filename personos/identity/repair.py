@@ -1,22 +1,39 @@
-"""剧本物理矛盾的**统一重修**:一次检出全部 → 一次性交回模型改 → 仍不过则保守降级。
+"""**Unified repair** of physical contradictions in a screenplay: detect them all at
+once, hand them back to the model in one go, and degrade conservatively if that
+still does not clear them.
 
-为什么要有这一层:MLLM 会幻觉,而"一个人被当成两个角色""同一个人同时在两个位置"这类
-**物理上不可能**的错误,用代码判比让模型自查可靠得多。检出后不是直接丢数据,而是把
-**所有**矛盾连同它自己上次的输出一起喂回去让它改 —— 明显错了就该重评,这是 mneme 的做法。
+Why this layer exists: a multimodal LLM hallucinates, and code judges
+**physically impossible** errors — one person taken for two characters, one person
+in two places at once — far more reliably than the model judging itself. Having
+detected them we do not simply drop the data; we feed **all** the contradictions
+back together with the model's own previous output and ask it to fix them. If it
+is plainly wrong, it should get to re-decide.
 
-与 mneme 的一处有意简化:mneme 分两条重修回路(cast 类在 harvest 前、voice 类在 harvest 后,
-因为它的 voice 重修 prompt 要用抽好的脸照)。我们**合并成一次、全放在 harvest 之前**:
-- 规则 1/2/3/5/7 全是逻辑矛盾,不是"看脸判断",有视频 + roster 卡就够;
-- 一次调用而不是两次(每次都要重发视频,在我们的部署上 ~100s,省一次是一次);
-- 坏提名在**抽脸之前**就被修好,错脸根本没机会进概率云。
+One deliberate simplification: this could be split into two repair loops, with
+cast-type rules before harvest and voice-type rules after it (a voice repair
+prompt could then use the extracted face photos). We **merge them into a single
+pass, entirely before harvest**, because:
 
-流程(≤2 轮,对齐 mneme MAX_REPAIR_ATTEMPTS):
-    检测 → 构造[上次输出 + 矛盾清单] → 重跑 → 合并(引用完整性校验) → 重新检测
-    → 干净则采纳;仍有矛盾则**把部分改善也采纳为新基线**带着剩余矛盾再试一轮
-    → 两轮后仍不过 → 保守降级(只做减法)
+- rules 1/2/3/5/7 are all logical contradictions rather than judgements about a
+  face, so the video plus the roster cards is enough;
+- it is one call instead of two, and each call re-sends the video, which costs
+  around 100s on our deployment — saving one is worth it;
+- a bad nomination gets fixed **before any face is extracted**, so a wrong face
+  never gets the chance to enter the probability cloud.
 
-降级的取向恒为「宁缺毋滥」:丢掉可疑的那条提名/语音段/名字,绝不凭空添加归属。
-误伤的代价有界且可恢复(后续 clip 会再提名同一个人);而错误归属一旦学进概率云不可逆。
+The flow, over at most two rounds:
+
+    detect -> build [previous output + contradiction list] -> re-run -> merge
+    (with a referential-integrity check) -> re-detect -> accept if clean; if
+    contradictions remain, **adopt the partial improvement as the new baseline**
+    and try another round carrying what is left -> still failing after two rounds
+    -> degrade conservatively, by subtraction only
+
+Degrading always errs toward having less rather than having something wrong: drop
+the suspect nomination, voice range or name, and never invent an attribution. The
+cost of dropping something is bounded and recoverable, since a later clip will
+nominate the same person again, whereas a wrong attribution learned into the
+probability cloud is irreversible.
 """
 
 from __future__ import annotations
@@ -37,9 +54,10 @@ from personos.identity.screenplay import (
 )
 
 MAX_REPAIR_ATTEMPTS = 2
-_MIN_VOICE_SEC = 0.4       # 与 harvest._MIN_VOICE_SEC / inspect 对齐
+_MIN_VOICE_SEC = 0.4       # kept in step with harvest._MIN_VOICE_SEC and inspect
 
-# 三档:degrade=检测+重修+降级(默认) / detect=只检测只留痕不改剧本 / off=全关
+# Three settings: degrade = detect, repair and degrade (the default);
+# detect = detect and record only, leaving the screenplay untouched; off = disabled.
 MODE = os.environ.get("PERSONOS_IDENTITY_GUARD", "degrade").strip().lower()
 
 _HEADER = """# Role
@@ -66,7 +84,9 @@ def _violation_block(violations: list[Violation]) -> str:
 
 
 def _render_cast_records(script: ClipScript) -> str:
-    """把模型上次的 casts/noms/voices/conts 原样回灌 —— 让它在自己的输出上改,而不是重写。"""
+    """Feed the model's own previous casts/noms/voices/conts back verbatim, so it
+    edits its output rather than rewriting it from scratch.
+    """
     def _cast(c: CastDecl) -> dict:
         return {"id": c.local_id, "wearer": c.is_wearer, "name": c.name or "",
                 "name_evidence": c.name_evidence, "desc": c.desc}
@@ -89,7 +109,9 @@ def _render_lines_context(script: ClipScript, cap: int = 40) -> str:
 
 def build_repair_prompt(script: ClipScript, violations: list[Violation],
                         roster_cards: str = "") -> str:
-    """[规则头 + roster + 上次输出 + 保留的台词 + 矛盾清单] —— 一次把所有问题交出去。"""
+    """Assemble [rule header + roster + previous output + kept lines + contradiction
+    list] — every problem handed over at once.
+    """
     blocks = [_HEADER]
     if roster_cards:
         blocks.append("ROSTER (people already seen earlier in this recording):\n" + roster_cards)
@@ -103,23 +125,27 @@ def build_repair_prompt(script: ClipScript, violations: list[Violation],
 
 def merge_repair(script: ClipScript, raw: str,
                  duration_sec: Optional[float]) -> Optional[ClipScript]:
-    """把重修输出合并回原剧本(只换 casts/noms/voices/conts,lines 原样保留)。
+    """Merge the repair output back into the original screenplay, replacing only
+    casts/noms/voices/conts and keeping lines as they were.
 
-    **引用完整性校验**:保留的台词与新的 voices 引用的每个 id 都必须仍在 casts 里,
-    否则整次修复作废返回 None —— 台词归属不能悬空,宁可退回上一版。
+    **Referential integrity check**: every id referenced by the kept lines and by
+    the new voices must still exist in casts. If one does not, the whole repair is
+    voided and None is returned — a line's attribution must not dangle, so we would
+    rather fall back to the previous version.
     """
-    # 复用主解析器:重修输出与剧本同 schema(缺 lines),解析后把 lines 换回原来的
+    # Reuse the main parser: the repair output has the same schema as a screenplay
+    # minus lines, so parse it and then put the original lines back.
     patched = parse_clip_output(raw, duration_sec=duration_sec)
     if not patched.parsed_ok or not patched.casts:
         return None
     ids = {c.local_id for c in patched.casts} | {WEARER_CAST_ID, ENV_WHO}
     for line in script.lines:
         if line.who not in ids:
-            logger.warning(f"重修作废:保留的台词引用了不存在的 id {line.who!r}")
+            logger.warning(f"repair voided: a kept line references nonexistent id {line.who!r}")
             return None
     for vr in patched.voice_ranges:
         if vr.local_id not in ids:
-            logger.warning(f"重修作废:voice 引用了不存在的 id {vr.local_id!r}")
+            logger.warning(f"repair voided: a voice range references nonexistent id {vr.local_id!r}")
             return None
     return ClipScript(
         casts=patched.casts, lines=list(script.lines), nominations=patched.nominations,
@@ -129,34 +155,37 @@ def merge_repair(script: ClipScript, raw: str,
 
 
 def degrade(script: ClipScript, violations: list[Violation]) -> ClipScript:
-    """保守降级:**只做减法**。丢掉可疑记录,绝不凭空添加归属。
+    """Conservative degrade: **subtraction only**. Drop the suspect records and never
+    invent an attribution.
 
-    误伤代价有界且可恢复(后续 clip 会再提名同一个人、名字还在 roster 里);
-    而错误归属一旦学进概率云就不可逆 —— 所以取向恒为宁缺毋滥。
+    The cost of dropping something is bounded and recoverable — a later clip will
+    nominate the same person again, and the name is still on the roster — whereas a
+    wrong attribution learned into the probability cloud is irreversible. So the
+    bias is always toward having less rather than having something wrong.
     """
     casts, noms = list(script.casts), list(script.nominations)
     voices, cont = list(script.voice_ranges), dict(script.cont or {})
     hit = {v.rule for v in violations}
     notes: list[str] = []
 
-    if "duplicate_cast" in hit:                       # 同 id 多次声明 → 只保留第一条
+    if "duplicate_cast" in hit:                       # the same id declared repeatedly -> keep only the first
         seen, kept = set(), []
         for c in casts:
             if c.local_id in seen:
-                notes.append(f"弃重复声明 {c.local_id}")
+                notes.append(f"dropped duplicate declaration {c.local_id}")
                 continue
             seen.add(c.local_id); kept.append(c)
         casts = kept
 
-    if "cont_conflict" in hit:                        # 断开隐含续接,交给仲裁凭素材判
+    if "cont_conflict" in hit:                        # break the implied continuation and let arbitration decide from the assets
         for v in violations:
             if v.rule != "cont_conflict":
                 continue
             for cid in v.cast_ids:
                 if cont.pop(cid, None) is not None:
-                    notes.append(f"断开续接 {cid}")
+                    notes.append(f"broke continuation {cid}")
 
-    drop_t: dict[str, set[float]] = {}                # 分身提名 / 佩戴者提名 → 弃掉
+    drop_t: dict[str, set[float]] = {}                # nominations that split a person in two, or nominate the wearer -> drop them
     for v in violations:
         if v.rule in ("nom_position_conflict", "wearer_visible"):
             for cid in v.cast_ids:
@@ -166,9 +195,9 @@ def degrade(script: ClipScript, violations: list[Violation]) -> ClipScript:
         noms = [n for n in noms
                 if not any(abs(n.t - t) < 1e-6 for t in drop_t.get(n.local_id, ()))]
         if len(noms) != before:
-            notes.append(f"弃提名 {before - len(noms)} 条")
+            notes.append(f"dropped {before - len(noms)} nominations")
 
-    for v in violations:                              # 语音重叠 → 双方都不采重叠段
+    for v in violations:                              # overlapping voices -> neither side keeps the overlapping span
         if v.rule != "voice_overlap" or len(v.times) != 2:
             continue
         lo, hi = v.times
@@ -177,19 +206,19 @@ def degrade(script: ClipScript, violations: list[Violation]) -> ClipScript:
             if r.local_id not in v.cast_ids or r.t1 <= lo or r.t0 >= hi:
                 cut.append(r)
                 continue
-            for a, b in ((r.t0, lo), (hi, r.t1)):     # 只留不重叠且够长的残段
+            for a, b in ((r.t0, lo), (hi, r.t1)):     # keep only the leftovers that do not overlap and are long enough
                 if b - a >= _MIN_VOICE_SEC:
                     cut.append(replace(r, t0=a, t1=b))
-            notes.append(f"裁语音 {r.local_id}[{r.t0:.1f},{r.t1:.1f}]")
+            notes.append(f"trimmed voice range {r.local_id}[{r.t0:.1f},{r.t1:.1f}]")
         voices = cut
 
-    for v in violations:                              # 名字无台词支撑 → 剥名(roster 里还有)
+    for v in violations:                              # a name with no support in the speech -> strip it; the roster still has it
         if v.rule not in DEGRADE_ONLY:
             continue
         for cid in v.cast_ids:
             casts = [replace(c, name=None, name_evidence="none") if c.local_id == cid else c
                      for c in casts]
-            notes.append(f"剥名 {cid}")
+            notes.append(f"stripped name from {cid}")
 
     return ClipScript(
         casts=casts, lines=list(script.lines), nominations=noms, voice_ranges=voices,
@@ -201,10 +230,13 @@ def degrade(script: ClipScript, violations: list[Violation]) -> ClipScript:
 def enforce(script: ClipScript, *, omni: Any = None, clip_url: str = "",
             roster_cards: str = "", duration_sec: Optional[float] = None,
             session_id: str = "", clip_index: int = 0) -> tuple[ClipScript, dict]:
-    """统一检测 → 一次性重修(≤2 轮)→ 保守降级。返回 (剧本, 报告)。
+    """Detect everything, repair in one pass (at most two rounds), then degrade
+    conservatively. Returns (screenplay, report).
 
-    报告字段供上层打结构化日志与统计:检出/修好/残留各多少、按规则计数、重修跑了几轮。
-    任何异常都不抛 —— 守护层坏了不该把整条 clip 拖垮,最坏退化成"不守护"。
+    The report fields let the caller emit structured logs and statistics: how many
+    were found, fixed and left over, counted by rule, and how many repair rounds
+    ran. Nothing is ever raised — a broken guard layer must not take down the whole
+    clip, and the worst case degrades to "no guarding".
     """
     rep: dict[str, Any] = {"mode": MODE, "found": {}, "attempts": 0,
                            "remaining": {}, "degraded": False}
@@ -213,8 +245,8 @@ def enforce(script: ClipScript, *, omni: Any = None, clip_url: str = "",
     try:
         return _enforce(script, rep, omni=omni, clip_url=clip_url, roster_cards=roster_cards,
                         duration_sec=duration_sec)
-    except Exception as e:  # noqa: BLE001  守护层自己坏了,最坏退化成"不守护",不拖垮整条 clip
-        logger.exception(f"一致性守护异常,本 clip 不守护 session={session_id} clip={clip_index}: {e}")
+    except Exception as e:  # noqa: BLE001  if the guard layer itself breaks, degrade to "no guarding" rather than losing the clip
+        logger.exception(f"consistency guard failed, leaving this clip unguarded session={session_id} clip={clip_index}: {e}")
         rep["error"] = f"{type(e).__name__}: {e}"
         return script, rep
 
@@ -225,7 +257,7 @@ def _enforce(script: ClipScript, rep: dict, *, omni: Any, clip_url: str,
     rep["found"] = _by_rule(violations)
     if not violations:
         return script, rep
-    if MODE == "detect":       # 只留痕不改剧本:上线初期收集触发率用
+    if MODE == "detect":       # record only, leave the screenplay alone: for collecting trigger rates after a rollout
         rep["remaining"] = rep["found"]
         return script, rep
 
@@ -237,13 +269,15 @@ def _enforce(script: ClipScript, rep: dict, *, omni: Any, clip_url: str,
                 prompt = build_repair_prompt(script, repairable, roster_cards)
                 raw = omni.chat(prompt, video_url=clip_url, max_tokens=8000, temperature=0.0)
                 patched = merge_repair(script, raw, duration_sec)
-            except Exception as e:  # noqa: BLE001  重修失败退化成降级,不拖垮 clip
-                logger.warning(f"剧本重修第 {attempt} 轮失败,转降级: {e}")
+            except Exception as e:  # noqa: BLE001  a failed repair degrades instead of taking down the clip
+                logger.warning(f"screenplay repair round {attempt} failed, falling back to degrade: {e}")
                 break
             if patched is None:
                 continue
             left = inspect_script(patched)
-            # 部分改善也采纳为新基线(引用完整性已校验过),带着剩余矛盾再试一轮
+            # Adopt even a partial improvement as the new baseline — referential
+            # integrity has already been checked — and try another round carrying
+            # whatever contradictions are left.
             script, violations = patched, left
             repairable = [v for v in left if v.rule in REPAIRABLE]
             if not repairable:

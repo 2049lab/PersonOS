@@ -1,11 +1,17 @@
-"""护栏机制自证:PERSONOS_TEST_GUARD 下的三条红线,违反即 RuntimeError。
+"""The guard mechanism proving itself: three red lines under PERSONOS_TEST_GUARD, each of
+which raises RuntimeError when crossed.
 
-这三条是"测试零污染"的机制保证(见 conftest 头注释):
-1. 未进回退域的自建 Database() 只读——写语句直接拒绝;
-2. 就算进了回退域(正常 fixture 路径),DROP/TRUNCATE/裸 DELETE 也不放行;
-3. 正常路径(注入 db fixture)读写照常,退出自动回退。
+These three are what mechanically guarantees "tests leave no residue" (see the header comment
+in conftest):
+1. A self-constructed Database() that has not entered a rollback scope is read-only — writes
+   are rejected outright;
+2. Even inside a rollback scope (the normal fixture path), DROP/TRUNCATE/bare DELETE are still
+   refused;
+3. On the normal path (injecting the db fixture) reads and writes work as usual, and the scope
+   rolls back automatically on exit.
 
-任何人写测试想绕过规范,得到的不是静默污染,而是清晰的报错指引。
+Anyone writing a test that tries to bypass the convention gets a clear error telling them what
+to do, rather than silent pollution.
 """
 
 import pytest
@@ -14,10 +20,11 @@ from personos.storage.db import Database
 
 
 def test_unpinned_database_is_read_only():
-    """自建 Database()(未进 rollback_scope)在测试进程里只读:写拒绝、读正常。"""
+    """A self-constructed Database() that never entered rollback_scope is read-only inside the
+    test process: writes are rejected, reads still work."""
     other = Database()
     try:
-        assert other.fetch_one("SELECT 1 AS v")["v"] == 1   # 读不受限
+        assert other.fetch_one("SELECT 1 AS v")["v"] == 1   # reads are unrestricted
         with pytest.raises(RuntimeError, match="outside a rollback scope"):
             other.execute(
                 "INSERT INTO users(token, user_id, created_at) VALUES(%s,%s,%s)",
@@ -31,7 +38,8 @@ def test_unpinned_database_is_read_only():
 
 
 def test_destructive_sql_blocked_even_inside_scope(db: Database):
-    """进回退域(db fixture)后常规写可用,但 DROP/TRUNCATE/裸 DELETE 恒拒绝。"""
+    """Once inside a rollback scope (the db fixture), ordinary writes are available, but
+    DROP/TRUNCATE/bare DELETE are always refused."""
     db.execute(
         "INSERT INTO users(token, user_id, created_at) VALUES(%s,%s,%s)",
         ("tok_in_scope", "guard-in-scope", "2026-09-02T00:00:00+00:00"),
@@ -41,11 +49,13 @@ def test_destructive_sql_blocked_even_inside_scope(db: Database):
     with pytest.raises(RuntimeError, match="destructive statement"):
         db.execute("TRUNCATE TABLE atoms")
     with pytest.raises(RuntimeError, match="destructive statement"):
-        db.execute("DELETE FROM atoms")           # 无 WHERE 全表 DELETE
-    db.execute("DELETE FROM users WHERE token=%s", ("tok_in_scope",))  # 带 WHERE 的删不受限
+        db.execute("DELETE FROM atoms")           # whole-table DELETE with no WHERE
+    # A DELETE carrying a WHERE clause is not restricted.
+    db.execute("DELETE FROM users WHERE token=%s", ("tok_in_scope",))
 
 
 def test_guard_probe_leaves_no_trace(db: Database):
-    """护栏测试自身也零污染:上述探针在库中不可见。"""
+    """The guard test itself also leaves zero residue: the probes above are invisible in the
+    database afterwards."""
     row = db.fetch_one("SELECT COUNT(*) AS n FROM users WHERE user_id LIKE %s", ("guard-%",))
     assert row["n"] == 0

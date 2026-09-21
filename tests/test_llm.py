@@ -1,4 +1,5 @@
-"""chat_json 契约单测:围栏剥离 / num_tries 解析失败重试(重试附自纠提示,网络异常不重试)。"""
+"""Contract unit tests for chat_json: fence stripping / retry on parse failure via num_tries
+(the retry carries a self-correction hint, and network errors are not retried)."""
 
 from __future__ import annotations
 
@@ -8,7 +9,8 @@ from personos.online.llm import chat_json, strip_fences
 
 
 class QueueLLM:
-    """按队列回响应,记录每次收到的消息(供重试断言)。"""
+    """Replies from a queue and records the messages received on each call, so retries can be
+    asserted on."""
 
     def __init__(self, *responses: str):
         self.responses = list(responses)
@@ -34,7 +36,7 @@ def test_default_single_try_raises_with_raw():
     with pytest.raises(ValueError) as ei:
         chat_json(llm, [{"role": "user", "content": "q"}], max_tokens=10)
     assert ei.value.raw == "不是 JSON"
-    assert len(llm.calls) == 1                                  # 默认不重试
+    assert len(llm.calls) == 1                                  # no retry by default
 
 
 def test_num_tries_recovers_on_retry():
@@ -43,13 +45,15 @@ def test_num_tries_recovers_on_retry():
     assert data == {"atoms": []} and raw.endswith("```")
     assert len(llm.calls) == 2
     retry = llm.calls[1]
-    assert retry[-1]["content"].startswith("你上次的输出不是合法 JSON")   # 自纠提示
-    assert retry[-2]["role"] == "assistant" and retry[-2]["content"] == "坏了"  # 附上次原文
+    # The self-correction hint.
+    assert retry[-1]["content"].startswith("你上次的输出不是合法 JSON")
+    # The previous raw output is attached.
+    assert retry[-2]["role"] == "assistant" and retry[-2]["content"] == "坏了"
 
 
 def test_num_tries_exhausted_raises_after_all_tries():
     llm = QueueLLM("坏1", "坏2", "坏3")
-    with pytest.raises(ValueError, match="重试 3 次"):
+    with pytest.raises(ValueError, match="after 3 tries"):
         chat_json(llm, [{"role": "user", "content": "q"}], max_tokens=10, num_tries=3)
     assert len(llm.calls) == 3
 

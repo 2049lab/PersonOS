@@ -1,12 +1,19 @@
-"""身份层存储:characters / character_assets / character_cloud 三表的 per-user 存取。
+"""Identity-layer storage: per-user access to characters / character_assets / character_cloud.
 
-移植自 mneme-release anchor/store.py 的持久部分(character/asset/cloud),按 personos 规范改写:
-- per-user 隔离:实例绑定 user_id,所有 SQL 带 `WHERE user_id=%s`(铁律,AGENTS.md §11);
-- 向量走 hex 通道:MEDIUMBLOB 列写 `UNHEX(%s)`/读 `HEX()`(RedHub 非 binary-safe,复用 blob_param/blob_of);
-- id=ULID(全局唯一),时间=ISO VARCHAR,无 FK;
-- name_claim/trait 折进 `characters.payload`;cloud prototype+template 合表按 `slot` 区分。
+The conventions here:
 
-原则沿用:名字是 claim 不是 id;retire≠delete;台账(payload 内)只追加。
+- per-user isolation: an instance is bound to one user_id and every statement
+  carries `WHERE user_id=%s`. This is not optional;
+- vectors travel through a hex channel: MEDIUMBLOB columns are written with
+  `UNHEX(%s)` and read with `HEX()`, because a database proxy we deploy behind is
+  not binary-safe. The shared helpers are blob_param/blob_of;
+- ids are ULIDs (globally unique), timestamps are ISO strings in VARCHAR, and
+  there are no foreign keys;
+- name claims and traits are folded into `characters.payload`; the cloud keeps
+  prototypes and templates in one table, distinguished by `slot`.
+
+Three principles carry through: a name is a claim, not an id; retire is not
+delete; and the ledger inside payload is append-only.
 """
 
 from __future__ import annotations
@@ -26,7 +33,7 @@ def _now_iso() -> str:
 
 
 def emb_to_bytes(emb: Optional[np.ndarray]) -> Optional[bytes]:
-    """向量 → float32 原始字节(与 mneme emb_to_blob 一致的存储格式)。"""
+    """Vector -> raw float32 bytes, which is the on-disk storage format."""
     if emb is None:
         return None
     return np.asarray(emb, dtype=np.float32).tobytes()
@@ -39,7 +46,11 @@ def bytes_to_emb(b: Optional[bytes]) -> Optional[np.ndarray]:
 
 
 class CharacterStore:
-    """一个 user 的角色档案 + 素材 + 概率云存取。所有查询按 user_id 圈死在本用户社交圈内。"""
+    """One user's character profiles, assets and probability cloud.
+
+    Every query is fenced by user_id, so results never leave this user's own
+    social circle.
+    """
 
     def __init__(self, db: Database, user_id: str) -> None:
         self.db = db
@@ -83,7 +94,7 @@ class CharacterStore:
         return [self._char_row(r) for r in self.db.fetch_all(sql, (self.user_id,))]
 
     def touch_character(self, character_id: str, session_id: str) -> None:
-        """更新 last_seen_session(供跨会话"最近见于哪次"展示)。"""
+        """Update last_seen_session, which drives the cross-session "last seen in" display."""
         ch = self.get_character(character_id)
         if not ch:
             return
@@ -93,23 +104,33 @@ class CharacterStore:
             "UPDATE characters SET payload=%s, updated_at=%s WHERE user_id=%s AND id=%s",
             (json.dumps(pl, ensure_ascii=False), _now_iso(), self.user_id, character_id))
 
-    # ── wearer 指针(终审把 SW 链落成佩戴者档案)──────────────────────
+    # ── The wearer pointer: final adjudication lands the SW chain on a profile ──
     def wearer_character(self) -> Optional[str]:
-        """最近的佩戴者档案(is_wearer 表"曾是佩戴者",可能多个;ULID 时序,取最新)。"""
+        """The most recent wearer profile.
+
+        is_wearer means "has been a wearer", so there may be several. ULIDs are
+        time-ordered, so the newest wins.
+        """
         row = self.db.fetch_one(
             "SELECT id FROM characters WHERE user_id=%s AND is_wearer=1 AND status='active'"
             " ORDER BY id DESC LIMIT 1", (self.user_id,))
         return row["id"] if row else None
 
     def mark_wearer(self, character_id: str) -> None:
-        """终审把 SW 链落到此档 → 标记它曾是佩戴者(非单例:换人换机会有多个)。"""
+        """Final adjudication landed the SW chain on this profile, so mark it as
+        having been a wearer. This is not a singleton: hand the device to someone
+        else and there will be several.
+        """
         self.db.execute(
             "UPDATE characters SET is_wearer=1, updated_at=%s WHERE user_id=%s AND id=%s",
             (_now_iso(), self.user_id, character_id))
 
     def set_session_wearer(self, session_id: str, character_id: str) -> None:
-        """本会话佩戴者指针:SW 链落成的那个档案。personos 无 anchor_session 表,
-        折进该档 payload.wearer_sessions(per-user 持久,不新增表)。"""
+        """The wearer pointer for this session: the profile the SW chain landed on.
+
+        There is no per-session table here, so this is folded into that profile's
+        payload.wearer_sessions — persistent per user, and no new table.
+        """
         ch = self.get_character(character_id)
         if not ch:
             return
@@ -122,7 +143,9 @@ class CharacterStore:
             (json.dumps(pl, ensure_ascii=False), _now_iso(), self.user_id, character_id))
 
     def session_wearer(self, session_id: str) -> Optional[str]:
-        """本会话 SW 链落成的档案 id(从 wearer 档 payload.wearer_sessions 反查)。"""
+        """The profile id this session's SW chain landed on, found by searching the
+        wearer profiles' payload.wearer_sessions.
+        """
         for ch in self.list_active_characters(include_wearer=True):
             if not ch["is_wearer"]:
                 continue
@@ -130,7 +153,8 @@ class CharacterStore:
                 return ch["id"]
         return None
 
-    # ── name claims(折进 payload;台账只追加,primary_name 取 cnt 最高)──
+    # ── Name claims: folded into payload, append-only, and primary_name is
+    #    whichever claim has the highest count ──────────────────────────
     def add_name_claim(self, character_id: str, name: str, evidence: str = "") -> None:
         ch = self.get_character(character_id)
         if not ch or not name:
@@ -157,11 +181,15 @@ class CharacterStore:
                         key=lambda c: (-int(c.get("cnt", 1)), c["name"]))
         return [c["name"] for c in claims]
 
-    # ── assets(crop 字节在 OSS,库存 key + 向量 + 元数据)──────────────
+    # ── Assets: the crop bytes live in OSS; the table stores the key, the
+    #    vector and the metadata ─────────────────────────────────────────
     def add_asset(self, character_id: str, kind: str, *, quality: float,
                   embedding: np.ndarray | None = None,
                   payload: dict[str, Any] | None = None) -> str:
-        """kind ∈ face/body/voice。payload 携带 session/clip/t0/t1、crop 的 OSS key、descriptor。"""
+        """kind is one of face/body/voice.
+
+        payload carries session/clip/t0/t1, the crop's OSS key, and the descriptor.
+        """
         aid = _ulid("asset")
         dim = int(embedding.shape[0]) if embedding is not None else None
         self.db.execute(
@@ -188,25 +216,35 @@ class CharacterStore:
         return d
 
     def best_asset(self, character_id: str, kind: str) -> Optional[dict[str, Any]]:
-        """某 kind 质量最高的 active asset(候选卡/终审材料取素材;active_assets 已按 quality DESC)。"""
+        """The highest-quality active asset of a given kind.
+
+        This is where candidate cards and final-adjudication material get their
+        assets; active_assets already orders by quality descending.
+        """
         assets = self.active_assets(character_id, kind)
         return assets[0] if assets else None
 
     def retire_asset(self, asset_id: str) -> None:
-        """retire≠delete:向量与出处保留,只是不再进候选卡。"""
+        """Retire is not delete: the vector and its provenance stay, the asset just
+        stops appearing on candidate cards.
+        """
         self.db.execute(
             "UPDATE character_assets SET status='retired' WHERE user_id=%s AND id=%s",
             (self.user_id, asset_id))
 
     def enforce_asset_caps(self, character_id: str, *, face_cap: int, session_face_cap: int,
                            voice_cap: int) -> int:
-        """容量结算(对齐 mneme enforce_asset_caps):脸 per-session 席位 + 全局上限,声音全局上限,
-        溢出按 quality 序 retire。body 跟随同 session/clip 的脸(脸退它也退)。retire≠delete。
-        返回 retire 数。"""
+        """Settle capacity.
+
+        Faces get both a per-session allowance and a global cap; voices get a
+        global cap. Anything over the limit is retired in quality order. A body
+        shot follows the face from the same session and clip, so retiring the face
+        retires it too. Retire is not delete. Returns how many were retired.
+        """
         retired = 0
-        faces = self.active_assets(character_id, "face")   # 已按 quality DESC
+        faces = self.active_assets(character_id, "face")   # already ordered by quality descending
         per_session: dict[str, int] = {}
-        keep_pairs: set[tuple[str, Any]] = set()           # (session, clip) 保留的脸帧,body 据此跟随
+        keep_pairs: set[tuple[str, Any]] = set()           # the (session, clip) face frames we keep; body shots follow these
         for a in faces:
             pl = a["payload"]
             sid = str(pl.get("session", ""))
@@ -223,7 +261,8 @@ class CharacterStore:
             self.retire_asset(a["id"]); retired += 1
         return retired
 
-    # ── 概率云:prototype(slot=prototype,每 char/modality 一行)──────
+    # ── Probability cloud: the prototype (slot=prototype, one row per
+    #    character and modality) ─────────────────────────────────────────
     def load_prototype(self, character_id: str,
                        modality: str) -> tuple[np.ndarray | None, float, int]:
         row = self.db.fetch_one(
@@ -254,14 +293,16 @@ class CharacterStore:
                 " dim, payload, updated_at) VALUES (%s,%s,%s,%s,'prototype',UNHEX(%s),%s,%s,%s)",
                 (_ulid("cld"), self.user_id, character_id, modality,
                  blob_param(emb_to_bytes(mean)), dim, pl, now))
-        # 冗余快照:把成熟度 τ 镜像到 characters,方便展示/排序,不作为真相源
+        # A redundant snapshot: mirror the maturity tau onto characters so it is
+        # easy to display and sort by. It is not the source of truth.
         col = {"face": "face_tau", "voice": "voice_tau"}.get(modality)
         if col:
             self.db.execute(
                 f"UPDATE characters SET {col}=%s, updated_at=%s WHERE user_id=%s AND id=%s",
                 (float(tau), now, self.user_id, character_id))
 
-    # ── 概率云:templates(slot=template,多行多样性范例)─────────────
+    # ── Probability cloud: templates (slot=template, several rows holding
+    #    diverse exemplars) ──────────────────────────────────────────────
     def templates(self, character_id: str, modality: str) -> list[dict[str, Any]]:
         rows = self.db.fetch_all(
             "SELECT id, HEX(embedding) AS emb_hex, payload FROM character_cloud"

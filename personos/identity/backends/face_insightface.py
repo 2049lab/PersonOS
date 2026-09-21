@@ -1,11 +1,16 @@
-"""人脸检测 + ArcFace 识别(移植 mneme face_insightface.py)。
+"""Face detection plus ArcFace recognition.
 
-RetinaFace/SCRFD 检测(InsightFace buffalo_l)→ 512d ArcFace 归一化向量;
-blur_score = 归一化 Laplacian 方差(素材质量排序用)。检测输入为 RGB 帧(内部转 BGR)。
-env:PERSONOS_FACE_DET_SIZE(检测画布,默认 1280)、PERSONOS_ORT_EP(onnx EP,mac 用 CoreML)。
+RetinaFace/SCRFD detection (InsightFace buffalo_l) produces a 512-d normalized
+ArcFace vector. blur_score is a normalized Laplacian variance, used to rank asset
+quality. detect() takes an RGB frame and converts to BGR internally.
 
-注:AdaFace(质量自适应,小脸更稳)为后续可选的 embedding 替换项;V1 先用 ArcFace 自带权重
-(FaceAnalysis 首次自动下载 buffalo_l),自包含、零额外权重管理。
+Env: PERSONOS_FACE_DET_SIZE (the detection canvas, default 1280) and
+PERSONOS_ORT_EP (the onnx execution provider; CoreML on mac).
+
+Note: AdaFace (quality-adaptive, steadier on small faces) is a possible future
+replacement for the embedding. For now we use ArcFace's own weights, which
+FaceAnalysis downloads on first use — self-contained, with no extra weight
+management.
 """
 
 from __future__ import annotations
@@ -28,7 +33,11 @@ _face_app_cache: dict = {}
 
 
 def _default_det_size() -> tuple[int, int]:
-    """检测网络输入画布(默认 1280;库默认 640——大画布利于检出/对齐小脸)。"""
+    """Input canvas for the detection network.
+
+    We default to 1280 where the library defaults to 640, because a larger canvas
+    both finds and aligns small faces better.
+    """
     try:
         n = int(os.getenv("PERSONOS_FACE_DET_SIZE", "1280"))
     except ValueError:
@@ -37,7 +46,11 @@ def _default_det_size() -> tuple[int, int]:
 
 
 def _ort_providers() -> tuple[str, ...] | None:
-    """onnxruntime EP 选择(env PERSONOS_ORT_EP):mac 用 CoreML(ANE/GPU),Linux/CPU 用 None=CPU。"""
+    """Choose the onnxruntime execution provider (env PERSONOS_ORT_EP).
+
+    On mac that means CoreML, to reach the ANE/GPU; on Linux/CPU we return None,
+    which means plain CPU.
+    """
     mode = os.getenv("PERSONOS_ORT_EP", "auto").lower()
     if mode in ("cpu", "off", "0"):
         return None
@@ -49,13 +62,16 @@ def _ort_providers() -> tuple[str, ...] | None:
     if "CoreMLExecutionProvider" in avail:
         return ("CoreMLExecutionProvider", "CPUExecutionProvider")
     if mode == "coreml":
-        logger.warning("PERSONOS_ORT_EP=coreml 但 CoreML EP 不可用,退回 CPU")
+        logger.warning("PERSONOS_ORT_EP=coreml but the CoreML EP is unavailable, falling back to CPU")
     return None
 
 
 def _get_face_app(model_name: str = "buffalo_l", det_size: tuple[int, int] = (640, 640),
                   allowed_modules: tuple[str, ...] | None = None):
-    """懒加载单例 InsightFace FaceAnalysis(首次自动下载权重到 ~/.insightface)。"""
+    """Lazily built singleton InsightFace FaceAnalysis.
+
+    The first call downloads the weights into ~/.insightface.
+    """
     modules_key = tuple(allowed_modules) if allowed_modules is not None else None
     providers = _ort_providers()
     cache_key = (model_name, det_size, modules_key, providers)
@@ -65,13 +81,14 @@ def _get_face_app(model_name: str = "buffalo_l", det_size: tuple[int, int] = (64
         try:
             from insightface.app import FaceAnalysis
         except ImportError as e:
-            raise ImportError("需要 insightface:pip install insightface onnxruntime "
-                              "opencv-python-headless(服务器用 headless,非 GUI 版)") from e
+            raise ImportError("insightface is required: pip install insightface onnxruntime "
+                              "opencv-python-headless (use the headless build on a server, "
+                              "not the GUI one)") from e
         kwargs = {"allowed_modules": list(allowed_modules)} if allowed_modules is not None else {}
         if providers is not None:
             kwargs["providers"] = list(providers)
         app = FaceAnalysis(name=model_name, **kwargs)
-        app.prepare(ctx_id=-1, det_size=det_size)   # ctx_id=-1 走 EP(CPU/CoreML)
+        app.prepare(ctx_id=-1, det_size=det_size)   # ctx_id=-1 defers to the execution provider (CPU/CoreML)
         _face_app_cache[cache_key] = app
         ep = providers[0] if providers else "CPU"
         logger.info(f"InsightFace {model_name} loaded (det_size={det_size}, ep={ep})")
@@ -80,20 +97,24 @@ def _get_face_app(model_name: str = "buffalo_l", det_size: tuple[int, int] = (64
 
 @dataclass
 class InsightFaceDetector:
-    """RetinaFace 检测 + ArcFace 识别。detect(RGB 帧)→ list[FaceDet]。"""
+    """RetinaFace detection plus ArcFace recognition. detect(RGB frame) -> list[FaceDet]."""
 
     model_name: str = "buffalo_l"
     det_size: tuple[int, int] = field(default_factory=_default_det_size)
     min_det_score: float = 0.5
-    # 只加载真正用到的两个模块:detect() 只读 bbox / det_score / normed_embedding。
-    # buffalo_l 包里另外三个(1k3d68 三维关键点 143MB、2d106det 5MB、genderage 1.3MB)
-    # 我们一个字段都没用 —— 不限定的话 FaceAnalysis 会把目录里的全部加载进内存。
-    # 镜像里对应地只保留 det_10g + w600k_r50(见 Dockerfile 的模型预置段),两边一致。
+    # Load only the two modules we actually use: detect() reads nothing but bbox,
+    # det_score and normed_embedding. We touch no field from the other three in the
+    # buffalo_l bundle (1k3d68 3-d landmarks at 143MB, 2d106det at 5MB, genderage
+    # at 1.3MB) — and without this restriction FaceAnalysis loads everything in the
+    # directory into memory. The container image correspondingly keeps only
+    # det_10g + w600k_r50 (see the model pre-seeding section of the Dockerfile), so
+    # the two sides agree.
     allowed_modules: tuple[str, ...] = ("detection", "recognition")
 
     def detect(self, frame: np.ndarray) -> list[FaceDet]:
         app = _get_face_app(self.model_name, self.det_size, self.allowed_modules)
-        # buffalo_l 训练于 BGR,PyAV 出 RGB → 检测前交换通道(否则 det_score 掉、向量畸变)
+        # buffalo_l was trained on BGR and PyAV hands us RGB, so swap channels before
+        # detecting; otherwise det_score drops and the embeddings come out distorted.
         bgr = (np.ascontiguousarray(frame[:, :, ::-1])
                if frame.ndim == 3 and frame.shape[2] == 3 else frame)
         out: list[FaceDet] = []
@@ -116,7 +137,7 @@ class InsightFaceDetector:
 
 
 def _encode_crop(crop: np.ndarray) -> str:
-    """RGB 人脸 crop → base64 PNG(供 AssetHarvest 上传 OSS)。"""
+    """Turn an RGB face crop into a base64 PNG for AssetHarvest to upload to OSS."""
     from PIL import Image
     img = Image.fromarray(crop)
     min_side = min(img.size)
@@ -130,7 +151,11 @@ def _encode_crop(crop: np.ndarray) -> str:
 
 
 def _laplacian_blur(crop: np.ndarray) -> float:
-    """Laplacian 方差清晰度分,归一化 [0,1];先缩到固定高 112 去除尺寸耦合(小脸也公平)。"""
+    """A sharpness score from Laplacian variance, normalized to [0,1].
+
+    We first resize to a fixed height of 112 to remove the coupling with crop
+    size, so small faces are scored fairly.
+    """
     try:
         import cv2
     except ImportError:
@@ -149,7 +174,7 @@ def _laplacian_blur(crop: np.ndarray) -> float:
 
 
 def _laplacian_blur_numpy(crop: np.ndarray) -> float:
-    """cv2 缺失时的近似兜底(不缩放,略带尺寸耦合)。"""
+    """An approximate fallback for when cv2 is missing: no resize, so slightly size-coupled."""
     if crop.size == 0:
         return 0.0
     gray = crop.mean(axis=2) if crop.ndim == 3 else crop.astype(np.float64)

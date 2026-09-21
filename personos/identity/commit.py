@@ -1,15 +1,33 @@
-"""commit_session(⑦):会话末两阶段终审 + 结算落 MySQL。
+"""commit_session: the end-of-session two-phase final adjudication, then settlement
+into MySQL.
 
-终审 = 批量模型调用(材料 = 会话最佳脸/全身 + desc + names + 声纹;候选 = 库(≤small_library_max
-全量,否则每链粗召回)+ pending 链互为候选)。verdict 先一致化(链-链并;同框撞同档→保证据优选、其余降
-NEW),再按 canonical 链结算:NEW 此刻才建档,素材入库 / 名字归并 / 学云一趟做完。
-佩戴者走同一终审(SW 链,声纹是它唯一生物特征):结算档成为本会话佩戴者指针 + 标 is_wearer。
-终审调用失败:每链回退到最近一次成功评估(链假设);崩在提交前的链留 pending,finalize 重跑兜底。
+Final adjudication is a batched model call. The material for each query is the
+session's best face and body shot plus desc, names and a voiceprint; the
+candidates are the library (in full when it is no larger than small_library_max,
+otherwise coarse recall per chain) together with the pending chains, which serve
+as candidates for one another.
 
-有意偏离(对齐 personos):持久层 MySQL CharacterStore;素材从 OSS 取 b64;结算原子性——测试下
-rollback_scope pin 连接 → SAVEPOINT 真原子(store 写都走 pinned 连接),prod 下 CharacterStore
-逐语句 autocommit(Database facade 规范),靠 pending 状态 + 重跑幂等兜底(draft.commit_chain 在该链
-MySQL 写成功后才标 committed);personos 无 anchor_line 表,故不移植 line 改写,只交付归属映射。
+The verdicts are first made consistent — chain-to-chain merges are applied, and
+where same-frame chains collide on one profile the evidence picks a winner and the
+rest degrade to NEW — and then settled per canonical chain. A NEW profile is
+created only at this point, and persisting assets, merging names and learning into
+the cloud all happen in one pass.
+
+The wearer goes through the same adjudication on the SW chain, where the
+voiceprint is the only biometric available. The profile it settles on becomes this
+session's wearer pointer and is marked is_wearer.
+
+If the adjudication call fails, each chain falls back to its most recent
+successful evaluation, that is, its chain hypothesis. A chain that crashes before
+commit stays pending, and a re-run of finalize picks it up.
+
+On atomicity: under test, rollback_scope pins the connection so SAVEPOINT makes
+settlement genuinely atomic, since every store write goes through the pinned
+connection. In production CharacterStore autocommits statement by statement, per
+the Database facade's contract, and the safety net is the pending status plus
+idempotent re-runs — draft.commit_chain only marks a chain committed after its
+MySQL writes have succeeded. Line rewriting is not done here; this only delivers
+the attribution mapping.
 """
 
 from __future__ import annotations
@@ -30,13 +48,16 @@ from personos.identity.screenplay import WEARER_CAST_ID
 from personos.identity.store import CharacterStore
 from personos.identity.types import CandidateCard
 
-# 终审不属于任何 clip;评估台账用 -1 作标记。
+# Final adjudication belongs to no clip; the evaluation ledger marks it with -1.
 FINAL_CLIP_INDEX = -1
-# 单批过大退化注意力(观测到批量自绑);分批保住注意力。
+# Too large a batch degrades the model's attention — we observed it self-binding
+# every query in one — so we split into batches to keep attention intact.
 FINAL_REVIEW_BATCH_SIZE = 12
 
-# 两条通用规则(chain id / 同框)已在 arbiter.PROMPT_HEADER;终审尾注加:verdict 即终判 +
-# 自绑无效 + note 是强先验。
+# The two general rules (chain ids and same-frame exclusivity) are already in
+# recognize.PROMPT_HEADER. This trailing note adds three things specific to final
+# adjudication: the verdict is final, a self-bind is invalid, and the note is a
+# strong prior.
 _FINAL_CONSTRAINT = (
     "\n\nFINAL REVIEW NOTES:\n"
     "- This is the LAST review before permanent registration: verdicts here are final"
@@ -53,7 +74,10 @@ _FINAL_CONSTRAINT = (
 def commit_session(store: CharacterStore, clouds: CloudEngine, registry: AnchorRegistry,
                    book: ChainBook, *, session_id: str, omni: Any, media_store: Any = None,
                    ) -> dict[str, Any]:
-    """对全 pending 链做终审并落库;返回 by_chain/registered/verdicts/fallbacks/wearer。"""
+    """Run final adjudication over every pending chain and persist the result.
+
+    Returns by_chain, registered, verdicts, fallbacks and wearer.
+    """
     report: dict[str, Any] = {"by_chain": {}, "registered": [], "verdicts": {}, "fallbacks": {}}
     chains = book.store.pending_chains(session_id)
     if not chains:
@@ -62,13 +86,16 @@ def commit_session(store: CharacterStore, clouds: CloudEngine, registry: AnchorR
     verdicts, issues, defaulted = _final_arbitration(
         store, registry, book, chains, session_id=session_id, omni=omni, media_store=media_store)
     if verdicts is None:
-        # 调用失败:每链回退到当前假设(=最近一次成功评估;NEW 仍 NEW)。
+        # The call failed, so every chain falls back to its current hypothesis,
+        # which is its most recent successful evaluation. NEW stays NEW.
         for chain in chains:
             report["fallbacks"][chain["chain_ref"]] = (
                 "hypothesis" if chain["hypothesis"] != "NEW" else "new")
     else:
-        # 自绑 = 弃权(超大批模型会把每个 query 自绑,击穿安全网)——指向自身链的 verdict 作无答处理,
-        # 走默认回退。
+        # A self-bind counts as abstention. With an oversized batch the model binds
+        # every query to itself, which would punch straight through the safety net,
+        # so a verdict pointing at the query's own chain is treated as no answer and
+        # takes the default fallback.
         for chain in chains:
             cast, verdict = chain["cast_id"], verdicts.get(chain["cast_id"])
             if (verdict and book.store.is_chain_ref(verdict)
@@ -76,8 +103,12 @@ def commit_session(store: CharacterStore, clouds: CloudEngine, registry: AnchorR
                     == book.store.canonical_chain(chain["chain_ref"])):
                 issues.append(f"self-bind abstention: {cast}")
                 defaulted.add(cast)
-        # 缺答/弃权不得默认 NEW(终审 verdict 即刻注册,默认 NEW 会永久建重复档)。回退序:强多数
-        # (中途证据共识)→ 链假设 → NEW。显式 NEW 但中途一致强多数指向某档 → 取强多数(防懒 NEW)。
+        # A missing answer or an abstention must not default to NEW: a final
+        # verdict registers immediately, so defaulting to NEW would permanently
+        # create a duplicate profile. The fallback order is strong majority (the
+        # evidence consensus built up mid-run), then the chain hypothesis, then
+        # NEW. And an explicit NEW is overridden when a consistent strong majority
+        # mid-run pointed at a profile, which guards against a lazy NEW.
         for chain in chains:
             cast, ref = chain["cast_id"], chain["chain_ref"]
             majority = book.strong_majority(ref)
@@ -94,7 +125,7 @@ def commit_session(store: CharacterStore, clouds: CloudEngine, registry: AnchorR
     _resolve_final_collisions(book, session_id, report)
     _merge_same_name_chains(book, session_id, report)
 
-    # ── 结算:每 canonical 链落 MySQL ────────────────────────────────
+    # ── Settlement: each canonical chain lands in MySQL ─────────────
     with store.db.transaction():
         for chain in book.store.pending_chains(session_id):
             ref = chain["chain_ref"]
@@ -102,7 +133,7 @@ def commit_session(store: CharacterStore, clouds: CloudEngine, registry: AnchorR
             refs = [ref, *aliases]
             final = chain["hypothesis"]
             if final != "NEW" and store.get_character(final) is None:
-                logger.warning(f"链 {ref} 假设 {final} 不存在 → NEW")
+                logger.warning(f"chain {ref} hypothesis {final} does not exist -> NEW")
                 final = "NEW"
             if final == "NEW":
                 desc = chain["desc_text"]
@@ -113,9 +144,11 @@ def commit_session(store: CharacterStore, clouds: CloudEngine, registry: AnchorR
                 final = store.create_character(session_id=session_id, is_wearer=is_wearer,
                                                text_profile=profile)
                 report["registered"].append(final)
-            # 赢家 staged → character_assets 行 + 学云(跨 ref+aliases 收集一次,避免两链并入同档双学)。
+            # The winner's staged assets become character_assets rows and are
+            # learned into the cloud. We collect across ref plus its aliases in one
+            # go, so two chains merging into one profile do not learn it twice.
             self_enroll_staged(store, clouds, book, refs, final, session_id)
-            # 名字归并(会话内链名 → 持久档)。
+            # Merge names: the chain's session-scoped name onto the persistent profile.
             for r in refs:
                 for name in book.store.names_for(r):
                     store.add_name_claim(final, name, "chain")
@@ -127,13 +160,17 @@ def commit_session(store: CharacterStore, clouds: CloudEngine, registry: AnchorR
                 report["wearer"] = final
             for r in refs:
                 report["by_chain"][r] = final
-            logger.info(f"链 {ref} 提交 → {final}(aliases={aliases})")
+            logger.info(f"chain {ref} committed -> {final} (aliases={aliases})")
     return report
 
 
 def self_enroll_staged(store: CharacterStore, clouds: CloudEngine, book: ChainBook,
                        refs: list[str], final: str, session_id: str) -> None:
-    """把链(及别名)的暂存素材落成持久 asset + 学云。oss_key 已在 OSS,直接复用不重传。"""
+    """Turn the staged assets of a chain and its aliases into persistent assets and
+    learn them into the cloud.
+
+    The oss_key already points at OSS, so it is reused rather than re-uploaded.
+    """
     for r in refs:
         for a in book.store.active_staged(r, "face"):
             emb = a.get("embedding")
@@ -160,13 +197,20 @@ def self_enroll_staged(store: CharacterStore, clouds: CloudEngine, book: ChainBo
                          payload={"session": session_id, "clip": a.get("clip")})
 
 
-# ── 终审调用(与 s4 同形,带声纹;链多时分批保注意力)──────────────────
+# ── The final adjudication call. Same shape as clip-level arbitration, but
+#    carrying voiceprints, and batched when there are many chains so the model's
+#    attention holds up ───────────────────────────────────────────────────
 def _final_arbitration(store: CharacterStore, registry: AnchorRegistry, book: ChainBook,
                        chains: list[dict[str, Any]], *, session_id: str, omni: Any,
                        media_store: Any,
                        ) -> tuple[Optional[dict[str, str]], list[str], set[str]]:
-    """返回 ({cast_id: verdict}, issues, 被默认成 NEW 的 cast 集)。分批但每批给全候选池
-    (跨批链-链并仍可能)。某批失败 → 该批 cast 进 defaulted;全批失败才返回 (None,[],set())。"""
+    """Returns ({cast_id: verdict}, issues, the set of casts defaulted to NEW).
+
+    The queries are batched, but every batch is given the full candidate pool, so
+    a chain-to-chain merge across batches remains possible. If one batch fails its
+    casts go into defaulted; only if every batch fails do we return
+    (None, [], set()).
+    """
     queries, pool = _final_materials(store, registry, book, chains, session_id, media_store)
     candidate_ids = [card.character_id for card in pool]
     verdicts: dict[str, str] = {}
@@ -182,7 +226,7 @@ def _final_arbitration(store: CharacterStore, registry: AnchorRegistry, book: Ch
         try:
             raw = omni.chat(prompt, images_b64=images, audio_b64_list=audios, max_tokens=2048)
         except Exception as exc:  # noqa: BLE001
-            logger.warning(f"终审批 {batch_no} 失败 → 链回退: {exc}")
+            logger.warning(f"final review batch {batch_no} failed -> chains fall back: {exc}")
             issues.append(f"final batch failed: {exc}")
             defaulted.update(c["cast_id"] for c in batch_chains)
             continue
@@ -191,7 +235,7 @@ def _final_arbitration(store: CharacterStore, registry: AnchorRegistry, book: Ch
             raw, cast_ids=[c["cast_id"] for c in batch_chains], candidate_ids=candidate_ids)
         verdicts.update(bv); issues.extend(bi); defaulted.update(bd)
     if not raws:
-        logger.warning("终审全批失败 → 每链回退")
+        logger.warning("every final review batch failed -> every chain falls back")
         return None, [], set()
     return verdicts, issues, defaulted
 
@@ -199,8 +243,14 @@ def _final_arbitration(store: CharacterStore, registry: AnchorRegistry, book: Ch
 def _final_materials(store: CharacterStore, registry: AnchorRegistry, book: ChainBook,
                      chains: list[dict[str, Any]], session_id: str, media_store: Any,
                      ) -> tuple[list[dict[str, Any]], list[CandidateCard]]:
-    """query 卡 = 链最佳素材(desc/names 取链台账,key_lines 取 roster 卡);候选 = 库(≤small_lib
-    全量,否则每链粗召回 + 精确名直通)+ pending 链互为候选。"""
+    """Build the query cards and the candidate pool.
+
+    A query card is the chain's best assets, with desc and names taken from the
+    chain ledger and key_lines from the roster card. The candidates are the
+    library — in full when it is small enough, otherwise coarse recall per chain
+    plus exact name hits — together with the pending chains, which serve as
+    candidates for one another.
+    """
     roster = book.store.load_roster(session_id)
     queries: list[dict[str, Any]] = []
     chain_cards: list[CandidateCard] = []
@@ -250,7 +300,7 @@ def _final_materials(store: CharacterStore, registry: AnchorRegistry, book: Chai
                     evidence, list(by_id), k=registry.arbiter_top_k):
                 if cid not in chosen:
                     chosen.append(cid)
-            for name in names_by_ref[chain["chain_ref"]]:   # 精确名直通
+            for name in names_by_ref[chain["chain_ref"]]:   # exact name hits pass through
                 for cid in by_id:
                     if cid not in chosen and name in store.names_for(cid):
                         chosen.append(cid)
@@ -268,12 +318,14 @@ def _chain_best_voice(book: ChainBook, refs: list[str]) -> dict[str, Any]:
     return max(voices, key=lambda v: float(v["quality"]), default={})
 
 
-# ── verdict 一致化(链并 → 同框碰撞降级)────────────────────────────
+# ── Making the verdicts consistent: apply chain merges, then degrade
+#    same-frame collisions ───────────────────────────────────────────
 def _apply_final_verdicts(book: ChainBook, chains: list[dict[str, Any]],
                           verdicts: dict[str, str], issues: list[str],
                           *, session_id: str, report: dict[str, Any]) -> None:
     ref_by_cast = {c["cast_id"]: c["chain_ref"] for c in chains}
-    # 先链-链并(unions),再档/NEW verdict(应用到并后 canonical)。
+    # Apply the chain-to-chain unions first, then the profile and NEW verdicts,
+    # which land on the canonical chain that resulted from those unions.
     for cast_id, verdict in verdicts.items():
         ref = ref_by_cast[cast_id]
         report["verdicts"][ref] = verdict
@@ -297,37 +349,55 @@ def _apply_final_verdicts(book: ChainBook, chains: list[dict[str, Any]],
 
 
 def _merge_same_name_chains(book: ChainBook, session_id: str, report: dict[str, Any]) -> None:
-    """名字兜底合并(personos 新增,mneme 无——名字不单独定夺,故加护栏):终审后仍分裂的同名链,
-    合并到 presence 最长的那条。护栏:①只并 hypothesis 仍为 NEW 的链(已绑具体注册档的尊重模型的
-    区分,不按名字强并——防两个真重名的人被错并);②同框(presence 交)绝不并(物理不可能同人)。
-    重名极少,此为收拾"模型视觉犹豫没合并的残留分裂"的最后一层,落审计日志可回溯。"""
+    """A last-resort merge by name: same-name chains still split after final
+    adjudication are merged into the one with the longest presence.
+
+    A name never decides an identity on its own, so this needs guards. First, only
+    chains whose hypothesis is still NEW are merged — a chain already bound to a
+    specific registered profile keeps the distinction the model drew, rather than
+    being forced together by name, which is what stops two genuinely different
+    people who share a name from being merged. Second, chains that have appeared
+    in the same frame (their presence sets intersect) are never merged, since they
+    cannot physically be the same person.
+
+    Shared names are rare, and this is the last layer, there to clean up residual
+    splits the model left behind when it hesitated visually. Every merge is
+    written to the audit log so it can be traced back.
+    """
     by_name: dict[str, list[dict[str, Any]]] = {}
     for chain in book.store.pending_chains(session_id):
         if chain["hypothesis"] != "NEW":
-            continue                                     # 护栏①:已绑档的不动
+            continue                                     # guard one: leave chains already bound to a profile alone
         names = book.store.names_for(chain["chain_ref"])
         if names:
             by_name.setdefault(names[0], []).append(chain)
     for name, group in by_name.items():
         if len(group) < 2:
             continue
-        # presence 最长者留(早出场破平)
+        # The longest presence is kept, with earlier appearance breaking ties.
         group.sort(key=lambda c: (-len(c["presence"]), min(c["presence"] or [10**9])))
         keep, merged = group[0], []
         for other in group[1:]:
             if book.copresent(other["chain_ref"], keep["chain_ref"]):
-                continue                                 # 护栏②:同框不并
+                continue                                 # guard two: never merge chains seen in the same frame
             book.store.merge_chain(other["chain_ref"], keep["chain_ref"])
             merged.append(other["chain_ref"])
         if merged:
             report.setdefault("name_merges", []).append(
                 {"name": name, "kept": keep["chain_ref"], "merged": merged})
-            logger.info(f"名字兜底合并 name={name!r} 保留={keep['chain_ref']} 并入={merged}")
+            logger.info(f"name fallback merge name={name!r} kept={keep['chain_ref']} merged={merged}")
 
 
 def _resolve_final_collisions(book: ChainBook, session_id: str, report: dict[str, Any]) -> None:
-    """同框链撞同档 → 组内按证据序(best_face_q 高者留;早出场破平);恰一条强多数则升到留位;
-    同框其余降 NEW。与 chains.resolve_chain_collisions 的降级分支同取舍,终审后不再调模型。"""
+    """Resolve same-frame chains colliding on one profile.
+
+    Within the group, evidence decides: the highest best_face_q is kept, with
+    earlier appearance breaking ties, and if exactly one chain holds a strong
+    majority it is promoted into that kept position. The remaining same-frame
+    chains degrade to NEW. This makes the same trade-off as the degrade branch of
+    chains.resolve_chain_collisions, but calls no model, since adjudication is
+    already over.
+    """
     groups: dict[str, list[dict[str, Any]]] = {}
     for chain in book.store.pending_chains(session_id):
         if chain["hypothesis"] != "NEW":
@@ -346,6 +416,6 @@ def _resolve_final_collisions(book: ChainBook, session_id: str, report: dict[str
                                    clip_index=FINAL_CLIP_INDEX, reason="final_collision_degrade",
                                    issues=[f"copresent chains bound to {target}"])
                 report["verdicts"][chain["chain_ref"]] = "NEW"
-                logger.info(f"终审碰撞 {target}:链 {chain['chain_ref']} 降 NEW")
+                logger.info(f"final collision on {target}: chain {chain['chain_ref']} degraded to NEW")
             else:
-                kept.append(chain)                       # 非同框可合法共享一档
+                kept.append(chain)                       # chains never seen together may legitimately share one profile

@@ -1,7 +1,8 @@
-"""⑤a 会话草稿(draft.py)纯逻辑单测:MemoryDraftStore,无网。
+"""Unit tests for the pure logic of the session draft (draft.py): MemoryDraftStore, no network.
 
-覆盖 union-find canonical / merge 压平 / presence 累积 / 评估台账 / staged best_pair·best_voice /
-commit_chain 标记 / pending 过滤。逐处对照 mneme AnchorStore 语义。
+Covers union-find canonical / merge flattening / presence accumulation / the evaluation ledger /
+staged best_pair and best_voice / commit_chain marking / pending filtering. The semantics match
+the reference implementation's anchor store point by point.
 """
 
 from __future__ import annotations
@@ -36,7 +37,7 @@ def test_update_field_whitelist():
     assert row["hypothesis"] == "char_x" and row["best_face_q"] == 0.7 and row["presence"] == [0, 1]
     try:
         d.update_chain(ref, bogus=1)
-        assert False, "应拒未知字段"
+        assert False, "should reject an unknown field"
     except ValueError:
         pass
 
@@ -48,17 +49,17 @@ def test_merge_canonical_and_aliases_flatten():
     r1, r2, r3 = (d.chain_ref(S, c) for c in ("S1", "S2", "S3"))
     d.update_chain(r1, best_face_q=0.5, presence=[0])
     d.update_chain(r2, best_face_q=0.8, presence=[1], named=1)
-    # S1 先并入 S2
+    # First merge S1 into S2.
     d.merge_chain(r1, r2)
     assert d.canonical_chain(r1) == r2
     assert d.aliases_of(r2) == [r1]
     dst = d.get_chain(r2)
     assert dst["best_face_q"] == 0.8 and dst["named"] == 1 and dst["presence"] == [0, 1]
-    # S3 并入 S1(别名)→ 应压平到根 S2,保持一层深
+    # Merging S3 into S1 (an alias) must flatten it onto the root S2, keeping depth at one level.
     d.merge_chain(r3, r1)
     assert d.canonical_chain(r3) == r2
     assert set(d.aliases_of(r2)) == {r1, r3}
-    # pending 只剩链根 S2
+    # Only the chain root S2 remains pending.
     assert [r["chain_ref"] for r in d.pending_chains(S)] == [r2]
 
 
@@ -67,7 +68,7 @@ def test_merge_same_chain_noop():
     d.ensure_chain(S, "S1"); d.ensure_chain(S, "S2")
     r1, r2 = d.chain_ref(S, "S1"), d.chain_ref(S, "S2")
     d.merge_chain(r1, r2)
-    d.merge_chain(r1, r2)   # 已同链,幂等
+    d.merge_chain(r1, r2)   # already on the same chain, so this is idempotent
     assert d.aliases_of(r2) == [r1]
 
 
@@ -96,7 +97,7 @@ def test_stage_and_best(monkeypatch):
     ref = d.chain_ref(S, "S1")
     d.ensure_chain(S, "S1")
 
-    class _MS:   # 假 media_store:save_image 返回带 key 的对象,save_audio 返回 key 串
+    class _MS:   # fake media_store: save_image returns an object with a key, save_audio a key string
         def save_image(self, b, owner, content_type):
             return type("O", (), {"key": f"img/{len(b)}"})()
         def save_audio(self, b, owner):
@@ -110,12 +111,12 @@ def test_stage_and_best(monkeypatch):
                                           wav_bytes=b"wavwav")])
     d.stage_evidence(ref, session_id=S, clip_index=0, evidence=ev, media_store=_MS())
     pair = d.best_pair(ref)
-    assert pair["quality"] == 0.9                          # 最高质量脸
+    assert pair["quality"] == 0.9                          # the highest-quality face
     assert pair["body_oss_key"] and pair["face_oss_key"]
     voice = d.best_voice(ref)
     assert voice["quality"] == 0.7
     faces = d.active_staged(ref, "face")
-    assert len(faces) == 2 and faces[0]["q"] == 0.9        # 按 q 降序
+    assert len(faces) == 2 and faces[0]["q"] == 0.9        # sorted by q, descending
     assert isinstance(faces[0]["embedding"], np.ndarray)
 
 
@@ -124,15 +125,15 @@ def test_stage_and_all_lines_time_order():
     d.stage_lines(S, 1, [(2.0, 3.0, "S1", "speech", "later")])
     d.stage_lines(S, 0, [(1.0, 2.0, "S1", "speech", "hi"), (0.5, 1.0, "ENV", "environment", "a room")])
     rows = d.all_lines(S)
-    # 按 (clip, t0) 时序:clip0 的 ENV(0.5) → clip0 的 speech(1.0) → clip1(2.0)
+    # Ordered by (clip, t0): clip0's ENV at 0.5, then clip0's speech at 1.0, then clip1 at 2.0.
     assert [r["text"] for r in rows] == ["a room", "hi", "later"]
     assert rows[0]["who"] == "ENV" and rows[1]["who"] == "S1"
 
 
 def test_next_clip_seq_monotonic():
     d = _draft()
-    assert [d.next_clip_seq(S) for _ in range(4)] == [0, 1, 2, 3]   # 会话内单调
-    assert d.next_clip_seq("sess2") == 0                            # 别的会话独立从 0
+    assert [d.next_clip_seq(S) for _ in range(4)] == [0, 1, 2, 3]   # monotonic within a session
+    assert d.next_clip_seq("sess2") == 0                            # another session starts at 0 independently
 
 
 def test_commit_chain_marks_aliases():
@@ -143,4 +144,4 @@ def test_commit_chain_marks_aliases():
     d.commit_chain(r2, "char_final")
     assert d.get_chain(r1)["status"] == "committed"
     assert d.get_chain(r2)["final_character_id"] == "char_final"
-    assert d.pending_chains(S) == []                       # 提交后无 pending
+    assert d.pending_chains(S) == []                       # nothing is pending after the commit

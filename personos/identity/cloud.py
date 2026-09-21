@@ -1,12 +1,21 @@
-"""CloudEngine:概率身份云(移植自 mneme-release anchor/cloud.py)。
+"""CloudEngine: the probability identity cloud.
 
-只做两件事,从不判决(判决在 MLLM 仲裁):
-1. 粗召回:把大库压成 top-K 候选(产出排序,不是结论);
-2. 注册基底:q 加权精度累加(见得越多认得越准),支撑跨会话认人。
+It does exactly two things and never decides who someone is — that verdict comes
+from multimodal-LLM arbitration:
 
-无硬阈值:learn 用连续权重(糊脸自动权重趋零,不是被门拒绝),score 产出连续排序分。
-数学:PFE 共轭更新 `tau'=tau+w; mu'=normalize(tau*mu + w*x)`;
-打分 `max(cos mean, max cos templates)` 抗多姿态欠拟合。
+1. Coarse recall: squeeze a large library down to top-K candidates. The output is
+   a ranking, not a conclusion.
+2. Enrollment basis: q-weighted precision accumulation, so the more we see of
+   someone the better we know them. This is what lets recognition survive across
+   sessions.
+
+There are no hard thresholds anywhere. learn() uses a continuous weight, so a
+blurry face drifts toward zero weight on its own rather than being rejected by a
+gate, and score() returns a continuous ranking number.
+
+The math is the PFE conjugate update ``tau' = tau + w; mu' = normalize(tau*mu + w*x)``.
+Scoring takes ``max(cos mean, max cos templates)``, which guards against
+underfitting when someone appears in many poses.
 """
 
 from __future__ import annotations
@@ -18,7 +27,9 @@ import numpy as np
 
 from personos.identity.types import CastEvidence, normalized
 
-# 冷启动基线 s0_m = 该模态的跨人相似度中位数(代理值);标定 LLR 表后可无缝替换。env 可覆盖。
+# The cold-start baseline s0_m is the median cross-person similarity for that
+# modality, used here as a proxy. Once an LLR table is calibrated it can drop in
+# without touching anything else. Overridable by env.
 _S0_DEFAULT = {"face": 0.15, "voice": 0.25}
 
 
@@ -37,12 +48,14 @@ class CloudEngine:
         self.store = store
         self.template_cap = template_cap
 
-    # ── 学习(精度加权,无硬门)────────────────────────────────────────
+    # ── Learning: precision-weighted, with no hard gate ──────────────────
     def learn(self, character_id: str, modality: str, embedding: Any, q: float,
               *, payload: dict[str, Any] | None = None) -> bool:
-        """tau'=tau+w; mu'=normalize(tau*mu + w*x),w=q(1/σ²(q) 精度的代理)。
+        """tau' = tau + w; mu' = normalize(tau*mu + w*x), with w = q as a proxy for the precision 1/sigma^2(q).
 
-        q≈0 的观测数学上自然淡出(不是被门拒绝)。返回该观测是否真的进了云。
+        An observation with q close to 0 fades out mathematically rather than
+        being turned away by a gate. Returns whether the observation actually
+        entered the cloud.
         """
         emb = normalized(embedding)
         weight = max(0.0, float(q))
@@ -64,9 +77,14 @@ class CloudEngine:
 
     def _admit_template(self, character_id: str, modality: str, emb: np.ndarray, q: float,
                         *, payload: dict[str, Any] | None = None) -> None:
-        """模板集准入(无参规则):未满直接进;满员时与最近邻模板拼质量,低者被逐。
+        """Admission to the template set, by a rule with no tunable parameters.
 
-        同视角冗余被自动挤出,跨姿态/跨会话多样性自然保留,无需姿态阈值。
+        While the set has room, admit. Once it is full, the new template competes
+        on quality with its nearest neighbour and the weaker of the two is evicted.
+
+        This squeezes out redundancy from the same viewpoint by itself, while
+        diversity across poses and across sessions survives — no pose threshold
+        needed.
         """
         templates = self.store.templates(character_id, modality)
         if len(templates) < self.template_cap:
@@ -79,12 +97,13 @@ class CloudEngine:
         self.store.remove_template(nearest["template_id"])
         self.store.add_template(character_id, modality, emb, q, payload=payload)
 
-    # ── 打分 / 粗召回 ─────────────────────────────────────────────────
+    # ── Scoring and coarse recall ────────────────────────────────────────
     def score_observation(self, character_id: str, modality: str,
                           embedding: Any, q: float) -> float | None:
-        """一条观测对一个档案的排序分:q*(s-s0),s=max(cos mean, max cos templates)。
+        """How one observation ranks one profile: q*(s-s0), where s = max(cos mean, max cos templates).
 
-        该档案该模态无云 → None(缺席,调用方按 0 贡献处理)。
+        Returns None when that profile has no cloud for that modality; the caller
+        treats an absent modality as contributing 0.
         """
         emb = normalized(embedding)
         if emb is None:
@@ -104,7 +123,11 @@ class CloudEngine:
         return max(0.0, float(q)) * (best - _s0(modality))
 
     def score_evidence(self, character_id: str, evidence: CastEvidence) -> float:
-        """score 级融合:各模态各观测组求和,缺席=0 贡献(天然抗模态缺失)。"""
+        """Fuse at the score level: sum over every observation of every modality.
+
+        An absent modality contributes 0, which makes this robust to a missing
+        modality without any special case.
+        """
         total = 0.0
         for pick in evidence.faces:
             score = self.score_observation(character_id, "face", pick.embedding, pick.q)
@@ -118,7 +141,9 @@ class CloudEngine:
 
     def coarse_recall(self, evidence: CastEvidence, character_ids: list[str],
                       k: int) -> list[tuple[str, float]]:
-        """top-K 排序(唯一验收指标 hit@K;排错了仲裁还能答 NEW 救)。"""
+        """The top-K ranking. hit@K is the only acceptance metric here, because if
+        the ranking is wrong arbitration can still rescue it by answering NEW.
+        """
         scored = [(cid, self.score_evidence(cid, evidence)) for cid in character_ids]
         scored.sort(key=lambda item: item[1], reverse=True)
         return scored[: max(0, int(k))]

@@ -1,4 +1,4 @@
-"""测试替身:不打真实 MAAS,保证单测确定性(dev 原则 §2)。"""
+"""Test doubles: never call the real model gateway, so unit tests stay deterministic."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import numpy as np
 
 
 class FakeLLM:
-    """按队列返回预设的 chat 响应;记录收到的最后一次 user prompt 便于断言。"""
+    """Returns canned chat responses from a queue, and records the last user prompt it saw so tests can assert on it."""
 
     def __init__(self, responses: list[str]):
         self._responses = list(responses)
@@ -15,12 +15,12 @@ class FakeLLM:
     def chat(self, messages, temperature=0.3, max_tokens=2048) -> str:
         self.last_user_prompt = messages[-1]["content"]
         resp = self._responses.pop(0) if self._responses else '{"ops":[]}'
-        # 支持 callable:让后一轮响应能引用上一轮 prompt 里出现的原子 id
+        # A response may be a callable, so a later turn can refer to atom ids that showed up in the previous prompt.
         return resp(self.last_user_prompt) if callable(resp) else resp
 
 
 class FakeEmbedder:
-    """返回固定维度的伪向量,种子由文本长度决定(确定性)。"""
+    """Returns fake vectors of a fixed dimension, seeded by text length so the output is deterministic."""
 
     def __init__(self, dim: int = 8):
         self.dim = dim
@@ -33,9 +33,10 @@ class FakeEmbedder:
 
 
 class FakeRedis:
-    """redis 客户端的最小内存替身:只实现 seg_store/session_lock 用到的命令子集。
+    """A minimal in-memory stand-in for the redis client: only the command subset that seg_store and session_lock use.
 
-    TTL 不真过期(记录下来供断言);eval 只实现「比对 token 删锁」语义。
+    TTLs never actually expire -- they are just recorded so tests can assert on them. eval only implements the
+    "delete the lock if the token matches" semantics.
     """
 
     def __init__(self):
@@ -65,28 +66,32 @@ class FakeRedis:
         return n
 
     def ttl_of(self, key):
-        """redis TTL 语义:无键 -2;有键无 TTL -1(命名避开测试属性 ttl 字典)。"""
+        """Redis TTL semantics: -2 when the key is missing, -1 when the key exists without a TTL. Named to avoid
+        clashing with this fake's own ttl dict attribute.
+        """
         if key not in self.data:
             return -2
         return self.ttl.get(key, -1)
 
-    def eval(self, script, num_keys, key, *args):   # noqa: A002  redis-py 同名参数
-        """实现 release(值==token 才删)与 renew(值==token 才续 TTL)两种锁 Lua。"""
+    def eval(self, script, num_keys, key, *args):   # noqa: A002  parameter name matches redis-py
+        """Implements both lock Lua scripts: release (delete only when the stored value equals the token) and
+        renew (extend the TTL only when the stored value equals the token).
+        """
         token = args[0] if args else None
         if self.data.get(key) != token:
             return 0
-        if "pexpire" in script:                    # renew:续 TTL
+        if "pexpire" in script:                    # renew: extend the TTL
             self.ttl[key] = int(args[1]) // 1000 if len(args) > 1 else self.ttl.get(key, -1)
             return 1
-        del self.data[key]                          # release:删锁
+        del self.data[key]                          # release: drop the lock
         return 1
 
-    # —— msg_queue 用到的 List / Set / 计数命令(最小内存语义,贴合真 redis) ——
+    # -- List / Set / counter commands used by msg_queue (minimal in-memory semantics that match real redis) --
     def lpush(self, key, *values):
         lst = self.data.get(key)
         if not isinstance(lst, list):
             lst = self.data[key] = []
-        for v in values:              # 逐个压左端(与 redis LPUSH 多值语义一致)
+        for v in values:              # push one at a time onto the left end, matching redis multi-value LPUSH
             lst.insert(0, v)
         return len(lst)
 
@@ -94,11 +99,11 @@ class FakeRedis:
         s = self.data.get(src)
         if not isinstance(s, list) or not s:
             return None
-        v = s.pop()                   # 右端弹出(最旧)
+        v = s.pop()                   # pop from the right end (the oldest entry)
         d = self.data.get(dst)
         if not isinstance(d, list):
             d = self.data[dst] = []
-        d.insert(0, v)                # 左端压入目标
+        d.insert(0, v)                # push onto the left end of the destination
         return v
 
     def lrem(self, key, count, value):
@@ -106,7 +111,7 @@ class FakeRedis:
         if not isinstance(lst, list):
             return 0
         removed = 0
-        n = count if count > 0 else len(lst)    # count>0:从头移除至多 count 个(本模块只用 1)
+        n = count if count > 0 else len(lst)    # count>0: remove at most count from the head (this module only uses 1)
         i = 0
         while i < len(lst) and removed < n:
             if lst[i] == value:
@@ -124,7 +129,7 @@ class FakeRedis:
         lst = self.data.get(key)
         if not isinstance(lst, list):
             return []
-        e = len(lst) if end == -1 else end + 1  # redis end 含端;-1=到末尾
+        e = len(lst) if end == -1 else end + 1  # redis end is inclusive; -1 means through the last element
         return lst[start:e]
 
     def sadd(self, key, *members):

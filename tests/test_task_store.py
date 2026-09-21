@@ -1,4 +1,5 @@
-"""TaskStore 单测(MySQL tasks 表;经 db fixture 原子回退,零污染)。"""
+"""TaskStore unit tests against the MySQL tasks table; the db fixture rolls everything back
+atomically, so nothing is left behind."""
 
 from __future__ import annotations
 
@@ -19,7 +20,7 @@ def test_lifecycle_roundtrip(db):
     ts.mark_done("t1", {"evidence_id": "e1", "boundary": None})
     got = ts.get("t1")
     assert got["status"] == "done"
-    assert got["result"] == {"evidence_id": "e1", "boundary": None}   # JSON 已解析回 dict
+    assert got["result"] == {"evidence_id": "e1", "boundary": None}   # the JSON was parsed back into a dict
     assert got["user_id"] == "u1" and got["session_id"] == "s1"
 
     ts.create("t2", "session-end", "u1", "s1")
@@ -31,7 +32,8 @@ def test_lifecycle_roundtrip(db):
 
 
 def test_user_scoping_by_caller(db):
-    """user_id 落库:轮询鉴权(GET /tasks 只能查自己)由 API 层用该字段判。"""
+    """user_id is stored on the row: the API layer uses this field to authorize polling, so GET /tasks
+    can only return the caller's own tasks."""
     ts = TaskStore(db)
     ts.create("t1", "ingest", "u1", "s1")
     ts.create("t2", "ingest", "u2", "s1")
@@ -40,11 +42,12 @@ def test_user_scoping_by_caller(db):
 
 
 def test_sweep_reaps_stale_running(db):
-    """running 久未更新 → worker lost;终态行过期清理。"""
+    """A running row that has not been updated for a long time is marked worker lost, and terminal rows
+    are cleaned up once they expire."""
     ts = TaskStore(db)
     ts.create("t1", "ingest", "u1", "s1")
     ts.mark_running("t1")
-    # 手动把 updated_at 拨回 1 小时前(ISO 串列,直接 UPDATE)
+    # Wind updated_at back one hour by hand (it is an ISO string column, so UPDATE it directly)
     db.execute("UPDATE tasks SET updated_at=%s WHERE task_id=%s",
                ((now() - timedelta(hours=1)).isoformat(), "t1"))
 
@@ -57,7 +60,7 @@ def test_sweep_reaps_stale_running(db):
 
     got = ts.get("t1")
     assert got["status"] == "error" and got["error"] == "worker lost"
-    assert ts.get("t2") is None                  # 过期终态行已清
+    assert ts.get("t2") is None                  # the expired terminal row was removed
 
 
 def test_sweep_keeps_fresh_rows(db):
@@ -67,5 +70,5 @@ def test_sweep_keeps_fresh_rows(db):
     ts.create("t2", "ingest", "u1", "s1")
     ts.mark_done("t2", {"ok": True})
     ts.sweep()
-    assert ts.get("t1")["status"] == "running"   # 新鲜 running 不收割
-    assert ts.get("t2")["status"] == "done"      # 新鲜终态不清理
+    assert ts.get("t1")["status"] == "running"   # a fresh running row is not reaped
+    assert ts.get("t2")["status"] == "done"      # a fresh terminal row is not cleaned up

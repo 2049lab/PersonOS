@@ -1,7 +1,11 @@
-"""真后端装配:人脸检测识别(InsightFace/ArcFace)+ 声纹(ECAPA)+ Omni(V2 接线)。
+"""Assemble the real backends: face detection and recognition (InsightFace/ArcFace),
+voiceprints (ECAPA), and the multimodal model.
 
-fail fast:配置的后端不可用时直接抛,绝不用替身模型跑出"看似合理实则无效"的结果。
-device 走 backends.device(gpu 优先,cpu 兜底)。
+These fail fast: if a configured backend is unavailable we raise instead of
+quietly swapping in a stand-in model, because a stand-in produces results that
+look plausible and are worthless.
+
+Device selection goes through backends.device (GPU first, cpu as the fallback).
 """
 
 from __future__ import annotations
@@ -22,5 +26,6 @@ def _make_face_detector() -> Any:
     if choice == "arcface":
         from personos.identity.backends.face_insightface import InsightFaceDetector
         return InsightFaceDetector()
-    # AdaFace(质量自适应,小脸更稳)为后续可选替换,需 adaface 权重 + net;V1 先 arcface。
-    raise ValueError(f"PERSONOS_FACE_RECOGNIZER 目前支持 arcface;收到 {choice!r}")
+    # AdaFace (quality-adaptive, steadier on small faces) is the intended optional
+    # replacement, but it needs its own weights and net; for now we ship arcface.
+    raise ValueError(f"PERSONOS_FACE_RECOGNIZER currently supports arcface; got {choice!r}")

@@ -1,14 +1,23 @@
-"""atom 链存储(docs/atom-chain-design.md §3):链级信息 + atoms 三列的生命周期。
+"""atom_chain storage: chain-level information plus the lifecycle of the three
+chain columns on atoms.
 
-链是派生视图、只分组不消解(D-C3):链内新旧陈述不选赢家,冲突消费在作答时。
-成员关系不放独立表——与 atom 严格 1:1,atoms 链三列(单值 chain_id)即
-「一 atom 至多一链」的数据库级约束;occurrence/recorded 时间本就在 atom payload。
+A chain is a derived view that groups without resolving: it never picks a winner
+between an older and a newer statement in the chain, and conflicts are consumed at
+answer time.
 
-链序 = 追加序 = 对话事实抽取的自然顺序(D-C7):新成员追加到链尾
-(member.prev=旧尾),双向链接是链序唯一事实源;occurrence_time 只作展示元数据,
-不用来排链序(回溯提及会让它乱序、并列时不稳定)。
+Membership deliberately has no table of its own. It is strictly 1:1 with an atom,
+and the single-valued chain_id column is itself the database-level constraint that
+an atom belongs to at most one chain. The occurrence and recorded times are already
+in the atom payload.
 
-多租户:与 AtomStore 同规,实例按 user 绑定(构造注入 user_id)。
+Chain order is append order, which is the natural order in which facts were
+extracted from the conversation. A new member is appended at the tail, with its
+prev pointing at the old tail, and the doubly-linked pointers are the only source
+of truth for chain order. occurrence_time is display metadata only and is never
+used to order a chain — a retrospective mention would scramble it, and it is
+unstable when two entries tie.
+
+Multi-tenancy works as it does in AtomStore: an instance is bound to one user.
 """
 
 from __future__ import annotations
@@ -30,7 +39,8 @@ _UPDATE_CHAIN = (
     "UPDATE atom_chains SET n_atoms=%s, head_atom_id=%s, tail_atom_id=%s, "
     "centroid=UNHEX(%s), payload=%s, updated_at=%s WHERE id=%s AND user_id=%s"
 )
-# 链列 + payload 双写(仿 memcell_id 先例);调用方保证 atom 行存在
+# Write the chain columns and the payload together, following the precedent set by
+# memcell_id. The caller guarantees the atom row exists.
 _SET_LINK = (
     "UPDATE atoms SET chain_id=%s, prev_atom_id=%s, next_atom_id=%s, payload=%s "
     "WHERE id=%s AND user_id=%s"
@@ -46,35 +56,47 @@ class ChainStore:
         self.db = db
         self.user_id = user_id
 
-    # —— 内部:链列双写(读当前 payload → 校验 → 改链字段 → 回写)——
+    # —— Internal: the paired write of the chain columns. Read the current
+    #    payload, validate, change the chain fields, write it back. ——
 
     def _set_link(self, tx: _Tx, atom_id: str, *, chain_id: str, next_: str,
                   prev: Optional[str], expect_chain: str) -> None:
-        """写一个节点的链字段。expect_chain=该节点当前应处的链(''=应游离)——
-        不符即抛错回滚:防重复挂链/挂错链把链表结构写坏(结构性错误宁死不改)。
-        prev=None 表示保留现值(旧尾接 next 时前驱不能动);''/str 则显式设定。"""
+        """Write one node's chain fields.
+
+        expect_chain is the chain this node should currently be in, where "" means
+        it should be unattached. A mismatch raises and rolls back, because linking
+        an atom twice or into the wrong chain corrupts the linked-list structure —
+        and a structural error is better left raised than quietly repaired.
+
+        prev=None keeps the current value, which is what the old tail needs when it
+        gains a next pointer and its predecessor must not move. An empty string or
+        an id sets it explicitly.
+        """
         row = tx.fetch_one(
             "SELECT payload, chain_id, prev_atom_id FROM atoms WHERE id=%s AND user_id=%s",
             (atom_id, self.user_id),
         )
         if row is None:
-            raise RuntimeError(f"链挂接目标 atom 不存在: {atom_id}")
+            raise RuntimeError(f"chain link target atom does not exist: {atom_id}")
         if (row["chain_id"] or "") != expect_chain:
             raise RuntimeError(
-                f"链挂接冲突: atom {atom_id} 已在链 {row['chain_id'] or '(无)'} "
-                f"(期望 {expect_chain or '(游离)'}) —— 双挂/错挂,整答回滚"
+                f"chain link conflict: atom {atom_id} is already on chain {row['chain_id'] or '(none)'} "
+                f"(expected {expect_chain or '(unchained)'}) -- double/wrong link, rolling the whole answer back"
             )
         atom = MemoryAtom.model_validate_json(row["payload"])
-        new_prev = (row["prev_atom_id"] or "") if prev is None else prev  # 列为事实源
+        new_prev = (row["prev_atom_id"] or "") if prev is None else prev  # the column is the source of truth
         atom.chain_id, atom.prev_atom_id, atom.next_atom_id = chain_id, new_prev, next_
         tx.execute(_SET_LINK, (chain_id or None, new_prev or None, next_ or None,
                                atom.model_dump_json(), atom_id, self.user_id))
 
-    # —— 建链 / 追加(各一个事务;append 内三写原子)——
+    # —— Creating a chain and appending to one. Each is a single transaction, and
+    #    append's three writes are atomic together. ——
 
     def create_chain(self, info: ChainInfo, first_atom: MemoryAtom,
                      centroid: Optional[np.ndarray] = None) -> ChainInfo:
-        """建链 + 首成员(链首=链尾=first_atom,n=1)。info 的计数字段由此填定。"""
+        """Create a chain together with its first member, so head and tail are both
+        first_atom and n is 1. This is what fills in info's counting fields.
+        """
         info.user_id = self.user_id
         info.n_atoms, info.head_atom_id, info.tail_atom_id = 1, first_atom.id, first_atom.id
         info.created_at = info.updated_at = now()
@@ -85,21 +107,26 @@ class ChainStore:
                 _centroid_blob(centroid), info.model_dump_json(),
                 info.created_at.isoformat(), info.updated_at.isoformat(),
             ))
-        logger.info(f"链建链 id={info.id} first={first_atom.id} title={info.title[:30]!r} "
-                    f"user={self.user_id or '(默认)'}")
+        logger.info(f"chain created id={info.id} first={first_atom.id} title={info.title[:30]!r} "
+                    f"user={self.user_id or '(default)'}")
         return info
 
     def append_atom(self, chain: ChainInfo, atom: MemoryAtom,
                     centroid: Optional[np.ndarray] = None) -> ChainInfo:
-        """追加到链尾:旧尾接 next、新成员写 prev、链行 tail/n/centroid 前移(单事务)。
+        """Append at the tail: the old tail gains a next pointer, the new member
+        gets its prev, and the chain row's tail, n and centroid move forward — all
+        in one transaction.
 
-        chain 对象就地更新并返回,调用方持引用即最新态。
-        centroid=None 表示保留现质心(否则须传"含新成员"的全量质心——增量均值在
-        chain_build 里算,精确重算走 recompute)。
+        The chain object is updated in place and returned, so a caller holding a
+        reference already has the latest state.
+
+        centroid=None keeps the current centroid. Otherwise you must pass the full
+        centroid *including* the new member; the incremental mean is computed in
+        chain_build, and an exact recomputation goes through recompute.
         """
         if not chain.tail_atom_id:
-            raise RuntimeError(f"链 {chain.id} 无尾(空链不可追加,应走 create_chain)")
-        if centroid is None:   # 保留现值,防 UNHEX(NULL) 把质心清掉
+            raise RuntimeError(f"chain {chain.id} has no tail; an empty chain cannot be appended to, use create_chain")
+        if centroid is None:   # keep the current value, so UNHEX(NULL) cannot wipe the centroid
             row = self.db.fetch_one(
                 "SELECT HEX(centroid) AS c FROM atom_chains WHERE id=%s AND user_id=%s",
                 (chain.id, self.user_id),
@@ -121,7 +148,7 @@ class ChainStore:
             ))
         return chain
 
-    # —— 读 ——
+    # —— Reads ——
 
     def get_chain(self, chain_id: str) -> Optional[ChainInfo]:
         row = self.db.fetch_one(
@@ -131,7 +158,9 @@ class ChainStore:
         return ChainInfo.model_validate_json(row["payload"]) if row else None
 
     def list_chains(self) -> list[tuple[ChainInfo, Optional[np.ndarray]]]:
-        """本 user 全部链 + 质心(判链预筛的候选池;链数 ≪ atom 数)。"""
+        """All of this user's chains with their centroids: the candidate pool for
+        deciding chain membership. There are far fewer chains than atoms.
+        """
         rows = self.db.fetch_all(
             "SELECT payload, HEX(centroid) AS c FROM atom_chains WHERE user_id=%s",
             (self.user_id,),
@@ -144,10 +173,16 @@ class ChainStore:
         return out
 
     def full_chain(self, chain_id: str) -> list[MemoryAtom]:
-        """整链成员(链序):一条索引查询取回,本地沿 next 链接从链首走出顺序。
+        """Every member of a chain, in chain order.
 
-        双向链接是链序唯一事实源;返回顺序即链序(追加序)。链行缺失/链断裂 →
-        返回已走通的前缀并告警(派生索引受损不抛崩,留重建脚本收口)。
+        One indexed query fetches them, and the order is then walked out locally
+        from the head along the next pointers, since those pointers are the only
+        source of truth for chain order. The returned order is therefore append
+        order.
+
+        If the chain row is missing or the chain is broken, we return the prefix we
+        could walk and log a warning: a damaged derived index should not crash
+        anything, and the rebuild script is what puts it right.
         """
         info = self.get_chain(chain_id)
         if info is None:
@@ -170,17 +205,22 @@ class ChainStore:
             ordered.append(by_id[cur])
             cur = by_id[cur].next_atom_id
         if len(ordered) != len(by_id) or info.n_atoms != len(by_id):
-            logger.warning(f"链 {chain_id} 结构不一致: 行={len(by_id)} 走通={len(ordered)} "
-                           f"登记 n={info.n_atoms} (游离断链待 rebuild 收口)")
+            logger.warning(f"chain {chain_id} is structurally inconsistent: rows={len(by_id)} walked={len(ordered)} "
+                           f"recorded n={info.n_atoms} (orphaned or broken links, left for rebuild to repair)")
         return ordered
 
-    # —— 重建 / 修复 ——
+    # —— Rebuild and repair ——
 
     def clear_user(self) -> int:
-        """重建前置:清本 user 全部链(链行删除 + atoms 链三列/payload 链字段归零)。
+        """The precondition for a rebuild: clear all of this user's chains, deleting
+        the chain rows and zeroing both the three chain columns on atoms and the
+        chain fields inside their payloads.
 
-        均带 WHERE(测试护栏拦 TRUNCATE/裸 DELETE);返回清掉的链数。
-        payload 链字段一并抹掉——列与副本同源归零,不留半旧状态。
+        Every statement carries a WHERE clause, since the test guard blocks
+        TRUNCATE and unqualified DELETE. Returns how many chains were cleared.
+
+        The payload's chain fields are wiped along with the columns so the column
+        and its copy are zeroed from the same place, leaving no half-stale state.
         """
         chains = self.list_chains()
         with self.db.transaction() as tx:
@@ -196,11 +236,14 @@ class ChainStore:
                                            r["id"], self.user_id))
                 tx.execute("DELETE FROM atom_chains WHERE id=%s AND user_id=%s",
                            (info.id, self.user_id))
-        logger.info(f"链清理 user={self.user_id or '(默认)'} chains={len(chains)}")
+        logger.info(f"chains cleared user={self.user_id or '(default)'} chains={len(chains)}")
         return len(chains)
 
     def recompute(self, chain_id: str) -> Optional[ChainInfo]:
-        """按成员向量重算 centroid 并对齐 n_atoms(回填/修复用;增量质心的浮点漂移在此收口)。"""
+        """Recompute the centroid from the member vectors and bring n_atoms back in
+        line, for backfill and repair. This is where the floating-point drift of
+        the incremental centroid gets corrected.
+        """
         info = self.get_chain(chain_id)
         if info is None:
             return None

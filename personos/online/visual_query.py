@@ -1,21 +1,30 @@
-"""R0 之前的一道**视觉理解 query 改写**:用户发图提问时,把图里的人认出来、写进 query。
+"""A **visual-understanding query rewrite** that runs before R0: when the user asks a question with an
+image, recognize the people in it and write them into the query.
 
-为什么需要:用户发一张照片问"他和我上周干嘛去了",纯文本链路既看不到图,也无从知道"他"是谁——
-`rewrite_query` 只能拿历史对话补指代,补不出照片里这张脸。这里先把视觉信息落成文字:
+Why it is needed: the user sends a photo and asks "what did he and I do last week?" — the text-only
+path can neither see the image nor know who "he" is; `rewrite_query` can only resolve references from
+the dialogue history, and no amount of history resolves a face in a photo. So visual information is
+turned into text first:
 
-    "他和我上周干嘛去了?"  ──[图 + 角色表 + 历史]──▶  "李四上周和我干嘛去了?"
+    "what did he and I do last week?"  --[image + character roster + history]-->  "what did Li Si and I do last week?"
 
-改写完的 query 再照常进 `rewrite_query`,后面的召回链路一个字都不用改。
+The rewritten query then goes into `rewrite_query` as usual, and not a single line of the retrieval
+path that follows has to change.
 
-流程(与 ingest 侧认人共用同一套身份资产,不另起一套):
-  图 bytes → RGB 帧 → face_detector 检测 → 每张脸取 embedding/质量/crop
-  → 角色表召回(小库全取,大库走概率云粗召回)→ 候选卡带上脸/全身/声音/名字/描述
-  → 一次 MLLM:看图 + 看候选素材 + 读历史 + 读原 query → 改写后的 query + 认到了谁
+The flow (sharing the same identity assets as recognition on the ingest side, rather than standing up
+a second set):
+  image bytes -> RGB frame -> face_detector detection -> per-face embedding / quality / crop
+  -> character-roster recall (take everyone for a small store, coarse recall via the probability
+  cloud for a large one) -> candidate cards carrying face / full-body / voice / name / description
+  -> one MLLM call: look at the image + the candidate material, read the history and the original
+  query -> the rewritten query + who was recognized
 
-**全链路降级**:解码失败/无脸/无候选/MLLM 挂/JSON 坏 —— 一律原样返回 query,只记日志。
-召回是读路径,宁可少一层理解,绝不能因为看图失败就答不出来。
+**Degradation along the whole path**: decode failure, no face, no candidates, the MLLM failing, bad
+JSON — all of them return the query unchanged and only log. Recall is a read path: losing one layer
+of understanding is fine, but failing to look at an image must never cost us the answer.
 
-查询图**不落 OSS**:它是查询输入,不是记忆内容(与 ingest 的图片不同,那个要存以便深轨回看)。
+The query image is **not stored in OSS**: it is query input, not memory content (unlike an ingest
+image, which is stored so the deep track can look at it again).
 """
 
 from __future__ import annotations
@@ -32,9 +41,11 @@ from personos.identity.harvest import _body_crop_b64, _face_q
 from personos.identity.types import CandidateCard, CastEvidence, FacePick
 from personos.online.llm import strip_fences
 
-# 大库时每张脸粗召回的候选数;小库(<=small_library_max)直接全取
+# Number of candidates coarsely recalled per face for a large store; for a small one
+# (<= small_library_max) everyone is taken directly
 COARSE_TOP_K = 5
-# 一次改写最多看几张脸:图里人多时只取质量最高的几张,防 prompt 爆炸
+# How many faces one rewrite looks at at most: with many people in the image, only the highest-quality
+# few are taken, to keep the prompt from exploding
 MAX_FACES = 4
 
 _SYSTEM = """# Role
@@ -82,50 +93,55 @@ Question: "我上周三下午在干嘛?"  → the image is an unrelated screensh
 
 @dataclass
 class VisualRewrite:
-    """视觉改写结果。任何失败路径都给 query=原问题,调用方无需判错。"""
+    """The result of a visual rewrite. Every failure path sets query to the original question, so the
+    caller never has to check for errors."""
 
     query: str
-    faces: int = 0                              # 图里检测到的人脸数
+    faces: int = 0                              # how many faces were detected in the image
     matched: list[dict] = field(default_factory=list)   # [{face_index, character_id, name}]
     system: str = ""
     user: str = ""
     raw: str = ""
-    skipped: str = ""                           # 非空 = 没做改写的原因(供日志/观测)
+    skipped: str = ""                           # non-empty = why no rewrite happened (for logging and observability)
 
 
 @dataclass
 class VisualDeps:
-    """视觉改写的依赖(runtime.visual_deps 装配)。backends 是进程单例(重模型)。"""
+    """Dependencies of the visual rewrite (assembled by runtime.visual_deps). `backends` is a process
+    singleton (heavy models)."""
 
-    store: Any            # CharacterStore(本 user 的人物库)
-    cloud: Any            # CloudEngine(概率身份云,大库粗召回用)
-    backends: dict        # {face_detector, mm_runner, ...} —— 与 ingest 共用同一份单例
-    registry: Any         # AnchorRegistry:只用它的 candidate_card(与 ingest 侧同口径组卡)
-    small_library_max: int = 20    # 与 AnchorRegistry 同口径:库内人数 <= 此值则全量进候选
+    store: Any            # CharacterStore (this user's people store)
+    cloud: Any            # CloudEngine (the probabilistic identity cloud, used for coarse recall on a large store)
+    backends: dict        # {face_detector, mm_runner, ...} -- the same singletons ingest uses
+    registry: Any         # AnchorRegistry: only its candidate_card is used (cards built exactly as on the ingest side)
+    small_library_max: int = 20    # same convention as AnchorRegistry: with at most this many people in the store, all of them become candidates
 
 
 def _to_frame(image: bytes) -> Optional[np.ndarray]:
-    """图片字节 → RGB numpy 帧(face_detector 吃的就是这个)。坏图返回 None,不抛。"""
+    """Image bytes -> an RGB numpy frame (which is what face_detector consumes). A bad image returns
+    None rather than raising."""
     try:
         from PIL import Image
         return np.asarray(Image.open(io.BytesIO(image)).convert("RGB"))
     except Exception as e:  # noqa: BLE001
-        logger.warning(f"查询图解码失败,跳过视觉改写: {e}")
+        logger.warning(f"query image decode failed, skipping the visual rewrite: {e}")
         return None
 
 
 def _detect(deps: VisualDeps, frame: np.ndarray) -> list[FacePick]:
-    """检测人脸 → FacePick(带 embedding/质量/脸 crop/全身 crop),按质量降序取前 MAX_FACES。
+    """Detect faces -> FacePick (carrying embedding, quality, face crop and body crop), taking the
+    top MAX_FACES by descending quality.
 
-    复用 harvest 的 _face_q/_body_crop_b64:与 ingest 侧同一套口径,避免两处质量分定义漂移。
+    Reuses harvest's _face_q / _body_crop_b64: the same convention as the ingest side, so the
+    definition of the quality score cannot drift between the two places.
     """
     det = deps.backends.get("face_detector")
     if det is None:
         return []
     try:
         dets = det.detect(frame)
-    except Exception as e:  # noqa: BLE001  本地推理失败不阻塞召回
-        logger.warning(f"查询图人脸检测失败,跳过视觉改写: {e}")
+    except Exception as e:  # noqa: BLE001  a local inference failure must not block recall
+        logger.warning(f"query image face detection failed, skipping the visual rewrite: {e}")
         return []
     picks = [FacePick(t=0.0, embedding=np.asarray(d.embedding, dtype=np.float32),
                       q=_face_q(d), crop_b64=getattr(d, "crop_b64", ""),
@@ -136,7 +152,8 @@ def _detect(deps: VisualDeps, frame: np.ndarray) -> list[FacePick]:
 
 
 def _candidates(deps: VisualDeps, picks: list[FacePick]) -> list[CandidateCard]:
-    """角色表召回:小库全取,大库每张脸走概率云粗召回后按 character_id 去重。"""
+    """Character-roster recall: take everyone for a small store; for a large one, run coarse recall
+    through the probability cloud per face and dedup by character_id."""
     chars = deps.store.list_active_characters(include_wearer=True)
     if not chars:
         return []
@@ -156,13 +173,16 @@ def _candidates(deps: VisualDeps, picks: list[FacePick]) -> list[CandidateCard]:
 def build_prompt(query: str, picks: list[FacePick], cands: list[CandidateCard],
                  history: list[tuple[str, str]] | None, now_dt: Any = None,
                  ) -> tuple[str, list[str], dict[str, str]]:
-    """拼 prompt。返回 (user_prompt, images, {短标: character_id})。
+    """Assemble the prompt. Returns (user_prompt, images, {short handle: character_id}).
 
-    - images[0] 恒为用户发的原图;图片编号 image #N 与 build_arbitration_prompt 同风格,
-      让模型能把文字引用对上具体图。
-    - 人物用**短标 p1/p2**,不给真实 character_id(26 位 ULID)——项目既有规范:凡 LLM 要靠
-      复述 id 引用内容,一律走短↔长映射。长 id 容易被抄错/幻觉,短标好抄且能机械校验,
-      解析后再回填真实 id。
+    - images[0] is always the original image the user sent; the image #N numbering follows the same
+      style as build_arbitration_prompt, so the model can line its textual references up with
+      specific images.
+    - People are referred to by **short handles p1/p2**, never by the real character_id (a 26-char
+      ULID) — an existing project convention: whenever an LLM has to reference content by repeating
+      an id, it goes through a short <-> long mapping. Long ids are easy to mistype or hallucinate,
+      while short handles are easy to copy and can be validated mechanically, with the real ids
+      filled back in after parsing.
     """
     images: list[str] = []
     blocks: list[str] = []
@@ -202,8 +222,9 @@ def build_prompt(query: str, picks: list[FacePick], cands: list[CandidateCard],
         blocks.append("\nREGISTERED PEOPLE: (none — this user's memory has no people yet;"
                       " `matched` must be [])")
 
-    # 当前时间锚:与 rewrite_query 同一口径。没有它,模型看到照片里的季节/节日/招牌
-    # 就可能把"上周""去年"锚错年份,而这道改写的产物会直接成为 R0 的输入。
+    # The current-time anchor, following the same convention as rewrite_query. Without it, a season,
+    # a holiday or a shop sign visible in the photo can make the model anchor "last week" or "last
+    # year" to the wrong year — and the product of this rewrite becomes R0's input directly.
     if now_dt is not None:
         blocks.append(f"\nCURRENT TIME: {now_dt.isoformat()}"
                       " (the anchor for any relative time in the question or the image)")
@@ -217,19 +238,21 @@ def enrich_query_with_image(
     deps: VisualDeps, *, query: str, image: bytes, content_type: str = "image/jpeg",
     history: list[tuple[str, str]] | None = None, scenario: str = "", now_dt: Any = None,
 ) -> VisualRewrite:
-    """看图改写 query。**任何失败都返回原 query**(skipped 记原因),绝不抛、绝不阻塞召回。"""
+    """Rewrite the query by looking at the image. **Any failure returns the original query** (with
+    the reason recorded in `skipped`); it never raises and never blocks recall."""
     import base64
 
     frame = _to_frame(image)
     if frame is None:
-        return VisualRewrite(query=query, skipped="图片解码失败")
+        return VisualRewrite(query=query, skipped="image decode failed")
 
     picks = _detect(deps, frame)
     cands = _candidates(deps, picks) if picks else []
-    # 没脸也照做:图里的地点/物体/文字同样能把"那家店""这个东西"落成具体词(已与用户对齐)
+    # Carry on even with no face: a place, an object or text in the image can just as well turn "that
+    # shop" or "this thing" into something concrete (agreed with the user)
     omni = deps.backends.get("mm_runner")
     if omni is None:
-        return VisualRewrite(query=query, faces=len(picks), skipped="未装配 mm_runner")
+        return VisualRewrite(query=query, faces=len(picks), skipped="no mm_runner configured")
 
     user, extra, labels = build_prompt(query, picks, cands, history, now_dt)
     sys = _SYSTEM + (f"\n\n# Caller scenario\n{scenario}" if scenario else "")
@@ -238,16 +261,17 @@ def enrich_query_with_image(
         raw = omni.chat(f"{sys}\n\n{user}", images_b64=images, max_tokens=1000, temperature=0.0)
         obj = json.loads(strip_fences(raw))
         resolved = str(obj.get("resolved") or "").strip() or query
-        # 短标校验 + 回填真实 id:标签不在白名单的一律丢(防模型编人),对外仍给 character_id
+        # Validate the short handles and fill the real ids back in: any label outside the allow-list
+        # is dropped (which stops the model inventing people), while the public field stays character_id
         matched = [{**m, "character_id": labels[m["person"]]}
                    for m in (obj.get("matched") or [])
                    if isinstance(m, dict) and m.get("person") in labels]
-        logger.info(f"视觉改写 faces={len(picks)} 候选={len(cands)} "
-                    f"认到={[m.get('name') for m in matched]}\n"
-                    f"  原问题={query!r}\n  改写后={resolved!r}")
+        logger.info(f"visual rewrite faces={len(picks)} candidates={len(cands)} "
+                    f"recognized={[m.get('name') for m in matched]}\n"
+                    f"  original_question={query!r}\n  rewritten={resolved!r}")
         return VisualRewrite(query=resolved, faces=len(picks), matched=matched,
                              system=sys, user=user, raw=raw)
-    except Exception as e:  # noqa: BLE001  看图失败退回原 query:少一层理解,但答得出来
-        logger.warning(f"视觉改写失败,退回原 query: {e}")
+    except Exception as e:  # noqa: BLE001  a failed image read falls back to the original query: one layer of understanding less, but still an answer
+        logger.warning(f"visual rewrite failed, falling back to the original query: {e}")
         return VisualRewrite(query=query, faces=len(picks), system=sys, user=user,
                              raw=str(e), skipped=f"{type(e).__name__}: {e}")

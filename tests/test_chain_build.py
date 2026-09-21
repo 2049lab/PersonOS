@@ -1,6 +1,8 @@
-"""W2.5 判链测试:预筛 → 分组裁决 → 落库,保守律与失败非阻塞(docs/atom-chain-design.md §4.2)。
+"""W2.5 chain-assignment tests: pre-filter, group adjudication, persistence, plus the
+conservative rule and non-blocking failure (docs/atom-chain-design.md §4.2).
 
-不调真实 MAAS:RoutingLLM 按 system prompt 路由,chain assigner 调用喂预设分组。
+No real model provider is called: RoutingLLM routes on the system prompt, and the chain
+assigner calls are fed pre-set groupings.
 """
 
 from __future__ import annotations
@@ -24,7 +26,8 @@ _T0 = datetime(2026, 8, 25, 10, 0)
 
 
 class RoutingLLM:
-    """write_path 三类调用 + chain assigner 四路分发;记录调用序。"""
+    """The three kinds of write-path call plus the chain assigner, dispatched four ways;
+    records the call order."""
 
     def __init__(self, episode=(), atoms=(), assign=()):
         self.q = {"episode": list(episode), "atoms": list(atoms), "assign": list(assign)}
@@ -35,16 +38,16 @@ class RoutingLLM:
                 else "atoms" if "atomic-memory extractor" in sysp
                 else "assign" if "chain assigner" in sysp
                 else "boundary" if "boundary detector" in sysp else "other")
-        assert kind != "other", f"未知 system prompt: {sysp[:40]}"
+        assert kind != "other", f"unknown system prompt: {sysp[:40]}"
         if kind == "boundary":
             return '{"should_end": true, "confidence": 0.9, "topic_summary": "t"}'
-        assert self.q[kind], f"未预期的 {kind} 调用(队列已空)"
+        assert self.q[kind], f"unexpected {kind} call (the queue is empty)"
         resp = self.q[kind].pop(0)
         return resp(messages[-1]["content"]) if callable(resp) else resp
 
 
 def _items(texts: list[str]):
-    """atoms + 各自向量(种子固定,可复现余弦)。"""
+    """Atoms plus their vectors (fixed seed, so the cosines are reproducible)."""
     rng = np.random.default_rng(7)
     vecs = [rng.standard_normal(8).astype(np.float32) for _ in texts]
     out = []
@@ -55,7 +58,8 @@ def _items(texts: list[str]):
 
 
 def _seeded(db, texts: list[str]):
-    """W2 语义的 items:先落库(判链的前置是 atoms 已存在),再返回 (atom, vec) 对。"""
+    """Items with W2 semantics: persist first (chain assignment presupposes the atoms already
+    exist), then return the (atom, vec) pairs."""
     at = AtomStore(db)
     items = _items(texts)
     for a, v in items:
@@ -70,10 +74,11 @@ def _chain_with_atom(db, title: str, text: str, vec):
     return cs.create_chain(ChainInfo(title=title), a, centroid=vec), a
 
 
-# —— 判链本体 ——
+# -- Chain assignment proper --
 
 def test_new_chain_grouping(db):
-    """零链起步:LLM 把三 atom 归一条新链,成员按格内序、质心=组均值。"""
+    """Starting from zero chains: the LLM groups all three atoms into one new chain, members
+    keep their within-cell order, and the centroid is the group mean."""
     cs = ChainStore(db)
     items = _seeded(db, ["Caroline 每周三练热瑜伽", "Caroline 的瑜伽馆在 MBS",
                          "Caroline 说瑜伽课强度很大"])
@@ -91,14 +96,16 @@ def test_new_chain_grouping(db):
 
 
 def test_append_existing_prefilter_and_centroid(db, rng_vec):
-    """归入既有链:预筛候选进 prompt、追加落库、组级增量质心。"""
+    """Appending to an existing chain: the pre-filtered candidates make it into the prompt, the
+    append is persisted, and the centroid is updated incrementally at group level."""
     at, cs = AtomStore(db), ChainStore(db)
     old_vec = rng_vec(1)
     ch0, _ = _chain_with_atom(db, "Caroline 的瑜伽馆", "Caroline 的瑜伽馆在 MBS", old_vec)
 
     items = _seeded(db, ["Caroline 的瑜伽馆搬到了 Marina Bay(2026-08-20)",
                          "Caroline 每周三练热瑜伽"])
-    # 候选链标签按建链时间序;用 callable 从 prompt 里认出目标链标签
+    # Candidate chain labels follow chain creation order; the callable picks the target label
+    # back out of the prompt.
     def pick(prompt):
         label = next(l for l in ("c1", "c2") if f"{l} · Caroline 的瑜伽馆" in prompt)
         return json.dumps({"assignments": [{"chain": label, "atoms": [1]}]})
@@ -114,7 +121,8 @@ def test_append_existing_prefilter_and_centroid(db, rng_vec):
 
 
 def test_conservative_hallucinated_label(db):
-    """幻觉链标签 → 相关 atom 留游离,不建链不追加(保守律:宁漏勿错)。"""
+    """A hallucinated chain label leaves the affected atom free: no chain is created and
+    nothing is appended (the conservative rule — better to miss than to be wrong)."""
     cs = ChainStore(db)
     _chain_with_atom(db, "已有链", "已有事实",
                      np.random.default_rng(3).standard_normal(8).astype(np.float32))
@@ -125,17 +133,19 @@ def test_conservative_hallucinated_label(db):
 
 
 def test_parse_failure_all_free(db):
-    """LLM 输出非 JSON → 全部留游离,不抛出(失败非阻塞)。"""
+    """Non-JSON output from the LLM leaves everything free and raises nothing — failure here
+    must not block the write path."""
     cs = ChainStore(db)
     items = _seeded(db, ["事实A", "事实B"])
-    llm = RoutingLLM(assign=["not-json", "still-not-json"])   # num_tries=2 都坏
+    llm = RoutingLLM(assign=["not-json", "still-not-json"])   # both num_tries=2 attempts are bad
     res = assign_chains(llm, cs, items, origin_cell_id="c")
     assert sorted(res.free) == sorted(a.id for a, _ in items)
     assert cs.list_chains() == []
 
 
 def test_unplaced_atoms_default_free(db):
-    """LLM 漏掉的 atom 默认游离(每 atom 必须显式归组,漏=新链或游离,不猜)。"""
+    """Atoms the LLM omitted default to free: every atom must be placed explicitly, and an
+    omission means a new chain or free — never a guess."""
     cs = ChainStore(db)
     items = _seeded(db, ["事实A", "事实B", "事实C"])
     llm = RoutingLLM(assign=['{"assignments":[{"chain":"new","title":"一组","atoms":[1]}]}'])
@@ -145,23 +155,25 @@ def test_unplaced_atoms_default_free(db):
 
 
 def test_execution_conflict_isolated(db):
-    """单组执行失败(双挂冲突)只丢该组,其余组照常落链。"""
+    """When one group fails to execute (a double-attachment conflict), only that group is lost;
+    the remaining groups are persisted as usual."""
     at, cs = AtomStore(db), ChainStore(db)
     ch_b, b1 = _chain_with_atom(db, "链B", "B 的事实", np.random.default_rng(5).standard_normal(8).astype(np.float32))
     fresh = _seeded(db, ["干净的新事实"])
     items = [(b1, np.random.default_rng(6).standard_normal(8).astype(np.float32))] + fresh
-    # 分组:atom1(已在链B)指到链B 追加 → expect_chain 冲突;atom2 开新链应成功
+    # The grouping: atom1 (already on chain B) is pointed at chain B for an append, which
+    # conflicts with expect_chain; atom2 opens a new chain and should succeed.
     llm = RoutingLLM(assign=[
         lambda p: json.dumps({"assignments": [
             {"chain": "c1", "atoms": [1]},
             {"chain": "new", "title": "新链", "atoms": [2]}]})])
     res = assign_chains(llm, cs, items)
     assert len(res.free) == 1 and len(res.new_chains) == 1
-    assert cs.get_chain(ch_b.id).n_atoms == 1          # 链B 未被污染
+    assert cs.get_chain(ch_b.id).n_atoms == 1          # chain B was not contaminated
     assert cs.full_chain(res.new_chains[0].id)[0].text == "干净的新事实"
 
 
-# —— build_cell 接线 ——
+# -- build_cell wiring --
 
 _EPISODE_OK = ('{"topic": "Caroline 的瑜伽安排", '
                '"episode": "Caroline 每周三练热瑜伽,瑜伽馆在 MBS。", "domains": ["D05"]}')
@@ -187,7 +199,8 @@ def _build(db, llm):
 
 
 def test_build_cell_empty_assignments_leave_atoms_free(db):
-    """LLM 判不出任何归组(assignments 空):atoms 全留游离,写入不阻塞。"""
+    """The LLM cannot place anything (assignments is empty): every atom stays free and the
+    write path is not blocked."""
     llm = RoutingLLM(episode=[_EPISODE_OK], atoms=[_ATOMS_OK],
                      assign=['{"assignments": []}'])
     cb = _build(db, llm)
@@ -196,7 +209,8 @@ def test_build_cell_empty_assignments_leave_atoms_free(db):
 
 
 def test_build_cell_chains(db):
-    """W2 落库后接 W2.5,两条属性各自成链(属性拆分→分链的地基)。"""
+    """W2.5 runs after W2 persistence, and the two attributes each form their own chain — the
+    foundation for splitting attributes into separate chains."""
     llm = RoutingLLM(episode=[_EPISODE_OK], atoms=[_ATOMS_OK], assign=[_ASSIGN_OK])
     cb = _build(db, llm)
     assert cb.chain_assign is not None

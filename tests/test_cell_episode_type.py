@@ -1,6 +1,8 @@
-"""episode_type 存储 + 分页检索单测:写列往返 / 按类型过滤 / 时间范围 / 分页 / 倒序 / user 隔离。
+"""Unit tests for episode_type storage plus paged retrieval: column round-trip / filtering by
+type / time range / pagination / descending order / per-user isolation.
 
-共享 SIT 库,autouse db fixture 已把每个测试包进 rollback_scope(零污染)。
+These run against a shared database; the autouse db fixture already wraps each test in a
+rollback scope, so nothing is left behind.
 """
 
 from __future__ import annotations
@@ -27,7 +29,7 @@ def test_episode_type_round_trip(db):
 
 def test_default_unknown(db):
     cs = CellStore(db, user_id="u_et_def")
-    c = MemCell(session_id="s", topic="t", episode="e", t_start=now())   # 不给 episode_type
+    c = MemCell(session_id="s", topic="t", episode="e", t_start=now())   # no episode_type given
     cs.upsert(c)
     assert cs.get(c.id).episode_type == "unknown"
 
@@ -39,10 +41,10 @@ def test_list_by_type_filters_and_desc(db):
     _cell(cs, "s", "b", "work", base + timedelta(minutes=5))
     _cell(cs, "s", "c", "health", base + timedelta(minutes=10))
     work = cs.list_by_type(episode_type="work", limit=20, offset=0)
-    assert [c.topic for c in work] == ["b", "a"]                # 只 work,且 t_start 倒序
+    assert [c.topic for c in work] == ["b", "a"]                # work only, and t_start descending
     assert cs.count_by_type(episode_type="work") == 2
     assert cs.count_by_type(episode_type="health") == 1
-    assert cs.count_by_type() == 3                              # 不传类型 = 全部
+    assert cs.count_by_type() == 3                              # no type argument = everything
 
 
 def test_time_range_filter(db):
@@ -54,7 +56,7 @@ def test_time_range_filter(db):
     lo = (base + timedelta(minutes=30)).isoformat()
     hi = (base + timedelta(minutes=90)).isoformat()
     got = cs.list_by_type(start=lo, end=hi, limit=20, offset=0)
-    assert [c.topic for c in got] == ["mid"]                   # 只落在 [lo,hi] 的
+    assert [c.topic for c in got] == ["mid"]                   # only the one falling in [lo, hi]
     assert cs.count_by_type(start=lo, end=hi) == 1
 
 
@@ -62,16 +64,17 @@ def test_pagination(db):
     cs = CellStore(db, user_id="u_et_page")
     base = now()
     for i in range(5):
-        _cell(cs, "s", f"m{i}", "t", base + timedelta(minutes=i))   # m4 最新
+        _cell(cs, "s", f"m{i}", "t", base + timedelta(minutes=i))   # m4 is the newest
     page1 = cs.list_by_type(episode_type="t", limit=2, offset=0)
     page2 = cs.list_by_type(episode_type="t", limit=2, offset=2)
-    assert [c.topic for c in page1] == ["m4", "m3"]            # 倒序第 1 页
-    assert [c.topic for c in page2] == ["m2", "m1"]            # 第 2 页
+    assert [c.topic for c in page1] == ["m4", "m3"]            # page 1, descending
+    assert [c.topic for c in page2] == ["m2", "m1"]            # page 2
     assert cs.count_by_type(episode_type="t") == 5
 
 
 def test_episode_vo_shape():
-    """VO 只暴露段粒度对外字段(id/会话/起止/主题/叙事/分类),不含 payload/atoms/向量。"""
+    """The VO exposes only the segment-level public fields (id / session / start and end /
+    topic / episode / type); no payload, atoms, or vectors."""
     from server.api import _episode_vo
     base = now()
     c = MemCell(session_id="s1", topic="lunch", episode="had ramen", episode_type="food",
@@ -81,7 +84,7 @@ def test_episode_vo_shape():
                   "start_time": base.isoformat(), "end_time": (base + timedelta(minutes=2)).isoformat(),
                   "topic": "lunch", "episode": "had ramen", "episode_type": "food"}
     assert set(vo) == {"memcell_id", "session_id", "start_time", "end_time",
-                       "topic", "episode", "episode_type"}   # 不多下发
+                       "topic", "episode", "episode_type"}   # nothing extra is shipped
 
 
 def test_episode_vo_null_times():
@@ -95,5 +98,6 @@ def test_user_isolation(db):
     cb = CellStore(db, user_id="u_et_b")
     _cell(ca, "s", "a-cell", "shared", now())
     _cell(cb, "s", "b-cell", "shared", now())
-    assert [c.topic for c in ca.list_by_type(episode_type="shared")] == ["a-cell"]   # 各看各的
+    # Each user only sees their own.
+    assert [c.topic for c in ca.list_by_type(episode_type="shared")] == ["a-cell"]
     assert cb.count_by_type(episode_type="shared") == 1

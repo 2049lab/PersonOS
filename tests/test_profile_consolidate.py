@@ -1,5 +1,6 @@
-"""consolidate 单测(干净结构 + 短/长 id 映射):成功 / 打回后成功 / 保留旧版 /
-非 JSON 重试 / 无 cell 空转 / 超限打回 / 短标回填成真实 cell_id。"""
+"""Unit tests for consolidate (clean structure + short/long id mapping): success / success
+after a bounce / keeping the old version / retry on non-JSON / no-op when there are no cells /
+bounce on exceeding the limit / short labels resolved back to real cell_ids."""
 
 from __future__ import annotations
 
@@ -40,13 +41,14 @@ def test_consolidate_success_and_source_remap():
     assert p is not None
     t = p.traits["communication_style"]
     assert t.text == "direct and terse" and t.last_confirmed == "2026-09-14"
-    assert t.sources == ["cell_LONG_ULID_1"]              # 短标 c1 → 真实长 id 回填
+    # The short label c1 is resolved back to the real long id.
+    assert t.sources == ["cell_LONG_ULID_1"]
     assert [f.text for f in p.facts["today"]] == ["2026-09-14 had ramen, dislikes cilantro"]
     assert p.facts["today"][0].sources == ["cell_LONG_ULID_1"]
 
 
 def test_consolidate_bounces_then_succeeds():
-    """首版坏 status → 打回;次版合法 → 成功。"""
+    """The first version has a bad status and gets bounced; the second is legal and succeeds."""
     cells, atoms = _cells()
     bad = _patch(traits={"goals": {"text": "x", "status": "maybe", "sources": ["c1"]}})
     good = _patch(traits={"goals": {"text": "ship the memory service", "status": "confirmed",
@@ -57,7 +59,8 @@ def test_consolidate_bounces_then_succeeds():
 
 
 def test_consolidate_field_invalid_keeps_old():
-    """字段级打回上限仍不过(幻觉出处)→ None(保留旧版)。"""
+    """Still failing field-level validation after the retry budget is spent (a hallucinated
+    source) returns None, which keeps the old version."""
     cells, atoms = _cells()
     bad = _patch(facts={"add": [{"band": "today", "text": "x", "sources": ["c_ghost"]}]})
     p = consolidate(FakeLLM([bad, bad, bad]), current=None, cells=cells, atoms_by_cell=atoms,
@@ -66,13 +69,15 @@ def test_consolidate_field_invalid_keeps_old():
 
 
 def test_consolidate_overflow_bounces_then_backstop():
-    """LLM 反复往 today 塞 2 条(超上限 1)→ 打回;仍不收敛 → 引擎踢最旧兜底后出版(非 None)。"""
+    """The LLM keeps stuffing 2 entries into today (the limit is 1), so it gets bounced. When it
+    still does not converge, the engine drops the oldest as a backstop and publishes anyway
+    (so the result is not None)."""
     cells, atoms = _cells()
     over = _patch(facts={"add": [{"band": "today", "text": "a", "sources": ["c1"]},
                                  {"band": "today", "text": "b", "sources": ["c1"]}]})
     p = consolidate(FakeLLM([over, over, over]), current=None, cells=cells, atoms_by_cell=atoms,
                     today=TODAY, max_retries=2)
-    assert p is not None and len(p.facts["today"]) == 1   # 兜底收敛到上限
+    assert p is not None and len(p.facts["today"]) == 1   # the backstop converged to the limit
 
 
 def test_consolidate_non_json_then_valid():
@@ -90,7 +95,8 @@ def test_consolidate_no_cells_returns_none():
 
 
 def test_consolidate_preserves_existing_via_patch():
-    """补丁只改一个域,当前画像其余内容保留(增量语义端到端)。"""
+    """The patch touches only one domain and everything else in the current profile survives —
+    the incremental semantics, end to end."""
     cells, atoms = _cells()
     from personos.storage.profile_store import ProfileTrait
     cur = UserProfile.empty()
@@ -98,9 +104,10 @@ def test_consolidate_preserves_existing_via_patch():
                                           last_confirmed="2026-01-01", sources=["cell_0"])
     patch = _patch(traits={"occupation": {"text": "engineer", "status": "confirmed", "sources": ["c1"]}})
     p = consolidate(FakeLLM([patch]), current=cur, cells=cells, atoms_by_cell=atoms, today=TODAY)
-    assert p.traits["location"].text == "Singapore"       # 未提域保留
+    assert p.traits["location"].text == "Singapore"       # an unmentioned domain is preserved
     assert p.traits["occupation"].text == "engineer"
 
 
-# 放最后:import 在文件头会与 conftest 顺序无关,这里就近引用
+# Kept at the bottom: an import at the top of the file would be order-dependent with conftest,
+# so it is referenced close to where it is used.
 from .fakes import FakeLLM  # noqa: E402

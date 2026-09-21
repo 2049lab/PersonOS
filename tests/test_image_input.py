@@ -1,12 +1,18 @@
-"""图片输入写入侧单测:mock media_store + mllm,验证带图 feed 的行为。
+"""Unit tests for the image-input write path: a mock media_store plus a mock multimodal model,
+verifying how a feed carrying an image behaves.
 
-覆盖:
-- 带图消息:图存储 + 看图文本进 content_inline + modality 正确 + 看图 purpose 带上下文;
-- 图文混排:用户配文与图片理解文本合并,modality=mixed;
-- 纯图无配文:modality=image;
-- 看图产文本后,W2 照常从文本抽 atom(图片记忆并入统一文本流);
-- 降级:mllm 不可用 / 看图返回空 / 存储失败 —— 均不阻塞写入,纯文本链路语义不变;
-- 未注入 media_store/mllm 时(纯文本部署)带图也不炸。
+Covers:
+- A message with an image: the image is stored, the image-understanding text goes into
+  content_inline, modality is correct, and the look-at-image purpose carries context;
+- Mixed image and text: the user's caption and the image-understanding text are merged, and
+  modality is mixed;
+- An image with no caption: modality is image;
+- Once the image has produced text, W2 extracts atoms from that text as usual (image memory
+  merges into the one unified text stream);
+- Degradation: the multimodal model being unavailable / image understanding returning empty /
+  storage failing — none of these block the write, and the text-only path keeps its semantics;
+- With no media_store or multimodal model injected (a text-only deployment), sending an image
+  still must not blow up.
 """
 
 from __future__ import annotations
@@ -22,7 +28,7 @@ from .fakes import FakeEmbedder
 
 _T0 = datetime(2026, 8, 25, 10, 0)
 
-# —— 复用 test_write_path 的路由式假 LLM 响应 ——
+# -- Reuses the routing-style fake LLM responses from test_write_path --
 BOUNDARY_KEEP = '{"should_end": false, "confidence": 0.8, "topic_summary": "健身"}'
 BOUNDARY_END = '{"should_end": true, "confidence": 0.9, "topic_summary": "健身"}'
 EPISODE_OK = ('{"topic": "用户在健身房练腿", '
@@ -33,7 +39,8 @@ ATOMS_OK = ('{"atoms": [{"text": "用户今天在健身房练腿", "object_type"
 
 
 class RoutingLLM:
-    """按 system prompt 特征路由到 boundary/episode/atoms 三队列(仿 test_write_path)。"""
+    """Routes on features of the system prompt into the boundary / episode / atoms queues
+    (mirrors test_write_path)."""
 
     def __init__(self, boundary=(), episode=(), atoms=()):
         self.q = {"boundary": list(boundary), "episode": list(episode), "atoms": list(atoms)}
@@ -44,9 +51,9 @@ class RoutingLLM:
         kind = ("boundary" if "boundary detector" in sysp
                 else "episode" if "episode weaver" in sysp
                 else "atoms" if "atomic-memory extractor" in sysp else "other")
-        assert kind != "other", f"未知 system prompt: {sysp[:40]}"
+        assert kind != "other", f"unknown system prompt: {sysp[:40]}"
         self.calls.append(kind)
-        assert self.q[kind], f"未预期的 {kind} 调用(队列已空)"
+        assert self.q[kind], f"unexpected {kind} call (the queue is empty)"
         resp = self.q[kind].pop(0)
         return resp(messages[-1]["content"]) if callable(resp) else resp
 
@@ -58,7 +65,7 @@ class FakeStored:
 
 
 class FakeMediaStore:
-    """记录存了什么,返回可预期的 key/sha。"""
+    """Records what was stored and returns a predictable key and sha."""
 
     def __init__(self, fail=False):
         self.fail = fail
@@ -72,7 +79,8 @@ class FakeMediaStore:
 
 
 class FakeMllm:
-    """记录看图的 purpose;按预设返回文本(空串=看不出/失败降级)。"""
+    """Records the purpose it was asked to look at the image for, and returns preset text (an
+    empty string means it could not tell, i.e. the degraded case)."""
 
     def __init__(self, text="图片显示腿举器械和杠铃片。", available=True):
         self.text = text
@@ -103,28 +111,31 @@ class Env:
 IMG = b"\xff\xd8\xff\xe0fake-jpeg-bytes"
 
 
-# —— 带图写入:存储 + 看图 + 落库 ——
+# -- Writing with an image: store, understand, persist --
 
 def test_image_stored_and_understood_into_content_inline(db):
-    """带图配文:存 OSS、看图文本并进 content_inline、modality=mixed、content_ref/sha 落库。"""
+    """An image with a caption: stored in object storage, the understanding text also goes into
+    content_inline, modality is mixed, and content_ref plus sha are persisted."""
     env = Env(db)
     ms, ml = FakeMediaStore(), FakeMllm(text="图片显示腿举器械。")
     llm = RoutingLLM(boundary=[BOUNDARY_KEEP])
-    # 段首句:无界可判(不调 boundary),但仍会存图+看图
+    # First sentence of a segment: there is no boundary to judge yet (boundary is not called),
+    # but the image is still stored and understood.
     w = env.writer(llm, media_store=ms, mllm=ml)
     r = w.feed("user", "今天练腿", now_dt=_T0, image=IMG)
 
     rec = env.ev.get(r.evidence_id)
-    assert rec.modality == "mixed"                    # 有配文 + 有图
+    assert rec.modality == "mixed"                    # both a caption and an image
     assert rec.content_ref == "personos/u-img/deadbeef.jpg"
     assert rec.sha256 == "deadbeef"
-    assert "今天练腿" in rec.content_inline            # 用户配文保留
-    assert "腿举器械" in rec.content_inline            # 图片理解文本并入
-    assert ms.saved and ms.saved[0][1] == "u-img"     # 存图带 owner
+    assert "今天练腿" in rec.content_inline            # the user's caption is preserved
+    assert "腿举器械" in rec.content_inline            # the image-understanding text is merged in
+    assert ms.saved and ms.saved[0][1] == "u-img"     # the image is stored with its owner
 
 
 def test_pure_image_no_caption_modality_image(db):
-    """纯图无配文:modality=image,content_inline 只含图片理解文本。"""
+    """An image with no caption: modality is image and content_inline holds only the
+    image-understanding text."""
     env = Env(db)
     ms, ml = FakeMediaStore(), FakeMllm(text="一张海边日落的照片。")
     w = env.writer(RoutingLLM(boundary=[BOUNDARY_KEEP]), media_store=ms, mllm=ml)
@@ -135,48 +146,55 @@ def test_pure_image_no_caption_modality_image(db):
 
 
 def test_look_image_purpose_carries_segment_context(db):
-    """看图 purpose 带上本段已有对话上下文(带目的看图,非漫无目的描述)。"""
+    """The look-at-image purpose carries the conversation so far in this segment, so the model
+    looks with a goal rather than describing aimlessly."""
     env = Env(db)
     ms, ml = FakeMediaStore(), FakeMllm()
     w = env.writer(RoutingLLM(boundary=[BOUNDARY_KEEP, BOUNDARY_KEEP]), media_store=ms, mllm=ml)
-    w.feed("user", "我最近在减脂", now_dt=_T0)                       # 段首,建立上下文
-    w.feed("user", "看我今天的训练", now_dt=_T0, image=IMG)          # 第二句带图
-    assert ml.purposes, "应调用过看图"
-    # 第二句看图时,purpose 里应带上第一句的上下文
+    w.feed("user", "我最近在减脂", now_dt=_T0)                       # segment start, establishes context
+    w.feed("user", "看我今天的训练", now_dt=_T0, image=IMG)          # second message carries the image
+    assert ml.purposes, "image understanding should have been called"
+    # When looking at the image for the second message, the purpose should carry the context
+    # from the first one.
     assert "减脂" in ml.purposes[-1]
 
 
 def test_image_text_flows_into_w2_atoms(db):
-    """图片理解文本进 content_inline 后,段闭合时 W2 照常从文本抽 atom(统一文本流)。"""
+    """Once the image-understanding text is in content_inline, W2 extracts atoms from that text
+    as usual when the segment closes (the one unified text stream)."""
     env = Env(db)
     ms, ml = FakeMediaStore(), FakeMllm(text="照片显示腿举器械。")
-    # 段首带图 → 再来一句触发边界闭合 → W2 建 cell 抽 atom
+    # An image at the start of a segment, then another message triggers the boundary close, so
+    # W2 builds a cell and extracts atoms.
     llm = RoutingLLM(boundary=[BOUNDARY_END], episode=[EPISODE_OK], atoms=[ATOMS_OK])
     w = env.writer(llm, media_store=ms, mllm=ml)
-    w.feed("user", "今天练腿", now_dt=_T0, image=IMG)                # 段首句(不调 boundary)
-    r = w.feed("user", "换个话题,晚饭吃啥", now_dt=_T0)              # 触发闭合
+    w.feed("user", "今天练腿", now_dt=_T0, image=IMG)                # segment start (boundary not called)
+    r = w.feed("user", "换个话题,晚饭吃啥", now_dt=_T0)              # triggers the close
     assert r.closed_cell is not None
     atoms = env.atoms.list_by_cell(r.closed_cell.cell.id)
-    assert len(atoms) >= 1                                          # W2 从(含图片文本的)段抽出 atom
+    # W2 extracted atoms from the segment, image-derived text included.
+    assert len(atoms) >= 1
     assert llm.calls.count("episode") == 1 and llm.calls.count("atoms") == 1
 
 
-# —— 降级:任何一环失败都不阻塞写入 ——
+# -- Degradation: a failure at any link must not block the write --
 
 def test_mllm_unavailable_degrades_to_text(db):
-    """MLLM 不可用:仍存图(留底),但无理解文本,content_inline 只有配文,写入不炸。"""
+    """The multimodal model is unavailable: the image is still stored (kept on file) but there
+    is no understanding text, so content_inline holds only the caption and the write survives."""
     env = Env(db)
     ms, ml = FakeMediaStore(), FakeMllm(available=False)
     w = env.writer(RoutingLLM(boundary=[BOUNDARY_KEEP]), media_store=ms, mllm=ml)
     r = w.feed("user", "看这张图", now_dt=_T0, image=IMG)
     rec = env.ev.get(r.evidence_id)
-    assert rec.content_ref == "personos/u-img/deadbeef.jpg"        # 原图仍留底
-    assert rec.content_inline == "看这张图"                         # 无理解文本,只配文
+    assert rec.content_ref == "personos/u-img/deadbeef.jpg"        # the original image is still on file
+    assert rec.content_inline == "看这张图"                         # no understanding text, just the caption
     assert rec.modality == "mixed"
 
 
 def test_mllm_returns_empty_no_image_text_appended(db):
-    """看图返回空(看不出与目的相关):不追加图片文本,只保留配文。"""
+    """Image understanding returns empty (nothing relevant to the purpose): append no image
+    text, keep only the caption."""
     env = Env(db)
     ms, ml = FakeMediaStore(), FakeMllm(text="")
     w = env.writer(RoutingLLM(boundary=[BOUNDARY_KEEP]), media_store=ms, mllm=ml)
@@ -187,32 +205,37 @@ def test_mllm_returns_empty_no_image_text_appended(db):
 
 
 def test_storage_failure_still_understands(db):
-    """存储失败:原图不留底(content_ref 空),但看图理解仍进行,写入不阻塞。"""
+    """Storage fails: the original image is not kept on file (content_ref is empty), but image
+    understanding still runs and the write is not blocked."""
     env = Env(db)
     ms, ml = FakeMediaStore(fail=True), FakeMllm(text="图片显示一只猫。")
     w = env.writer(RoutingLLM(boundary=[BOUNDARY_KEEP]), media_store=ms, mllm=ml)
     r = w.feed("user", "我的猫", now_dt=_T0, image=IMG)
     rec = env.ev.get(r.evidence_id)
-    assert rec.content_ref is None                                  # 没留底
-    assert "一只猫" in rec.content_inline                           # 但理解不丢
-    assert rec.modality == "mixed"                                 # 有配文+有图(存储失败不改这点)
+    assert rec.content_ref is None                                  # nothing kept on file
+    assert "一只猫" in rec.content_inline                           # but the understanding is not lost
+    # Caption plus image; a storage failure does not change that.
+    assert rec.modality == "mixed"
 
 
 def test_no_media_deps_image_ignored_gracefully(db):
-    """未注入 media_store/mllm(纯文本部署):带图不炸,退化为纯文本证据。"""
+    """No media_store or multimodal model injected (a text-only deployment): an image does not
+    blow up, it degrades to plain text evidence."""
     env = Env(db)
-    w = env.writer(RoutingLLM(boundary=[BOUNDARY_KEEP]))            # 不给 media_store/mllm
+    w = env.writer(RoutingLLM(boundary=[BOUNDARY_KEEP]))            # no media_store, no mllm
     r = w.feed("user", "带了图但服务没开图片能力", now_dt=_T0, image=IMG)
     rec = env.ev.get(r.evidence_id)
-    assert rec.modality == "mixed"                                 # 有配文+有图(标记有图,即便没能力处理)
+    # Caption plus image: the presence of an image is recorded even with no ability to process it.
+    assert rec.modality == "mixed"
     assert rec.content_ref is None
     assert rec.content_inline == "带了图但服务没开图片能力"
 
 
-# —— 纯文本零影响:不带图时行为与改动前完全一致 ——
+# -- Zero impact on text-only: without an image, behaviour is exactly what it was before --
 
 def test_text_only_unchanged(db):
-    """不带图:modality=text、content_ref 空,不触碰 media_store/mllm。"""
+    """No image: modality is text, content_ref is empty, and neither media_store nor the
+    multimodal model is touched."""
     env = Env(db)
     ms, ml = FakeMediaStore(), FakeMllm()
     w = env.writer(RoutingLLM(boundary=[BOUNDARY_KEEP]), media_store=ms, mllm=ml)
@@ -220,4 +243,5 @@ def test_text_only_unchanged(db):
     rec = env.ev.get(r.evidence_id)
     assert rec.modality == "text" and rec.content_ref is None
     assert rec.content_inline == "纯文字消息"
-    assert ms.saved == [] and ml.purposes == []                    # 无图不调图片依赖
+    # With no image, the image dependencies are not called at all.
+    assert ms.saved == [] and ml.purposes == []

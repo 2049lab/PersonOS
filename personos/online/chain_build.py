@@ -1,13 +1,17 @@
-"""W2.5 判链(docs/atom-chain-design.md §4.2):新 atom 归入既有链或开新链。
+"""W2.5 chain assignment (docs/atom-chain-design.md §4.2): put each new atom onto an existing chain
+or start a new one.
 
-挂在 build_cell 的 upsert_many 之后,每格一次批量 LLM:
-预筛(atom 向量 vs 链质心余弦,每 atom top-5)→ 一次 LLM 分组裁决 → 落库。
+Runs right after build_cell's upsert_many, one batched LLM call per cell:
+prefilter (cosine between atom vector and chain centroid, top-5 per atom) -> one LLM grouping
+decision -> persist.
 
-保守律是硬规则:拿不准就开新链。漏连只是退回现状(过采样兜底能救);
-错连是投毒(链扩展把无关事实带进材料)。判链器只追加——不合链、不移动、不删成员。
+The conservative law is a hard rule: when in doubt, start a new chain. A missed link only falls back
+to the status quo (retrieval oversampling can still save it); a wrong link is poison (chain expansion
+drags an unrelated fact into the material). The assigner only appends — it never merges chains, moves
+members, or deletes them.
 
-失败非阻塞:LLM 解析失败/超时 → 本格 atom 全部留游离,记 WARNING;
-链是派生索引,绝不阻塞写入主链。
+Failures are non-blocking: an LLM parse failure or timeout leaves every atom of this cell free-floating
+and logs a WARNING; a chain is a derived index and must never block the main write path.
 """
 
 from __future__ import annotations
@@ -21,17 +25,17 @@ from ..models import ChainInfo, MemoryAtom
 from ..storage.chain_store import ChainStore
 from .llm import ChatLLM, chat_json
 
-_CANDIDATES_PER_ATOM = 5   # 预筛:每 atom 候选链上限(链数不足时全给)
-_TAIL_CONTEXT = 8          # 候选链给 LLM 看的链尾侧成员数(同链近况)
+_CANDIDATES_PER_ATOM = 5   # prefilter: max candidate chains per atom (all of them when there are fewer)
+_TAIL_CONTEXT = 8          # how many members from the tail of a candidate chain the LLM sees (recent state of that chain)
 
 
 @dataclass
 class ChainAssignResult:
-    """一格的判链产物(工作台透视/测试断言用)。"""
+    """What chain assignment produced for one cell (for workbench inspection and test assertions)."""
     origin_cell_id: str = ""
     new_chains: list[ChainInfo] = field(default_factory=list)
-    appended: dict[str, int] = field(default_factory=dict)   # chain_id -> 本格追加数
-    free: list[str] = field(default_factory=list)            # 留游离的 atom id
+    appended: dict[str, int] = field(default_factory=dict)   # chain_id -> number appended from this cell
+    free: list[str] = field(default_factory=list)            # ids of atoms left free-floating
 
     @property
     def assigned(self) -> int:
@@ -72,14 +76,17 @@ venue either.
 def _prefilter(items: list[tuple[MemoryAtom, np.ndarray]],
                chains: list[tuple[ChainInfo, np.ndarray | None]],
                ) -> dict[int, list[int]]:
-    """每 atom 取质心余弦 top-5 候选链(返回 atom 序号 -> 候选在 chains 里的下标列表)。
+    """Take the top-5 candidate chains per atom by centroid cosine (returns atom index -> list of
+    indices into `chains`).
 
-    纯 numpy,零 LLM。无质心的链不进预筛(靠 recompute 补质心后自然回归)。
+    Pure numpy, no LLM. Chains without a centroid stay out of the prefilter (they come back on their
+    own once recompute fills the centroid in).
     """
     usable = [(i, c) for i, (_, c) in enumerate(chains) if c is not None]
     per: dict[int, list[int]] = {}
     for k, (_, vec) in enumerate(items):
-        # 余弦保持 float 排序:余弦域 [-1,1],任何取整都会塌成 0 使排序退化为按下标
+        # Keep the cosine as a float for sorting: cosine lives in [-1,1], so any rounding collapses
+        # it to 0 and the sort degenerates into ordering by index
         scores = [(float(np.dot(vec, c) / (np.linalg.norm(vec) * np.linalg.norm(c) + 1e-9)), i)
                   for i, c in usable]
         scores.sort(reverse=True)
@@ -88,7 +95,8 @@ def _prefilter(items: list[tuple[MemoryAtom, np.ndarray]],
 
 
 def _render_candidates(chains: list[ChainInfo], idxs: list[int], store: ChainStore) -> str:
-    """候选链渲染:标签 + title + 链尾侧最近 ≤8 个成员文本(同链近况,判归入的依据)。"""
+    """Render a candidate chain: label + title + the text of the last <=8 members at the tail (the
+    recent state of that chain, which is what the join decision is based on)."""
     blocks = []
     for n, i in enumerate(idxs, start=1):
         info = chains[i]
@@ -102,11 +110,13 @@ def _render_candidates(chains: list[ChainInfo], idxs: list[int], store: ChainSto
 def assign_chains(llm: ChatLLM, store: ChainStore,
                   items: list[tuple[MemoryAtom, np.ndarray]], *, origin_cell_id: str = "",
                   ) -> ChainAssignResult:
-    """一格新 atom 的判链入口。任何失败只降级(留游离),不抛出。"""
+    """Entry point for assigning the new atoms of one cell. Any failure only degrades (atoms are left
+    free-floating); nothing is raised."""
     res = ChainAssignResult(origin_cell_id=origin_cell_id)
     if not items:
         return res
-    # 建链时间序:标签 c1..cN 稳定(链表 SELECT 无序,不排则标签逐次漂移)
+    # Order by chain creation time so the c1..cN labels are stable (the chain SELECT is unordered, so
+    # without sorting the labels drift from call to call)
     chains = sorted(store.list_chains(), key=lambda p: (p[0].created_at.isoformat(), p[0].id))
     per = _prefilter(items, chains)
     union = sorted({i for cands in per.values() for i in cands})
@@ -129,8 +139,8 @@ def assign_chains(llm: ChatLLM, store: ChainStore,
                                     {"role": "user", "content": user}], max_tokens=1500, num_tries=2,
                               stage="chain_assign")
         groups = _parse_groups(data.get("assignments"), len(items))
-    except Exception as e:   # noqa: BLE001  判链失败不阻塞写入:本格全留游离
-        logger.warning(f"W2.5 判链失败,本格 {len(items)} atoms 留游离: {e}")
+    except Exception as e:   # noqa: BLE001  a failed assignment must not block the write: leave this whole cell free-floating
+        logger.warning(f"W2.5 chain assignment failed, leaving this cell's {len(items)} atoms unchained: {e}")
         res.free = [a.id for a, _ in items]
         return res
 
@@ -139,15 +149,16 @@ def assign_chains(llm: ChatLLM, store: ChainStore,
     groups_detail = "; ".join(
         f"{label}«{title or '?'}»→{[items[k - 1][0].text for k in nums]}"
         for label, title, nums in groups)
-    logger.info(f"W2.5 判链 cell={origin_cell_id} atoms={len(items)} "
+    logger.info(f"W2.5 chain assignment cell={origin_cell_id} atoms={len(items)} "
                 f"new={len(res.new_chains)} appended={sum(res.appended.values())} free={len(res.free)}\n"
-                f"  分组: {groups_detail}\n"
-                f"  游离(n={len(res.free)}): {[id2text.get(f, f) for f in res.free]}")
+                f"  groups: {groups_detail}\n"
+                f"  unchained(n={len(res.free)}): {[id2text.get(f, f) for f in res.free]}")
     return res
 
 
 def _parse_groups(raw_groups, n_atoms: int) -> list[tuple[str, str, list[int]]]:
-    """LLM 分组 → (chain 标签, title, atom 序号列表) 列表;序号越界/重复出现以后到者忽略。"""
+    """LLM groups -> list of (chain label, title, atom index list); out-of-range indices are dropped
+    and a repeated index is ignored on every appearance after the first."""
     out, seen = [], set()
     for g in raw_groups or []:
         if not isinstance(g, dict):
@@ -172,8 +183,10 @@ def _execute(store: ChainStore, items: list[tuple[MemoryAtom, np.ndarray]],
              groups: list[tuple[str, str, list[int]]], label2idx: dict[str, int],
              chains: list[tuple[ChainInfo, np.ndarray]],
              res: ChainAssignResult) -> None:
-    """落库:开新链 / 追加既有链。单组失败只丢该组(已追加成员无害),不挡其余。"""
-    # 既有链目标先按真实链 id 归并(LLM 可能拆成两组指同一链)
+    """Persist: start new chains / append to existing ones. A failing group only loses that group
+    (members already appended do no harm) and does not hold up the rest."""
+    # Merge existing-chain targets by real chain id first (the LLM may emit two groups pointing at the
+    # same chain)
     appends: dict[str, list[int]] = {}
     for label, title, nums in groups:
         if label == "new":
@@ -182,7 +195,7 @@ def _execute(store: ChainStore, items: list[tuple[MemoryAtom, np.ndarray]],
             chain_id = chains[label2idx[label]][0].id
             appends.setdefault(chain_id, []).extend(nums)
         else:
-            logger.warning(f"W2.5 忽略幻觉链标签 {label!r},相关 atom 留游离")
+            logger.warning(f"W2.5 ignoring hallucinated chain label {label!r}, its atoms are left unchained")
             res.free.extend(items[k - 1][0].id for k in nums)
     for chain_id, nums in appends.items():
         _exec_append(store, items, chain_id, nums, chains, label2idx, res)
@@ -192,7 +205,8 @@ def _execute(store: ChainStore, items: list[tuple[MemoryAtom, np.ndarray]],
 
 def _exec_new(store: ChainStore, items: list[tuple[MemoryAtom, np.ndarray]],
               nums: list[int], title: str, res: ChainAssignResult) -> None:
-    """开新链:首成员建链,其余按序追加;质心取本组成员均值。"""
+    """Start a new chain: create it from the first member and append the rest in order; the centroid
+    is the mean of this group's members."""
     atoms = [items[k - 1] for k in nums]
     first, _ = atoms[0]
     mat = np.stack([v for _, v in atoms])
@@ -200,10 +214,10 @@ def _exec_new(store: ChainStore, items: list[tuple[MemoryAtom, np.ndarray]],
     try:
         store.create_chain(info, first, centroid=mat.mean(axis=0))
         for a, _v in atoms[1:]:
-            store.append_atom(info, a, centroid=None)   # 质心建链时已含全员
+            store.append_atom(info, a, centroid=None)   # the centroid set at creation already covers every member
         res.new_chains.append(info)
-    except Exception as e:   # noqa: BLE001  半途失败:已追加成员无害,本组其余留游离
-        logger.warning(f"W2.5 开新链失败,组内 atom 留游离: {e}")
+    except Exception as e:   # noqa: BLE001  failure part-way through: members already appended do no harm, the rest of the group is left free-floating
+        logger.warning(f"W2.5 failed to start a new chain, the group's atoms are left unchained: {e}")
         res.free.extend(a.id for a, _ in atoms)
 
 
@@ -212,10 +226,11 @@ def _exec_append(store: ChainStore, items: list[tuple[MemoryAtom, np.ndarray]],
                  label2idx: dict[str, int], res: ChainAssignResult) -> None:
     info = store.get_chain(chain_id)
     if info is None:
-        logger.warning(f"W2.5 追加目标链不存在 {chain_id},atom 留游离")
+        logger.warning(f"W2.5 append target chain does not exist {chain_id}, atoms left unchained")
         res.free.extend(items[k - 1][0].id for k in nums)
         return
-    # 组级增量质心:(旧质心×旧n + 本组向量) / (旧n+本组数),整组追加完落位
+    # Group-level incremental centroid: (old centroid x old n + this group's vectors) / (old n + group
+    # size), applied once the whole group has been appended
     target = None
     old_pair = next((c for c in chains if c[0].id == chain_id), None)
     if old_pair and old_pair[1] is not None:
@@ -223,12 +238,12 @@ def _exec_append(store: ChainStore, items: list[tuple[MemoryAtom, np.ndarray]],
         mat = np.stack([items[k - 1][1] for k in nums])
         target = (np.asarray(old_pair[1], dtype=np.float32) * old_n + mat.sum(axis=0)) / (old_n + len(nums))
     ok = 0
-    for k in nums:   # 组内按格内序追加(链序=对话事实抽取的自然顺序)
+    for k in nums:   # append in within-cell order (chain order = the natural order facts were extracted from the dialogue)
         try:
             store.append_atom(info, items[k - 1][0], centroid=target)
             ok += 1
-        except Exception as e:   # noqa: BLE001  单条失败不挡同组其余
-            logger.warning(f"W2.5 追加失败 atom={items[k - 1][0].id} chain={chain_id}: {e}")
+        except Exception as e:   # noqa: BLE001  one failed member does not hold up the rest of the group
+            logger.warning(f"W2.5 append failed atom={items[k - 1][0].id} chain={chain_id}: {e}")
             res.free.append(items[k - 1][0].id)
     if ok:
         res.appended[chain_id] = res.appended.get(chain_id, 0) + ok

@@ -1,4 +1,6 @@
-"""合并引擎单测(纯逻辑,干净结构):补丁合并 / 带由 LLM 定 / 移带 / 超限兜底淘汰 / over_cap 报告。"""
+"""Merge engine unit tests (pure logic, clean structures): applying patches, letting the LLM choose the band,
+moving facts between bands, evicting as a fallback when a band overflows, and the over_cap report.
+"""
 
 from __future__ import annotations
 
@@ -14,9 +16,9 @@ def test_trait_replace_preserves_others_and_stamps_date():
                                              last_confirmed="2026-01-01", sources=["c0"])
     patch = {"traits": {"occupation": {"text": "engineer", "status": "confirmed", "sources": ["cell_1"]}}}
     p = apply_patch(cur, patch, today_str=TODAY)
-    assert p.traits["personality"].text == "calm"                 # 未提域保留
+    assert p.traits["personality"].text == "calm"                 # fields the patch did not mention are kept
     assert p.traits["occupation"].text == "engineer"
-    assert p.traits["occupation"].last_confirmed == "2026-09-14"   # 引擎盖今天
+    assert p.traits["occupation"].last_confirmed == "2026-09-14"   # the engine stamps today's date
 
 
 def test_trait_null_clears():
@@ -28,7 +30,9 @@ def test_trait_null_clears():
 
 
 def test_fact_add_goes_to_declared_band():
-    """带由 LLM 显式指定,引擎照放(不按日期机械分带)。"""
+    """The LLM states the band explicitly and the engine files the fact there as given, rather than assigning bands
+    mechanically by date.
+    """
     patch = {"facts": {"add": [
         {"band": "today", "text": "2026-09-14 had ramen", "sources": ["cell_1"]},
         {"band": "week", "text": "worked Mon–Fri on project X", "sources": ["cell_1"]},
@@ -48,8 +52,8 @@ def test_rewrite_patches_preserves_and_unions_sources():
     p = apply_patch(cur, patch, today_str=TODAY)
     f = p.facts["week"][0]
     assert f.text == "merged narrative"
-    assert f.sources == ["c0", "cell_1"]              # 求并保溯源
-    assert f.last_confirmed == "2026-09-14"           # 被 touch → 盖今天
+    assert f.sources == ["c0", "cell_1"]              # sources are unioned so provenance survives
+    assert f.last_confirmed == "2026-09-14"           # the fact was touched, so it is stamped with today
 
 
 def test_rewrite_moves_band_promote_to_long():
@@ -69,24 +73,28 @@ def test_drop_removes_fact():
 
 
 def test_enforce_caps_evicts_oldest_last_confirmed():
-    """week 上限 3:塞 4 条不同 last_confirmed → 踢最旧的那条,留最新 3。"""
+    """The week band holds at most 3: push in 4 facts with different last_confirmed dates and the oldest one is
+    evicted, leaving the 3 most recent.
+    """
     cur = UserProfile.empty()
     for i, lc in enumerate(["2026-09-10", "2026-09-11", "2026-09-12", "2026-09-13"]):
         cur.facts["week"].append(ProfileFact(id=f"f{i}", text=f"d{lc}", last_confirmed=lc, sources=["c0"]))
     enforce_caps(cur)
     texts = {f.text for f in cur.facts["week"]}
-    assert len(texts) == 3 and "d2026-09-10" not in texts   # 最旧被淘汰
+    assert len(texts) == 3 and "d2026-09-10" not in texts   # the oldest one was evicted
 
 
 def test_over_cap_reports_overflowing_bands():
     cur = UserProfile.empty()
     cur.facts["today"].append(ProfileFact(id="a", text="1", last_confirmed=TODAY, sources=["c0"]))
     cur.facts["today"].append(ProfileFact(id="b", text="2", last_confirmed=TODAY, sources=["c0"]))
-    assert over_cap(cur) == {"today": 2}              # today 上限 1,现 2 条 → 报超
+    assert over_cap(cur) == {"today": 2}              # today holds at most 1 and now has 2, so it is reported
 
 
 def test_apply_patch_evict_false_leaves_overflow_for_bounce():
-    """consolidate 循环用 evict=False:超限不淘汰,留给 over_cap 判、打回 LLM 收敛。"""
+    """The consolidate loop passes evict=False: overflow is not evicted here but left for over_cap to detect, so the
+    work can be bounced back to the LLM to converge.
+    """
     patch = {"facts": {"add": [
         {"band": "today", "text": "a", "sources": ["cell_1"]},
         {"band": "today", "text": "b", "sources": ["cell_1"]},
@@ -101,4 +109,4 @@ def test_apply_patch_does_not_mutate_input():
                                              last_confirmed="2026-01-01", sources=["c0"])
     apply_patch(cur, {"traits": {"personality": {"text": "new", "status": "confirmed", "sources": ["cell_1"]}}},
                 today_str=TODAY)
-    assert cur.traits["personality"].text == "orig"    # 入参不被改
+    assert cur.traits["personality"].text == "orig"    # the input argument is left untouched

@@ -1,11 +1,19 @@
-"""公司 Redis 接入:redinfra 服务发现连接池。
+"""Redis access through a service-discovery connection pool.
 
-- 懒加载:import 本模块不触网;首次 get_redis() 才建池(EDS 发现 corvus-<cluster>)。
-  服务/测试只要不真正用 Redis,就不需要 EDS 环境变量。
-- key 一律经 key() 构造:"{环境}:{应用}:{其余段}"。环境取 PERSONOS_ENV
-  (本地不设 → local,天然与线上键隔离),前缀使共享集群里的键可区分、可按段清理。
-- 约束:所有 key 必须带 TTL(共享集群不留常驻键)。
-- 依赖:redis-py 必须锁 6.x——redinfra 0.1.19 与 8.x 的握手协议不兼容(requirements 已锁)。
+- Lazy: importing this module touches no network. The pool is built on the first
+  get_redis() call, which is when service discovery resolves the cluster. A
+  service or a test that never really uses Redis therefore needs none of the
+  discovery environment variables.
+- Every key is built through key(), as "{env}:{app}:{remaining segments}". The
+  environment comes from PERSONOS_ENV, which is unset locally and so defaults to
+  "local", keeping local keys naturally separate from deployed ones. The prefix is
+  what makes keys distinguishable inside a shared cluster and lets them be cleaned
+  up by segment.
+- A constraint: every key must carry a TTL, since a shared cluster must not
+  accumulate permanent keys.
+- A dependency constraint: redis-py must stay pinned to 6.x, because the
+  discovery pool library's handshake protocol is incompatible with 8.x. The pin
+  lives in requirements.
 """
 
 from __future__ import annotations
@@ -16,19 +24,25 @@ import threading
 from ..config import settings
 
 _lock = threading.Lock()
-_client = None   # 惰性单例;进程内共享一个连接池(后台线程自动刷新实例列表)
+_client = None   # lazy singleton; one connection pool shared per process, whose instance list a background thread refreshes
 
 
 def get_redis():
-    """取 Redis 客户端单例(首次调用建池:EDS 服务发现 + corvus 直连)。失败如实抛。"""
+    """Get the Redis client singleton.
+
+    The first call builds the pool, resolving the cluster through service
+    discovery. Failures are raised as they are.
+    """
     global _client
     if _client is None:
         with _lock:
             if _client is None:
                 import redis as _redis
                 from redinfra.redis.pool import DiscoveryBlockingConnectionPool
-                # redinfra import 期的 init_logger() 会 logger.remove() 掀翻我们的全部
-                # sink(只留它的 stdout xray sink)——建池后立即补挂文件 sink,保住落盘
+                # The pool library calls init_logger() at import time, which calls
+                # logger.remove() and tears out every sink we installed, leaving
+                # only its own stdout sink. So re-attach the file sink immediately
+                # after building the pool, or logs stop reaching disk.
                 from ..logging_setup import reinstall_file_sink
                 reinstall_file_sink(settings.log_dir)
                 _client = _redis.Redis(
@@ -38,17 +52,24 @@ def get_redis():
 
 
 def _esc(part: str) -> str:
-    """段内转义:":"→"%3A"、"%"→"%25"(顺序:先 % 后 :,防二次替换)。"""
+    """Escape within a segment: ":" becomes "%3A" and "%" becomes "%25".
+
+    The order matters — % first, then : — so the second replacement cannot rewrite
+    what the first produced.
+    """
     return part.replace("%", "%25").replace(":", "%3A")
 
 
 def key(*parts: str) -> str:
-    """规范化 key:f"{env}:personos:{parts...}",如 sit:personos:seg:u1:s1。
+    """Build a normalized key: f"{env}:personos:{parts...}", e.g. dev:personos:seg:u1:s1.
 
-    各段先做分隔符转义再拼接:段内容是调用方可控字符串(user_id/session_id),
-    不转义时 (u="a:b", s="c") 与 (u="a", s="b:c") 会拼出同一个键 = 跨用户串
-    读写(seg 键存对话原文,最高敏)。入口层另有字符白名单(session_scope),
-    这里是纵深兜底——就算某条路径漏校验,也拼不出碰撞键。
+    Each segment is separator-escaped before being joined, because segment content
+    is caller-controlled (user_id, session_id). Without escaping, (u="a:b", s="c")
+    and (u="a", s="b:c") produce the same key — which means one user reading and
+    writing another's data, and the seg keys hold raw conversation text, the most
+    sensitive thing here. There is a character whitelist at the entry layer
+    (session_scope) as well; this is defence in depth, so that even a path that
+    skips validation cannot construct a colliding key.
     """
     env = settings.env
     return f"{env}:personos:" + ":".join(_esc(p) for p in parts)

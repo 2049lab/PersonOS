@@ -1,6 +1,8 @@
-"""AK/SK 验签(signing.py):签验往返 / 篡改 / 过期 / 重放 / 未知AK / 缺头 / 守卫 no-op。
+"""AK/SK request signing (signing.py): sign-verify round trip / tampering / expiry / replay /
+unknown AK / missing headers / the guard being a no-op.
 
-纯 _verify 逻辑离线测(注入 AK/SK 缓存 + 强制内存 nonce),不连 Redis/KMS。
+The pure _verify logic is tested offline by injecting the AK-to-SK cache and forcing the
+in-memory nonce store, so neither Redis nor the key management service is contacted.
 """
 
 from __future__ import annotations
@@ -18,7 +20,8 @@ AK, SK = "rokid", "testsk-abc"
 
 @pytest.fixture(autouse=True)
 def _iso(monkeypatch):
-    """每个用例:注入 AK→SK 缓存,强制走内存 nonce(不连 Redis),用后清缓存。"""
+    """For every case: inject the AK-to-SK cache, force the in-memory nonce store (no Redis),
+    and clear the cache afterwards."""
     signing._aksk_cache = {AK: SK}
     signing._mem_nonce.clear()
     monkeypatch.setattr(signing, "settings", types.SimpleNamespace(redis_cluster=""))
@@ -27,7 +30,8 @@ def _iso(monkeypatch):
 
 
 def _signed(method, path, *, query_items=None, headers=None, body=b""):
-    """调用方视角签好,再合并成服务端拿到的(小写)头。"""
+    """Sign from the caller's point of view, then merge into the (lowercased) headers the
+    server would actually receive."""
     sh = signing.sign_request(AK, SK, method, path, query_items=query_items, headers=headers, body=body)
     merged = {**(headers or {}), **sh}
     return {k.lower(): v for k, v in merged.items()}
@@ -43,15 +47,15 @@ def test_roundtrip_ok():
 def test_tampered_body_rejected():
     body = b'{"n":1}'
     h = _signed("POST", "/api/v1/ingest", headers={"content-type": "application/json"}, body=body)
-    with pytest.raises(signing._SigError, match="签名不匹配"):
-        signing._verify("POST", "/api/v1/ingest", [], h, b'{"n":2}')   # body 被改
+    with pytest.raises(signing._SigError, match="signature mismatch"):
+        signing._verify("POST", "/api/v1/ingest", [], h, b'{"n":2}')   # the body was altered
 
 
 def test_tampered_query_rejected():
     h = _signed("GET", "/api/v1/episodes", query_items=[("page", "1")],
                 headers={"x-user-token": "tok"})
-    with pytest.raises(signing._SigError, match="签名不匹配"):
-        signing._verify("GET", "/api/v1/episodes", [("page", "2")], h, b"")   # query 被改
+    with pytest.raises(signing._SigError, match="signature mismatch"):
+        signing._verify("GET", "/api/v1/episodes", [("page", "2")], h, b"")   # the query was altered
 
 
 def test_expired_timestamp_rejected():
@@ -61,35 +65,36 @@ def test_expired_timestamp_rejected():
     canon = signing.canonical_string("GET", "/api/v1/health", [], {}, body, old, nonce)
     h = {"x-access-key": AK, "x-timestamp": old, "x-nonce": nonce,
          "x-signature": signing.sign(SK, canon), "x-signed-headers": ""}
-    with pytest.raises(signing._SigError, match="超窗"):
+    with pytest.raises(signing._SigError, match="outside the allowed window"):
         signing._verify("GET", "/api/v1/health", [], h, body)
 
 
 def test_replay_nonce_rejected():
     body = b""
     h = _signed("GET", "/api/v1/health", headers={"x-user-token": "tok"}, body=body)
-    assert signing._verify("GET", "/api/v1/health", [], h, body) == AK   # 首次通过
-    with pytest.raises(signing._SigError, match="重放"):
-        signing._verify("GET", "/api/v1/health", [], h, body)            # 同 nonce 再来 → 拒
+    assert signing._verify("GET", "/api/v1/health", [], h, body) == AK   # the first time passes
+    with pytest.raises(signing._SigError, match="replayed nonce"):
+        signing._verify("GET", "/api/v1/health", [], h, body)            # the same nonce again is rejected
 
 
 def test_unknown_ak_rejected():
     body = b""
     h = _signed("GET", "/api/v1/health", headers={"x-user-token": "tok"}, body=body)
-    h["x-access-key"] = "ghost"                                          # 换成未登记 AK
-    with pytest.raises(signing._SigError, match="未知"):
+    h["x-access-key"] = "ghost"                                          # swap in an unregistered AK
+    with pytest.raises(signing._SigError, match="unknown or disabled AK"):
         signing._verify("GET", "/api/v1/health", [], h, body)
 
 
 def test_missing_headers_rejected():
-    with pytest.raises(signing._SigError, match="缺少签名头"):
+    with pytest.raises(signing._SigError, match="missing signature headers"):
         signing._verify("GET", "/api/v1/health", [], {"x-access-key": AK}, b"")
 
 
 def test_stripped_signed_header_rejected():
-    """请求带了 x-user-token 却没纳入签名 → 拒(防剥离安全头)。"""
+    """A request that carries x-user-token but did not include it in the signature is rejected,
+    which is what stops an attacker stripping security headers."""
     body = b""
-    # 手工:签名时不含 x-user-token,但请求头里带了它
+    # Done by hand: x-user-token is left out of the signature but present in the request headers.
     ts, nonce = str(int(time.time())), "n2"
     canon = signing.canonical_string("GET", "/api/v1/recall", [], {}, body, ts, nonce)
     h = {"x-access-key": AK, "x-timestamp": ts, "x-nonce": nonce,
@@ -100,13 +105,14 @@ def test_stripped_signed_header_rejected():
 
 
 def test_aksk_empty_not_cached_selfheals(monkeypatch):
-    """map 首次空不缓存;凭证补好后下次自动加载(无需重启),之后走缓存。"""
+    """An empty map on the first read is not cached, so once the credentials are in place the
+    next call loads them automatically with no restart, and subsequent calls hit the cache."""
     signing._reset_cache()
     seq = iter(["", '{"rokid":"sk1"}', "SHOULD-NOT-BE-READ"])
     monkeypatch.setattr(signing, "get_secret", lambda *a, **k: next(seq))
-    assert signing._load_aksk() == {}                    # 空 → 不缓存
-    assert signing._load_aksk() == {"rokid": "sk1"}      # 补好 → 自愈加载
-    assert signing._load_aksk() == {"rokid": "sk1"}      # 已缓存 → 不再读 get_secret
+    assert signing._load_aksk() == {}                    # empty -> not cached
+    assert signing._load_aksk() == {"rokid": "sk1"}      # now present -> self-healing load
+    assert signing._load_aksk() == {"rokid": "sk1"}      # already cached -> get_secret is not read again
 
 
 def _req(method, path, headers, body=b""):
@@ -118,7 +124,8 @@ def _req(method, path, headers, body=b""):
 
 
 def test_dependency_rejects_unsigned():
-    """无条件强制:未签名请求 → 抛 401(不再有 env 旁路)。"""
+    """Unconditionally enforced: an unsigned request raises 401, with no environment-variable
+    bypass any more."""
     from fastapi import HTTPException
     with pytest.raises(HTTPException) as ei:
         asyncio.run(signing.verify_signature(_req("POST", "/api/v1/recall",
@@ -127,7 +134,7 @@ def test_dependency_rejects_unsigned():
 
 
 def test_dependency_passes_signed():
-    """正确签名 → 放行并把 caller_ak 写入 request.state。"""
+    """A correct signature is let through and caller_ak is written into request.state."""
     body = b'{"q":1}'
     hdrs = {"content-type": "application/json"}
     sh = signing.sign_request(AK, SK, "POST", "/api/v1/recall", headers=hdrs, body=body)

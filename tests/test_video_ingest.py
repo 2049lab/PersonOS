@@ -1,10 +1,16 @@
-"""视频消费侧机制测(mock/spy,无真模型):验证队列分派/顺序/cursor/混合交错/并发不串。
+"""Mechanism tests for the video consumer side (mocks and spies, no real models): queue
+dispatch, ordering, cursor handling, mixed interleaving, and concurrency without crosstalk.
 
-不跑真身份管线——把 video_ingest.process_clip/finalize_video 换成 spy,只验消费侧 plumbing:
-- kind 分派:video→process_clip(逐 clip)、session_end→writer.end_session + finalize_video、ingest→feed_batch;
-- 混合会话顺序 文→视频→文→session_end + 交错多批 文→clips→文→clips→end;
-- cursor 恰好==消息数(不丢不重);多 session 并发独立(各自 cursor/调用不串)。
-真身份/记忆正确性见 scripts/video/verify_pipeline(real backends)。
+The real identity pipeline is not run — video_ingest.process_clip and finalize_video are
+swapped for spies so only the consumer-side plumbing is checked:
+- kind dispatch: video goes to process_clip (one clip at a time), session_end goes to
+  writer.end_session followed by finalize_video, and ingest goes to feed_batch;
+- Mixed session ordering, text then video then text then session_end, plus interleaved batches
+  of text, clips, text, clips, end;
+- The cursor ends up exactly equal to the message count (nothing lost, nothing repeated), and
+  concurrent sessions stay independent (their cursors and calls never cross).
+Correctness of the real identity and memory behaviour is covered by
+scripts/video/verify_pipeline against real backends.
 """
 
 from __future__ import annotations
@@ -21,7 +27,7 @@ from personos.storage.session_lock import MemorySessionLock
 
 
 class _Writer:
-    """假 SessionWriter:只记 feed_batch / end_session 调用。"""
+    """A fake SessionWriter that only records feed_batch and end_session calls."""
     def __init__(self, log, sid):
         self.log, self.sid = log, sid
 
@@ -34,7 +40,8 @@ class _Writer:
 
 @pytest.fixture
 def spy(monkeypatch):
-    """spy 掉真身份管线(process_clip/finalize_video),只验分派。"""
+    """Spies out the real identity pipeline (process_clip / finalize_video) so only dispatch is
+    exercised."""
     log = []
     monkeypatch.setattr(video_ingest, "process_clip",
                         lambda deps, *, session_id, clip_key="", clip_url="", **k:
@@ -46,7 +53,8 @@ def spy(monkeypatch):
 
 @pytest.fixture
 def spy_deps(monkeypatch):
-    """同上,但额外记录 deps(用于验跨 user 隔离:deps 必须属于该消息的 user)。"""
+    """The same, but also records deps, which is what lets cross-user isolation be asserted:
+    the deps must belong to the user that message came from."""
     log = []
     monkeypatch.setattr(video_ingest, "process_clip",
                         lambda deps, *, session_id, clip_key="", clip_url="", **k:
@@ -68,20 +76,25 @@ def _txt(speaker="user", text="hi"):
 
 
 def _vid(*keys):
-    """我方 OSS key 形态(endpoint 真实会把未填的 video_url 置 None,这里如实模拟)。"""
+    """The shape for our own object-storage keys (the real endpoint sets an unfilled video_url
+    to None, which is faithfully reproduced here)."""
     return {"messages": [{"speaker": "user", "video_oss_key": k, "video_url": None,
                           "clip_index": i} for i, k in enumerate(keys)]}
 
 
 def _vid_url(*urls):
-    """外链形态:video_oss_key 为 None、video_url 有值——与 endpoint 产出的 payload 一致。
-    (回归:曾因 dict.get('video_oss_key','') 返回 None 而 TypeError,整条消息被判毒消息跳过。)"""
+    """The external-link shape: video_oss_key is None and video_url has a value, matching what
+    the endpoint produces.
+
+    (Regression: dict.get('video_oss_key', '') returned None, which raised TypeError and got
+    the whole message written off as poisonous.)"""
     return {"messages": [{"speaker": "user", "video_oss_key": None, "video_url": u,
                           "clip_index": i} for i, u in enumerate(urls)]}
 
 
 def test_mixed_session_dispatch_and_cursor(spy):
-    """文本→视频clips→文本→session_end:分派正确 + cursor==消息数。"""
+    """Text, then video clips, then text, then session_end: dispatch is correct and the cursor
+    equals the message count."""
     mq, sc = _consumer(spy)
     U, S = "u1", "s1"
     mq.enqueue(U, S, _txt(text="开场白"), kind="ingest")
@@ -90,13 +103,15 @@ def test_mixed_session_dispatch_and_cursor(spy):
     mq.enqueue(U, S, {"task_type": None}, kind="session_end")
     rep = sc.drain_session(U, S)
     assert rep.applied == 4
+    # Video is handled one clip at a time, and finalize follows end.
     assert spy == [("feed", S, 1), ("clip", S, "oss/c0.mp4"), ("clip", S, "oss/c1.mp4"),
-                   ("feed", S, 1), ("end", S), ("final", S)]   # 视频逐 clip;end 后 finalize
-    assert mq.cursor_get(U, S) == 4                            # 恰好消费 4 条
+                   ("feed", S, 1), ("end", S), ("final", S)]
+    assert mq.cursor_get(U, S) == 4                            # exactly 4 messages consumed
 
 
 def test_interleaved_video_bursts(spy):
-    """变态调用方 文→clips批1→文→clips批2→session_end:两批 clips 都进 process_clip,end 后一次 finalize。"""
+    """A pathological caller sending text, clip batch 1, text, clip batch 2, session_end: both
+    batches reach process_clip, and finalize runs once after end."""
     mq, sc = _consumer(spy)
     U, S = "u2", "s2"
     mq.enqueue(U, S, _txt(text="t1"), kind="ingest")
@@ -106,14 +121,15 @@ def test_interleaved_video_bursts(spy):
     mq.enqueue(U, S, {}, kind="session_end")
     sc.drain_session(U, S)
     clips = [c for c in spy if c[0] == "clip"]
-    assert clips == [("clip", S, "k0.mp4"), ("clip", S, "k1.mp4")]   # 两批都消费
-    assert spy.count(("final", S)) == 1                              # 只终审一次
+    assert clips == [("clip", S, "k0.mp4"), ("clip", S, "k1.mp4")]   # both batches consumed
+    assert spy.count(("final", S)) == 1                              # finalized only once
     assert spy[-1] == ("final", S) and spy[-2] == ("end", S)
     assert mq.cursor_get(U, S) == 5
 
 
 def test_concurrent_sessions_independent(spy):
-    """多 session:各自 cursor 独立==自己消息数,调用不串。"""
+    """Multiple sessions: each cursor independently equals its own message count, and calls do
+    not cross."""
     mq, sc = _consumer(spy)
     U = "u3"
     for s in ("sa", "sb"):
@@ -123,28 +139,30 @@ def test_concurrent_sessions_independent(spy):
     sc.drain_session(U, "sb")
     assert mq.cursor_get(U, "sa") == 2 and mq.cursor_get(U, "sb") == 2
     assert ("clip", "sa", "sa-c0.mp4") in spy and ("clip", "sb", "sb-c0.mp4") in spy
-    # sa 的 clip 不会带 sb 的 session_id(不串)
+    # sa's clip never carries sb's session_id.
     assert not any(c == ("clip", "sa", "sb-c0.mp4") for c in spy)
 
 
 def test_video_idempotent_no_double_consume(spy):
-    """重投幂等:同一视频消息 drain 两次,cursor 挡住不重复 process_clip。"""
+    """Redelivery is idempotent: draining the same video message twice is blocked by the
+    cursor, so process_clip does not run again."""
     mq, sc = _consumer(spy)
     U, S = "u4", "s4"
     mq.enqueue(U, S, _vid("once.mp4"), kind="video")
     sc.drain_session(U, S)
-    sc.drain_session(U, S)   # 再 drain:队列已空 + cursor 已推进
-    assert [c for c in spy if c[0] == "clip"] == [("clip", S, "once.mp4")]   # 只处理一次
+    sc.drain_session(U, S)   # drain again: the queue is empty and the cursor has advanced
+    assert [c for c in spy if c[0] == "clip"] == [("clip", S, "once.mp4")]   # handled only once
 
 
 def test_bulk_mixed_stress_no_loss_no_dup(spy):
-    """批量压测(生产>消费模型:先猛灌再消费):多 session × 多混合消息 → 各 cursor 恰好==灌入数、
-    队列排空、clip 全处理一次(不丢不重)。"""
+    """Bulk stress (a producer-faster-than-consumer model: flood first, then consume): many
+    sessions each with many mixed messages, after which every cursor equals exactly what was
+    enqueued, the queues are drained, and every clip was processed exactly once."""
     mq, sc = _consumer(spy)
     U = "ustress"
     sessions = [f"s{i}" for i in range(6)]
     per_session_msgs = {}
-    for s in sessions:                                   # 先全部猛灌(不消费)= 堆积
+    for s in sessions:                                   # flood everything first without consuming
         n = 0
         mq.enqueue(U, s, _txt(text="开"), kind="ingest"); n += 1
         mq.enqueue(U, s, _vid(f"{s}-a.mp4", f"{s}-b.mp4"), kind="video"); n += 1
@@ -152,21 +170,23 @@ def test_bulk_mixed_stress_no_loss_no_dup(spy):
         mq.enqueue(U, s, _vid(f"{s}-c.mp4"), kind="video"); n += 1
         mq.enqueue(U, s, {}, kind="session_end"); n += 1
         per_session_msgs[s] = n
-    # 消费(每 session drain 到空;drain 有 max_drain 上限,循环到 more=False)
+    # Consume: drain each session until empty. drain has a max_drain cap, so loop until
+    # more is False.
     for s in sessions:
         while sc.drain_session(U, s).more:
             pass
     for s in sessions:
-        assert mq.cursor_get(U, s) == per_session_msgs[s]        # 恰好消费自己那些,不多不少
-        assert mq.depth(U, s) == 0                               # 队列排空
+        assert mq.cursor_get(U, s) == per_session_msgs[s]        # consumed exactly its own, no more and no fewer
+        assert mq.depth(U, s) == 0                               # the queue is drained
     clips = [c for c in spy if c[0] == "clip"]
-    assert len(clips) == len(sessions) * 3                       # 每 session 3 个 clip,全处理一次
-    assert len(clips) == len({(c[1], c[2]) for c in clips})      # 无重复(不重)
-    assert sum(1 for c in spy if c[0] == "final") == len(sessions)  # 每 session 终审一次
+    assert len(clips) == len(sessions) * 3                       # 3 clips per session, each processed once
+    assert len(clips) == len({(c[1], c[2]) for c in clips})      # no duplicates
+    assert sum(1 for c in spy if c[0] == "final") == len(sessions)  # each session finalized once
 
 
 def test_parallel_drain_many_sessions(spy):
-    """真并发:线程池并行 drain 多 session(锁竞争下)→ 各 cursor 精确、clip 不丢不重不串。"""
+    """Genuine concurrency: a thread pool drains many sessions in parallel under lock
+    contention, and every cursor is still exact with no clip lost, duplicated, or crossed."""
     import threading
     from concurrent.futures import ThreadPoolExecutor
 
@@ -177,7 +197,8 @@ def test_parallel_drain_many_sessions(spy):
         mq.enqueue(U, s, _txt(text="a"), kind="ingest")
         mq.enqueue(U, s, _vid(f"{s}-x.mp4", f"{s}-y.mp4"), kind="video")
         mq.enqueue(U, s, {}, kind="session_end")
-    lock = threading.Lock()                      # 只保护 spy list 本身(list.append 已原子,双保险)
+    # Only guards the spy list itself; list.append is already atomic, so this is belt and braces.
+    lock = threading.Lock()
 
     def work(s):
         with lock:
@@ -185,21 +206,22 @@ def test_parallel_drain_many_sessions(spy):
         while sc.drain_session(U, s).more:
             pass
 
-    with ThreadPoolExecutor(max_workers=8) as ex:   # 8 线程真并行
+    with ThreadPoolExecutor(max_workers=8) as ex:   # 8 threads running genuinely in parallel
         list(ex.map(work, sessions))
 
     for s in sessions:
-        assert mq.cursor_get(U, s) == 3 and mq.depth(U, s) == 0      # 各自精确消费、排空
+        assert mq.cursor_get(U, s) == 3 and mq.depth(U, s) == 0      # each consumed exactly and drained
     clips = [c for c in spy if c[0] == "clip"]
-    assert len(clips) == len(sessions) * 2                            # 不丢
-    assert len(clips) == len({(c[1], c[2]) for c in clips})           # 不重
-    for s in sessions:                                                # 不串:key 前缀与 session 对应
+    assert len(clips) == len(sessions) * 2                            # nothing lost
+    assert len(clips) == len({(c[1], c[2]) for c in clips})           # nothing duplicated
+    for s in sessions:                                                # nothing crossed: the key prefix matches the session
         assert all(c[2].startswith(s) for c in clips if c[1] == s)
     assert sum(1 for c in spy if c[0] == "final") == len(sessions)
 
 
 def test_same_session_lock_contention_no_double_consume(spy):
-    """同会话锁竞争:多线程同时 drain 同一 session → 只有拿到锁的处理,消息不被重复消费。"""
+    """Lock contention on one session: several threads drain the same session at once, only
+    the one holding the lock processes anything, and no message is consumed twice."""
     import threading
     from concurrent.futures import ThreadPoolExecutor
 
@@ -210,7 +232,7 @@ def test_same_session_lock_contention_no_double_consume(spy):
     barrier = threading.Barrier(4)
 
     def work(_):
-        barrier.wait()                       # 4 线程同时冲同一 session
+        barrier.wait()                       # 4 threads hit the same session simultaneously
         reps = []
         while True:
             r = sc.drain_session(U, S)
@@ -223,20 +245,22 @@ def test_same_session_lock_contention_no_double_consume(spy):
         all_reps = list(ex.map(work, range(4)))
 
     clips = [c for c in spy if c[0] == "clip"]
-    assert len(clips) == 6                                   # 6 条全处理
-    assert len(clips) == len({c[2] for c in clips})           # 每条只处理一次(无双重消费)
+    assert len(clips) == 6                                   # all 6 were processed
+    assert len(clips) == len({c[2] for c in clips})           # each exactly once, no double consumption
     assert mq.cursor_get(U, S) == 6 and mq.depth(U, S) == 0
-    assert any(not r.locked for reps in all_reps for r in reps)   # 确有线程抢锁失败(竞争真发生)
+    # Some thread really did fail to take the lock, which proves the contention happened.
+    assert any(not r.locked for reps in all_reps for r in reps)
 
 
 def test_multi_user_parallel_no_cross_contamination(spy_deps):
-    """**多用户并发**(生产刚需):N 个不同 user 各自多 session 并行消费 →
-    ①每条 clip 拿到的 deps 必须属于自己那个 user(跨 user 零串);②各 user 各 session cursor 精确。"""
+    """MULTI-USER CONCURRENCY (a hard production requirement): N different users each consume
+    several sessions in parallel, and (1) the deps handed to every clip must belong to that
+    clip's own user, with zero crossover, and (2) each user's per-session cursor is exact."""
     from concurrent.futures import ThreadPoolExecutor
 
     mq = MemoryMsgQueue()
     sc = SessionConsumer(mq, MemorySessionLock(), lambda u, s: _Writer([], s),
-                         video_deps=lambda u: f"deps:{u}")   # deps 带 user 身份,供隔离断言
+                         video_deps=lambda u: f"deps:{u}")   # deps carry the user identity, for the isolation assertion
     users = [f"u{i}" for i in range(6)]
     sessions = ["a", "b"]
     for u in users:
@@ -245,38 +269,40 @@ def test_multi_user_parallel_no_cross_contamination(spy_deps):
             mq.enqueue(u, s, {}, kind="session_end")
 
     jobs = [(u, s) for u in users for s in sessions]
-    with ThreadPoolExecutor(max_workers=12) as ex:          # 12 线程跨 user 并行
+    with ThreadPoolExecutor(max_workers=12) as ex:          # 12 threads running across users in parallel
         list(ex.map(lambda j: [None for _ in iter(lambda: sc.drain_session(*j).more, False)], jobs))
 
     clips = [c for c in spy_deps if c[0] == "clip"]
-    assert len(clips) == len(users) * len(sessions) * 2                  # 不丢
-    assert len(clips) == len({c[3] for c in clips})                      # 不重
-    for _tag, deps, _sid, keyname in clips:                             # **跨 user 隔离**
-        owner = keyname.split("-")[0]                                    # key 前缀即所属 user
-        assert deps == f"deps:{owner}", f"user 串了: {deps} 处理了 {keyname}"
+    assert len(clips) == len(users) * len(sessions) * 2                  # nothing lost
+    assert len(clips) == len({c[3] for c in clips})                      # nothing duplicated
+    for _tag, deps, _sid, keyname in clips:                             # CROSS-USER ISOLATION
+        owner = keyname.split("-")[0]                                    # the key prefix identifies the owning user
+        assert deps == f"deps:{owner}", f"users crossed: {deps} handled {keyname}"
     for _tag, deps, sid in [c for c in spy_deps if c[0] == "final"]:
         assert deps.startswith("deps:u")
     for u in users:
         for s in sessions:
-            assert mq.cursor_get(u, s) == 2 and mq.depth(u, s) == 0      # 各自精确、排空
+            assert mq.cursor_get(u, s) == 2 and mq.depth(u, s) == 0      # each exact and drained
 
 
 def test_video_url_payload_consumed(spy):
-    """外链形态(video_oss_key=None + video_url)能被正常消费——回归 None[-16:] 崩溃打成毒消息。"""
+    """The external-link shape (video_oss_key=None plus video_url) is consumed normally — a
+    regression test for the None[-16:] crash that got these written off as poisonous."""
     mq, sc = _consumer(spy)
     U, S = "uurl", "s1"
     mq.enqueue(U, S, _vid_url("https://caller-bucket/a.mp4", "https://caller-bucket/b.mp4"),
                kind="video")
     mq.enqueue(U, S, {}, kind="session_end")
     rep = sc.drain_session(U, S)
-    assert rep.applied == 2 and rep.poisoned == 0          # 不再被判毒消息
+    assert rep.applied == 2 and rep.poisoned == 0          # no longer written off as poisonous
     assert [c for c in spy if c[0] == "clip"] == [
         ("clip", S, "https://caller-bucket/a.mp4"), ("clip", S, "https://caller-bucket/b.mp4")]
     assert mq.cursor_get(U, S) == 2
 
 
 def test_mixed_url_and_key_bursts(spy):
-    """混用两种来源(批1 外链 / 批2 我方 key)都能消费,cursor 精确。"""
+    """Mixing the two sources (batch 1 external links, batch 2 our own keys) both consume fine
+    and the cursor stays exact."""
     mq, sc = _consumer(spy)
     U, S = "umix", "s1"
     mq.enqueue(U, S, _vid_url("https://caller/x.mp4"), kind="video")
@@ -288,12 +314,13 @@ def test_mixed_url_and_key_bursts(spy):
 
 
 def test_clip_rejected_is_recorded_not_silently_dropped(monkeypatch):
-    """clip 永久性失败(外链失效/超大/超长)→ **留痕**后跳过,不重试不静默;整批其余 clip 继续。"""
+    """A permanently failing clip (a dead external link, oversized, or too long) is RECORDED
+    and then skipped, with no retry and nothing silent; the rest of the batch carries on."""
     from personos.online import video_ingest
 
     recorded = []
 
-    class _TS:   # 假 TaskStore:记留痕调用
+    class _TS:   # a fake TaskStore that records the calls leaving a trace
         def create(self, tid, kind, u, s):
             recorded.append(("create", kind, u, s))
 
@@ -303,7 +330,7 @@ def test_clip_rejected_is_recorded_not_silently_dropped(monkeypatch):
     def _proc(deps, *, session_id, clip_key="", clip_url="", **k):
         src = clip_key or clip_url
         if "bad" in src:
-            raise video_ingest.ClipRejected(f"视频地址不可访问(HTTP 403):{src}")
+            raise video_ingest.ClipRejected(f"video address not reachable (HTTP 403): {src}")
         recorded.append(("ok", src))
 
     monkeypatch.setattr(video_ingest, "process_clip", _proc)
@@ -317,17 +344,20 @@ def test_clip_rejected_is_recorded_not_silently_dropped(monkeypatch):
                kind="video")
     rep = sc.drain_session(U, S)
 
-    assert rep.applied == 1 and rep.poisoned == 0          # 整条消息算成功(不重试不毒消息)
-    assert ("ok", "https://ok/a.mp4") in recorded and ("ok", "https://ok/c.mp4") in recorded  # 其余继续
-    assert ("create", "video_clip_rejected", U, S) in recorded                                # 留痕了
+    # The message as a whole counts as a success (no retry, not poisonous).
+    assert rep.applied == 1 and rep.poisoned == 0
+    # The rest carried on.
+    assert ("ok", "https://ok/a.mp4") in recorded and ("ok", "https://ok/c.mp4") in recorded
+    assert ("create", "video_clip_rejected", U, S) in recorded                                # a trace was left
     assert any(t == "error" and "403" in e for t, e in
-               [(r[0], r[1]) for r in recorded if r[0] == "error"])                           # 原因可查
+               [(r[0], r[1]) for r in recorded if r[0] == "error"])                           # the reason is recoverable
     assert mq.cursor_get(U, S) == 1
 
 
 def test_lock_renewed_during_long_clip_processing(monkeypatch):
-    """**锁续期**:单条 clip 处理远长于续期间隔(视频常态 2-3min)时,心跳必须持续续锁,
-    且期间别的消费者抢不到锁(不会并发消费同一会话)。"""
+    """LOCK RENEWAL: when a single clip takes far longer than the renewal interval (2-3 minutes
+    is normal for video), the heartbeat has to keep renewing the lock, and no other consumer
+    can take it during that time (so the same session is never consumed concurrently)."""
     import threading
     import time
 
@@ -340,7 +370,7 @@ def test_lock_renewed_during_long_clip_processing(monkeypatch):
             renews.append(time.monotonic())
             return super().renew(u, s, handle)
 
-    PROC_S, RENEW_S = 0.9, 0.15          # 处理时长 ≫ 续期间隔 → 应续多次
+    PROC_S, RENEW_S = 0.9, 0.15          # processing time far exceeds the renewal interval, so it should renew repeatedly
     monkeypatch.setattr(video_ingest, "process_clip",
                         lambda deps, **k: time.sleep(PROC_S))
     monkeypatch.setattr(video_ingest, "finalize_video", lambda deps, *, session_id: None)
@@ -353,7 +383,7 @@ def test_lock_renewed_during_long_clip_processing(monkeypatch):
 
     stolen = []
 
-    def intruder():                       # 处理进行中,另一消费者尝试抢同一会话
+    def intruder():                       # while processing is under way, another consumer tries to take the session
         time.sleep(PROC_S / 2)
         stolen.append(lock.try_acquire(U, S))
 
@@ -362,9 +392,11 @@ def test_lock_renewed_during_long_clip_processing(monkeypatch):
     rep = sc.drain_session(U, S)
     t.join()
 
-    assert rep.applied == 1                                   # 长耗时下正常完成
-    assert len(renews) >= 2, f"续锁次数不足:{len(renews)}(处理 {PROC_S}s / 间隔 {RENEW_S}s)"
-    assert stolen == [None], "处理期间锁被别人抢走了——会并发消费同一会话"
+    assert rep.applied == 1                                   # completes normally despite the long runtime
+    assert len(renews) >= 2, \
+        f"not enough lock renewals: {len(renews)} (processing {PROC_S}s / interval {RENEW_S}s)"
+    assert stolen == [None], \
+        "the lock was stolen during processing, which would mean concurrent consumption of one session"
 
 
 class _FakeResp:
@@ -382,19 +414,20 @@ class _FakeResp:
 
 
 def test_fetch_rejects_http_error(monkeypatch):
-    """外链 4xx/5xx → ClipRejected(永久失败,不重试)。"""
+    """A 4xx or 5xx on an external link becomes ClipRejected (a permanent failure, no retry)."""
     import httpx
 
     from personos.online import video_ingest
 
     monkeypatch.setattr(httpx, "stream", lambda *a, **k: _FakeResp(status=403))
-    with pytest.raises(video_ingest.ClipRejected, match="不可访问"):
+    with pytest.raises(video_ingest.ClipRejected, match="not reachable"):
         video_ingest._materialize_clip(object(), clip_key="", clip_url="https://expired/a.mp4",
                                        owner="u")
 
 
 def test_fetch_rejects_oversize_declared(monkeypatch):
-    """Content-Length 声明超上限 → 立刻拒,不下载。"""
+    """A Content-Length declaring more than the limit is rejected immediately, without
+    downloading."""
     import httpx
 
     from personos.online import video_ingest
@@ -402,26 +435,28 @@ def test_fetch_rejects_oversize_declared(monkeypatch):
     big = str(video_ingest.MAX_CLIP_BYTES + 1)
     monkeypatch.setattr(httpx, "stream",
                         lambda *a, **k: _FakeResp(headers={"content-length": big}))
-    with pytest.raises(video_ingest.ClipRejected, match="上限"):
+    with pytest.raises(video_ingest.ClipRejected, match="byte limit"):
         video_ingest._materialize_clip(object(), clip_key="", clip_url="https://x/big.mp4",
                                        owner="u")
 
 
 def test_fetch_rejects_oversize_while_streaming(monkeypatch):
-    """未声明 Content-Length 但下载中超限 → 边下边卡,不把超大文件读满内存。"""
+    """No Content-Length declared but the limit is exceeded mid-download: stop while streaming
+    rather than reading an oversized file fully into memory."""
     import httpx
 
     from personos.online import video_ingest
 
     monkeypatch.setattr(video_ingest, "MAX_CLIP_BYTES", 10)
     monkeypatch.setattr(httpx, "stream", lambda *a, **k: _FakeResp(chunks=[b"x" * 6, b"x" * 6]))
-    with pytest.raises(video_ingest.ClipRejected, match="下载中超限"):
+    with pytest.raises(video_ingest.ClipRejected, match="exceeded mid-download"):
         video_ingest._materialize_clip(object(), clip_key="", clip_url="https://x/nolen.mp4",
                                        owner="u")
 
 
 def test_temp_file_cleaned_on_reject(monkeypatch, tmp_path):
-    """被拒(超大/超长/下载失败)时不留垃圾临时文件——失败路径也清盘。"""
+    """A rejection (oversized, too long, or a failed download) leaves no stray temp file — the
+    failure path cleans up too."""
     import httpx
 
     from personos.online import video_ingest
@@ -432,15 +467,18 @@ def test_temp_file_cleaned_on_reject(monkeypatch, tmp_path):
         video_ingest._materialize_clip(object(), clip_key="", clip_url="https://x/404.mp4",
                                        owner="u")
     leaked = [f for f in set(os.listdir(tempfile.gettempdir())) - before if f.endswith(".mp4")]
-    assert not leaked, f"失败路径泄漏临时文件:{leaked}"
+    assert not leaked, f"the failure path leaked temp files: {leaked}"
 
 
 def test_video_concurrency_is_bounded_only_by_the_pool(monkeypatch):
-    """视频并发只由线程池大小决定——process_clip 内不得再有第二道闸。
+    """Video concurrency is governed solely by the thread pool size — there must not be a
+    second gate inside process_clip.
 
-    回归:曾经池是 50、函数内还有个 BoundedSemaphore(4),生效的永远是更严的那道,
-    46 个线程卡在闸上干等且各自握着会话锁。两道闸管同一件事就只该留一道。
-    这里用 8 宽的池跑 8 个 clip,若函数内还有闸,峰值并行会被压到闸的大小。
+    Regression: the pool was once 50 while the function also held a BoundedSemaphore(4), so the
+    stricter of the two always won and 46 threads sat waiting on the gate, each still holding a
+    session lock. Two gates controlling the same thing means one of them should not exist.
+    Here 8 clips run through an 8-wide pool; if a gate remained inside the function, peak
+    parallelism would be squeezed down to its size.
     """
     import threading
     import time
@@ -465,11 +503,13 @@ def test_video_concurrency_is_bounded_only_by_the_pool(monkeypatch):
     with ThreadPoolExecutor(max_workers=8) as ex:
         list(ex.map(lambda i: video_ingest.process_clip(deps, session_id="s", clip_key=f"{i}.mp4"),
                     range(8)))
-    assert peak == 8, f"池给了 8 个线程,却只并行了 {peak} —— 函数内还残留着闸"
+    assert peak == 8, \
+        f"the pool offered 8 threads but only {peak} ran in parallel — a gate is still left inside the function"
 
 
 def _fake_deps(monkeypatch, omni_calls):
-    """构造最小 VideoDeps(记录 omni 调用次数),供时长/顺序类断言。"""
+    """Build a minimal VideoDeps (recording how many times omni was called), for the duration
+    and ordering assertions."""
     from personos.identity.draft import MemoryDraftStore
     from personos.online import video_ingest
 
@@ -487,12 +527,14 @@ def _fake_deps(monkeypatch, omni_calls):
 
     return video_ingest.VideoDeps(
         store=type("S", (), {"user_id": "u"})(), cloud=None, draft=MemoryDraftStore("u"),
-        backends={"mm_runner": _Omni()}, media_store=_MS(), maas=None,
+        backends={"mm_runner": _Omni()}, media_store=_MS(), llm=None,
         evidence=None, cells=None, atoms=None, chains=None)
 
 
 def test_url_path_rejects_too_long_before_spending_mllm(monkeypatch):
-    """外链路径:文件已在手 → **先卡时长再跑剧本**,过长立刻拒,省掉一次 2-3min MLLM。"""
+    """The external-link path already has the file in hand, so CHECK THE DURATION BEFORE
+    RUNNING THE SCREENPLAY: an over-long clip is rejected immediately, saving a 2-3 minute
+    multimodal call."""
     from personos.online import video_ingest
 
     calls = []
@@ -501,13 +543,14 @@ def test_url_path_rejects_too_long_before_spending_mllm(monkeypatch):
     monkeypatch.setattr(video_ingest, "_materialize_clip",
                         lambda ms, *, clip_key, clip_url, owner: ("/tmp/fake.mp4", "our/k.mp4"))
     deps = _fake_deps(monkeypatch, calls)
-    with pytest.raises(video_ingest.ClipRejected, match="时长"):
+    with pytest.raises(video_ingest.ClipRejected, match="video duration"):
         video_ingest.process_clip(deps, session_id="s", clip_url="https://caller/a.mp4")
-    assert calls == [], "外链路径应在跑剧本前就拒掉过长 clip"
+    assert calls == [], "the external-link path should reject an over-long clip before running the screenplay"
 
 
 def test_key_path_downloads_only_after_screenplay(monkeypatch):
-    """我方 key 路径:剧本期间盘上无文件,用到 harvest 时才下载(临时文件存活最短)。"""
+    """Our own key path: nothing is on disk while the screenplay runs, and the download only
+    happens when harvest needs it, keeping the temp file alive for the shortest possible time."""
     from personos.online import video_ingest
 
     calls, order = [], []
@@ -520,24 +563,27 @@ def test_key_path_downloads_only_after_screenplay(monkeypatch):
 
     monkeypatch.setattr(video_ingest, "_materialize_clip", _mat)
     deps = _fake_deps(monkeypatch, calls)
-    with pytest.raises(video_ingest.ClipRejected, match="时长"):
+    with pytest.raises(video_ingest.ClipRejected, match="video duration"):
         video_ingest.process_clip(deps, session_id="s", clip_key="k.mp4")
-    assert order == ["download(omni_calls=1)"], f"下载应发生在剧本之后:{order}"
+    assert order == ["download(omni_calls=1)"], f"the download should happen after the screenplay: {order}"
 
 
 def test_session_end_without_video_still_finalizes_noop(spy):
-    """纯文本会话 session_end:也调 finalize_video(内部判 pending 为空→no-op),不报错。"""
+    """session_end on a text-only session still calls finalize_video, which sees no pending
+    work and becomes a no-op rather than an error."""
     mq, sc = _consumer(spy)
     U, S = "u5", "s5"
     mq.enqueue(U, S, _txt(), kind="ingest")
     mq.enqueue(U, S, {}, kind="session_end")
     sc.drain_session(U, S)
-    assert ("end", S) in spy and ("final", S) in spy   # finalize 总被调(spy 里 no-op)
+    # finalize is always called (it is a no-op in the spy).
+    assert ("end", S) in spy and ("final", S) in spy
 
 
 def test_dispatcher_routes_video_to_dedicated_pool():
-    """**视频独立池**:队头是 video 的会话派到视频池,文本会话派到文本池——
-    视频忙不占文本 worker(不会把文本消费饿死)。"""
+    """A DEDICATED VIDEO POOL: a session whose queue head is video goes to the video pool and a
+    text session goes to the text pool, so a busy video workload does not occupy text workers
+    and starve text consumption."""
     from personos.ingest_worker import Dispatcher
 
     submitted = {"text": [], "video": []}
@@ -559,12 +605,13 @@ def test_dispatcher_routes_video_to_dedicated_pool():
     d = Dispatcher(mq, object(), _Pool("text"), 10,
                    video_pool=_Pool("video"), video_cap=10)
     d.run_once()
-    assert submitted["video"] == [("u", "s_vid")], f"视频会话没进视频池:{submitted}"
-    assert submitted["text"] == [("u", "s_txt")], f"文本会话没进文本池:{submitted}"
+    assert submitted["video"] == [("u", "s_vid")], f"the video session did not reach the video pool: {submitted}"
+    assert submitted["text"] == [("u", "s_txt")], f"the text session did not reach the text pool: {submitted}"
 
 
 def test_video_pool_full_does_not_block_text():
-    """视频池占满时,文本会话仍能被派发(隔离的核心价值)。"""
+    """When the video pool is full, text sessions can still be dispatched — the whole point of
+    the isolation."""
     from personos.ingest_worker import Dispatcher
 
     got = []
@@ -585,14 +632,16 @@ def test_video_pool_full_does_not_block_text():
         mq.enqueue("u", f"v{i}", _vid(f"{i}.mp4"), kind="video")
     mq.enqueue("u", "t1", _txt(), kind="ingest")
     d = Dispatcher(mq, object(), _Pool("text"), 10,
-                   video_pool=_Pool("video"), video_cap=1)   # 视频池只有 1 个名额
+                   video_pool=_Pool("video"), video_cap=1)   # the video pool has only one slot
     d.run_once()
-    assert ("text", "t1") in got, f"视频池满把文本也挡住了:{got}"
-    assert sum(1 for t, _ in got if t == "video") == 1        # 视频只派出 1 个(受限)
+    assert ("text", "t1") in got, f"a full video pool also blocked text: {got}"
+    assert sum(1 for t, _ in got if t == "video") == 1        # only one video was dispatched, as capped
 
 
 def test_poisoned_message_is_recorded(monkeypatch):
-    """瞬时故障重试耗尽被判毒消息时也要**留痕**——否则那条 clip 的记忆丢了只剩会被冲掉的日志。"""
+    """When retries for a transient fault run out and the message is written off as poisonous,
+    a TRACE must still be left — otherwise the memory for that clip is gone and all that
+    remains is a log line that will eventually be rotated away."""
     from personos.online import video_ingest
 
     recorded = []
@@ -605,7 +654,7 @@ def test_poisoned_message_is_recorded(monkeypatch):
             recorded.append(("error", err[:40]))
 
     def _boom(deps, **k):
-        raise RuntimeError("Omni read timeout")      # 瞬时故障(非 ClipRejected)
+        raise RuntimeError("Omni read timeout")      # a transient fault, not a ClipRejected
 
     monkeypatch.setattr(video_ingest, "process_clip", _boom)
     monkeypatch.setattr(video_ingest, "finalize_video", lambda deps, *, session_id: None)
@@ -615,23 +664,27 @@ def test_poisoned_message_is_recorded(monkeypatch):
                          video_deps=lambda u: "deps", task_store=_TS(), max_retries=2)
     U, S = "upoison", "s1"
     mq.enqueue(U, S, _vid("boom.mp4"), kind="video")
-    for _ in range(3):                                # 重试到判毒
+    for _ in range(3):                                # retry until it is written off as poisonous
         try:
             sc.drain_session(U, S)
         except Exception:
             pass
-    assert ("create", "poisoned_video") in recorded, f"判毒未留痕:{recorded}"
+    assert ("create", "poisoned_video") in recorded, f"being written off left no trace: {recorded}"
     assert any(t == "error" for t, _ in recorded)
 
 
 def test_upstream_media_failures_become_clip_rejected(monkeypatch):
-    """上游"拉不动媒体"/"内容审查拒绝" → ClipRejected(留痕跳过),不当瞬时故障重试 5 次。
+    """Upstream "cannot fetch the media" and "content review refused" become ClipRejected
+    (recorded and skipped) rather than being retried 5 times as a transient fault.
 
-    回归两起实测事故:
-    - 2min@7.3Mbps(106MB)的 clip 让模型服务侧下载超时返回 400;
-    - SIT 镜像没装 PyAV,`import av` 抛 ModuleNotFoundError。
-    两者都被当瞬时故障重试 5 轮,而我方 key 路径的失败点在剧本 MLLM **之后**——
-    每轮先白跑一次 2 分钟的剧本调用,5 轮就是十分钟上游配额,最后照样判毒。
+    Regression for two real incidents:
+    - A 2-minute clip at 7.3Mbps (106MB) made the model service time out downloading it and
+      return 400;
+    - The deployment image lacked PyAV, so `import av` raised ModuleNotFoundError.
+    Both were treated as transient faults and retried 5 times, and because the failure point on
+    our own key path comes AFTER the screenplay multimodal call, each round wasted a 2-minute
+    screenplay call first. Five rounds burned ten minutes of upstream quota and the message was
+    written off as poisonous anyway.
     """
     from personos.identity.backends.omni import ContentRejectedError, MediaUnfetchableError
     from personos.online import video_ingest
@@ -648,8 +701,10 @@ def test_upstream_media_failures_become_clip_rejected(monkeypatch):
 
 
 def test_omni_maps_media_download_failure_to_its_own_error():
-    """MAAS 的 `Download multimodal file timed out` 必须落到 MediaUnfetchableError,
-    而不是被泛化的 4xx 分支吞成普通 HTTPStatusError(那样上层分不出该不该重试)。"""
+    """The model provider's `Download multimodal file timed out` must land on
+    MediaUnfetchableError rather than being swallowed by the generic 4xx branch as an ordinary
+    HTTPStatusError, because that would leave the layer above unable to tell whether to
+    retry."""
     import httpx
 
     from personos.identity.backends import omni as omni_mod
@@ -678,7 +733,8 @@ def test_omni_maps_media_download_failure_to_its_own_error():
 
 
 def _idem_deps(monkeypatch, calls, fail_on=None):
-    """构造能跑通 _process_clip_locked 全程的最小 deps(记录每个 clip 被真正处理了几次)。"""
+    """Build the minimal deps needed to run _process_clip_locked end to end, recording how many
+    times each clip was genuinely processed."""
     from personos.identity.draft import MemoryDraftStore
     from personos.identity.screenplay import ClipScript
     from personos.online import video_ingest
@@ -706,48 +762,54 @@ def _idem_deps(monkeypatch, calls, fail_on=None):
     def _harvest(path, script, backends):
         calls.append(path)
         if fail_on is not None and len(calls) == fail_on:
-            raise RuntimeError("瞬时故障")       # 非 ClipRejected → 应触发整条消息重投
+            # Not a ClipRejected, so the whole message should be redelivered.
+            raise RuntimeError("瞬时故障")
         return {}
 
     monkeypatch.setattr(video_ingest, "harvest_clip", _harvest)
     return video_ingest.VideoDeps(
         store=type("S", (), {"user_id": "u"})(), cloud=None, draft=MemoryDraftStore("u"),
-        backends={"mm_runner": _Omni()}, media_store=_MS(), maas=None,
+        backends={"mm_runner": _Omni()}, media_store=_MS(), llm=None,
         evidence=None, cells=None, atoms=None, chains=None)
 
 
 def test_replayed_clip_is_skipped_not_double_counted(monkeypatch):
-    """同一 clip 被重放 → 只真正处理一次,且返回原 clip_index。
+    """A replayed clip is genuinely processed only once and returns its original clip_index.
 
-    回归真缺陷:队列重投重放的是**整条消息**(一条最多 20 个 clip),批内靠后的 clip 一次
-    瞬时故障就会让前面的全部重跑 —— presence 记两遍、台词进两次 memcell、素材传两份。
+    Regression for a real defect: queue redelivery replays the WHOLE MESSAGE (up to 20 clips),
+    so one transient fault on a clip near the end of the batch made every clip before it run
+    again — presence counted twice, lines written into the memcell twice, and material uploaded
+    twice.
     """
     from personos.online import video_ingest
 
     calls = []
     deps = _idem_deps(monkeypatch, calls)
     i1 = video_ingest.process_clip(deps, session_id="s", clip_key="a.mp4")
-    i2 = video_ingest.process_clip(deps, session_id="s", clip_key="a.mp4")   # 重放
-    assert (i1, i2) == (0, 0), f"重放应返回原序号:{i1},{i2}"
-    assert len(calls) == 1, f"重放不应再跑一次 harvest:{calls}"
+    i2 = video_ingest.process_clip(deps, session_id="s", clip_key="a.mp4")   # replay
+    assert (i1, i2) == (0, 0), f"a replay should return the original index: {i1}, {i2}"
+    assert len(calls) == 1, f"a replay should not run harvest again: {calls}"
     assert deps.draft.clip_keys("s") == {0: "a.mp4"}
 
 
 def test_failed_clip_is_retried_not_marked_done(monkeypatch):
-    """中途失败的 clip **必须**能重跑——去重挂在"已完成"而非"序号已分配"上。
+    """A clip that failed partway MUST be able to run again — deduplication hangs off
+    "completed", not off "an index was allocated".
 
-    若挂在 next_clip_seq(在剧本 MLLM 之前分配),失败的 clip 重投时会被误判成已处理而跳过,
-    把"重复记账"换成"静默丢记忆",比原缺陷更糟。这条锁住那个更糟的实现。
+    If it hung off next_clip_seq (allocated before the screenplay multimodal call), a failed
+    clip would be mistaken for already processed on redelivery and skipped, trading "duplicate
+    bookkeeping" for "silently losing the memory", which is worse than the original defect.
+    This test locks out that worse implementation.
     """
     from personos.online import video_ingest
 
     calls = []
-    deps = _idem_deps(monkeypatch, calls, fail_on=1)      # 第 1 次处理抛瞬时故障
+    deps = _idem_deps(monkeypatch, calls, fail_on=1)      # the first attempt raises a transient fault
     with pytest.raises(RuntimeError, match="瞬时故障"):
         video_ingest.process_clip(deps, session_id="s", clip_key="a.mp4")
-    assert deps.draft.clip_done_index("s", "a.mp4") is None, "失败的 clip 不得标成已完成"
+    assert deps.draft.clip_done_index("s", "a.mp4") is None, "a failed clip must not be marked complete"
 
-    idx = video_ingest.process_clip(deps, session_id="s", clip_key="a.mp4")   # 重投重试
-    assert len(calls) == 2, f"失败的 clip 必须真正重跑:{calls}"
-    assert idx == 1, "重跑拿新序号(上次失败的序号作废,无 lines 不影响 flush)"
+    idx = video_ingest.process_clip(deps, session_id="s", clip_key="a.mp4")   # redelivered and retried
+    assert len(calls) == 2, f"a failed clip must genuinely run again: {calls}"
+    assert idx == 1, "the retry takes a new index; the failed one is void and, having no lines, does not affect flush"
     assert deps.draft.clip_done_index("s", "a.mp4") == 1

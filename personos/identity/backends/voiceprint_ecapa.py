@@ -1,8 +1,13 @@
-"""SpeechBrain ECAPA-TDNN 声纹后端(移植 mneme voiceprint_ecapa.py)。
+"""The SpeechBrain ECAPA-TDNN voiceprint backend.
 
-一段 16kHz 单声道 wav(bytes)→ 192d L2 归一化说话人向量。懒加载。
-env:PERSONOS_ECAPA_MODEL(默认 speechbrain/spkrec-ecapa-voxceleb)、PERSONOS_ECAPA_DEVICE、PERSONOS_ECAPA_DIR。
-device 排除 MPS(speechbrain 在 MPS 有兼容 bug);CPU ~37ms/段,非热点。
+One 16kHz mono wav (as bytes) becomes a 192-d L2-normalized speaker vector. The
+model is loaded lazily.
+
+Env: PERSONOS_ECAPA_MODEL (default speechbrain/spkrec-ecapa-voxceleb),
+PERSONOS_ECAPA_DEVICE, PERSONOS_ECAPA_DIR.
+
+MPS is excluded from device selection because speechbrain has compatibility bugs
+there. CPU costs about 37ms per segment, which is not a hot spot.
 """
 
 from __future__ import annotations
@@ -17,14 +22,14 @@ from personos.identity.backends.device import pick_device
 
 logger = logging.getLogger(__name__)
 
-_MIN_SAMPLES = 8000  # ECAPA 在 <0.5s 不稳,短段零填充
+_MIN_SAMPLES = 8000  # ECAPA is unstable below 0.5s, so short segments are zero-padded
 
 
 class EcapaVoiceprint:
     def __init__(self) -> None:
         self._model = None
         self._source = os.getenv("PERSONOS_ECAPA_MODEL", "speechbrain/spkrec-ecapa-voxceleb")
-        self._device = pick_device("PERSONOS_ECAPA_DEVICE", allow_mps=False)  # 见模块注
+        self._device = pick_device("PERSONOS_ECAPA_DEVICE", allow_mps=False)  # see the module docstring
         self._savedir = os.getenv("PERSONOS_ECAPA_DIR")
 
     def _ensure(self):
@@ -36,10 +41,10 @@ class EcapaVoiceprint:
                 kwargs["savedir"] = self._savedir
             try:
                 self._model = EncoderClassifier.from_hparams(**kwargs)
-            except Exception:  # noqa: BLE001  非 CPU 加载失败 → 退 CPU
+            except Exception:  # noqa: BLE001  a non-CPU load failed -> fall back to CPU
                 if self._device == "cpu":
                     raise
-                logger.warning("ECAPA 于 %s 加载失败,退回 CPU", self._device)
+                logger.warning("ECAPA failed to load on %s, falling back to CPU", self._device)
                 self._device = "cpu"
                 kwargs["run_opts"] = {"device": "cpu"}
                 self._model = EncoderClassifier.from_hparams(**kwargs)

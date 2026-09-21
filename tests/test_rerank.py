@@ -1,4 +1,5 @@
-"""R2 精排单测:NoopReranker 保序降分 / ScoringReranker(前缀+容错) / 伪 reranker 重排 / 材料头格式。"""
+"""R2 rerank unit tests: NoopReranker keeps the order with descending scores, ScoringReranker handles
+the instruction prefix and failures, a fake reranker really reorders, and the material header format."""
 
 from __future__ import annotations
 
@@ -18,9 +19,9 @@ def _hit(cid: str, topic="t") -> CellHit:
 def test_noop_keeps_order_with_descending_scores():
     hits = [_hit("a"), _hit("b"), _hit("c")]
     out = rerank_cells(NoopReranker(), "q", hits)
-    assert [h.cell.id for h in out] == ["a", "b", "c"]        # 保序
+    assert [h.cell.id for h in out] == ["a", "b", "c"]        # order preserved
     scores = [h.rerank_score for h in out]
-    assert scores == sorted(scores, reverse=True) and scores[0] > scores[-1]   # 严格递减
+    assert scores == sorted(scores, reverse=True) and scores[0] > scores[-1]   # strictly decreasing
 
 
 def test_fake_reranker_resorts_and_stamps_score():
@@ -30,22 +31,22 @@ def test_fake_reranker_resorts_and_stamps_score():
         def rerank(self, query, documents, *, instruction=""):
             assert query == "画展哪天"
             assert len(documents) == 3
-            assert instruction                              # 必须带判据指令
-            return [0.1, 0.9, 0.5]                          # b 最相关
+            assert instruction                              # the judging instruction must be present
+            return [0.1, 0.9, 0.5]                          # b is the most relevant
 
     out = rerank_cells(FakeReranker(), "画展哪天", hits)
-    assert [h.cell.id for h in out] == ["b", "c", "a"]       # 按精比分重排
+    assert [h.cell.id for h in out] == ["b", "c", "a"]       # reordered by the rerank score
     assert out[0].rerank_score == 0.9 and out[2].rerank_score == 0.1
 
 
 def test_single_hit_short_circuits_without_reranker():
     class Boom:
         def rerank(self, *a, **k):  # pragma: no cover
-            raise AssertionError("单条不该调 rerank")
+            raise AssertionError("rerank must not be called for a single hit")
 
     hits = [_hit("a")]
     out = rerank_cells(Boom(), "q", hits)
-    assert len(out) == 1 and out[0].rerank_score is None      # 未跑
+    assert len(out) == 1 and out[0].rerank_score is None      # never ran
 
 
 def test_maas_reranker_prefixes_instruction_and_maps_scores():
@@ -58,22 +59,22 @@ def test_maas_reranker_prefixes_instruction_and_maps_scores():
 
     r = ScoringReranker(FakeScoreApi())
     scores = r.rerank("画展哪天", ["甲", "乙"], instruction="记忆判据")
-    assert scores == [0.2, 0.8]                          # 与文档等长同序
-    assert calls[0][0] == "Instruct: 记忆判据\nQuery: 画展哪天"   # qwen3 Instruct/Query 模板
+    assert scores == [0.2, 0.8]                          # same length and same order as the documents
+    assert calls[0][0] == "Instruct: 记忆判据\nQuery: 画展哪天"   # the qwen3 Instruct/Query template
     assert calls[0][1] == ["甲", "乙"]
-    assert r.rerank("q", [], instruction="i") == []       # 空输入不调 API
+    assert r.rerank("q", [], instruction="i") == []       # empty input does not call the API
 
 
 def test_maas_reranker_falls_back_to_order_on_failure():
     class BoomApi:
         def rerank(self, query, documents):
-            raise RuntimeError("网关抖动")
+            raise RuntimeError("gateway blip")
 
     docs = ["a", "b", "c"]
     out = ScoringReranker(BoomApi()).rerank("q", docs, instruction="i")
-    assert out == NoopReranker().rerank("q", docs)        # 保序透传,R2 不阻塞主链路
+    assert out == NoopReranker().rerank("q", docs)        # pass through in order, so R2 never blocks the main path
 
-    class ShortApi:   # 返回条数与文档不等长 → 同样保序兜底
+    class ShortApi:   # returns fewer scores than documents, which also falls back to the original order
         def rerank(self, query, documents):
             return [0.5]
 

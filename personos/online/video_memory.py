@@ -1,23 +1,34 @@
-"""视频身份 → 记忆主管线的桥(行归属接线)。
+"""The bridge from video identity to the main memory pipeline (wiring line ownership).
 
-会话末 commit 后调用:把 session 缓冲的剧本行(draft.all_lines)按 commit 交付的 {chain_ref→
-character_id} 归属映射,翻译成带人物归属的 evidence,再一次性喂 build_cell 产 memcell/atoms。
-让"Bob 说他喜欢爬山"落成 holder=Bob 的 atom,跨 session/模态收敛到同一人物。
+Called after the commit at the end of a session: take the session's buffered screenplay lines
+(draft.all_lines), apply the {chain_ref -> character_id} ownership mapping that commit delivered,
+translate them into evidence carrying character ownership, and feed them to build_cell in one shot to
+produce a memcell and its atoms. This makes "Bob said he likes hiking" land as an atom with
+holder=Bob, converging on the same character across sessions and modalities.
 
-设计(已与用户对齐):
-- holder = 展示名(有名取名、无名取稳定短标 人物#N;SW→"user"、ENV→"env"),精确人物 id 走
-  source.character_id(渲染层看到干净说话人名、不被裸 ULID 污染归属/指代;精确 id 持久在 payload)。
-- clip 存为原始媒体证据(modality=video, content_ref=oss_key, 无 content_inline),派生行经
-  source.raw_evidence_id 回指;raw_clip 不进 build_cell 的 records(无文本)。
-- 每 session 一次 build_cell(全 clip 行时序合并 = 一段录像一个 episode)。
-- 独立干净入口:将来 session_end 消费路径可直接调(不绑脚本)。
+Design (already agreed with the user):
+- holder = the display name (the person's name when known, otherwise a stable short handle 人物#N;
+  SW -> "user", ENV -> "env"), while the exact character id travels in source.character_id (so the
+  rendering layer sees a clean speaker name and ownership/reference is not polluted by a bare ULID;
+  the exact id persists in the payload).
+- A clip is stored as raw media evidence (modality=video, content_ref=oss_key, no content_inline),
+  and derived lines point back at it through source.raw_evidence_id; raw_clip entries do not go into
+  build_cell's records (they have no text).
+- One build_cell per session (merging the lines of all clips in time order = one recording, one
+  episode).
+- A clean standalone entry point: a future session_end consumption path can call it directly (it is
+  not tied to any script).
 
-- 行文本里裸露的 id 一并改写成展示名(对齐 mneme _rewrite_label_mentions):clip 处理时已把
-  local id(P1)换成 cast id(S1),这里再换成展示名 —— 否则同一个人在记忆里有三种叫法。
-- 非 speech 行(action)加 `(action)` 前缀:transcript 渲染是统一的 "holder: text",不加标记
-  的话动作描述会被 episode LLM 读成这个人**说**的话。
+- Bare ids inside line text are rewritten to display names too (matching mneme's
+  _rewrite_label_mentions): clip processing already replaced the local id (P1) with the cast id (S1),
+  and here that becomes the display name — otherwise the same person would go by three different
+  names in memory.
+- Non-speech lines (action) get an `(action)` prefix: transcript rendering is a uniform
+  "holder: text", so without the marker an action description would be read by the episode LLM as
+  words this person SPOKE.
 
-本轮不做:per-person 画像整理(profile_consolidate 现只产用户画像,独立新功能)。
+Not in this round: per-person profile consolidation (profile_consolidate currently only produces the
+user profile; that would be a separate new feature).
 """
 
 from __future__ import annotations
@@ -32,18 +43,20 @@ from personos.identity.store import CharacterStore
 from personos.models import EvidenceRecord
 from personos.online.write_path import CellBuild, build_cell
 
-# 第一人称视频场景提示,引导 episode/atom 抽取识别环境/动作/多人对话(喂 build_cell 的 scenario)。
+# Scenario hint for first-person video, guiding episode/atom extraction to recognize environment,
+# actions and multi-person dialogue (passed as build_cell's scenario).
 VIDEO_SCENARIO = ("first-person wearable/robot video: the transcript below is a screenplay of one"
                   " recording — speaker lines are spoken words, plus action and environment"
                   " observations. 'user' is the camera wearer; other names are people in view."
                   " A speaker labelled 人物#N is a person whose name is not known yet; the first"
                   " lines of the transcript describe what each of them looks like.")
 
-_ANON_PREFIX = "人物#"      # 无名人物的稳定短标前缀
+_ANON_PREFIX = "人物#"      # prefix of the stable short handle for an unnamed person
 
 
 class _DisplayResolver:
-    """会话 cast → (holder 展示名, character_id)。无名人物给稳定短标 人物#N(本次 flush 内一致)。"""
+    """Session cast -> (holder display name, character_id). An unnamed person gets the stable short
+    handle 人物#N (consistent within this flush)."""
 
     def __init__(self, draft: DraftStore, char_store: CharacterStore,
                  by_chain: dict[str, str], session_id: str) -> None:
@@ -52,7 +65,7 @@ class _DisplayResolver:
         self.by_chain = by_chain
         self.session_id = session_id
         self.wearer = char_store.session_wearer(session_id) or char_store.wearer_character() or ""
-        self._handle: dict[str, str] = {}   # cid → 人物#N(稳定)
+        self._handle: dict[str, str] = {}   # cid -> 人物#N (stable)
 
     def resolve(self, who: str) -> tuple[str, str]:
         if who == ENV_WHO:
@@ -62,7 +75,7 @@ class _DisplayResolver:
         ref = self.draft.chain_ref(self.session_id, who)
         cid = self.by_chain.get(ref) or self.by_chain.get(self.draft.canonical_chain(ref)) or ""
         if not cid:
-            return who, ""                      # 兜底:无归属就用会话 cast 标签(不该发生)
+            return who, ""                      # fallback: with no ownership, use the session cast label (should not happen)
         names = self.store.names_for(cid)
         if names:
             return names[0], cid
@@ -73,7 +86,8 @@ class _DisplayResolver:
         return self._handle.setdefault(cid, f"{_ANON_PREFIX}{len(self._handle) + 1}"), cid
 
     def describe(self, cast_id: str) -> str:
-        """人物的外观描述:优先本会话链上的(最新),退回持久档的 appearance(老熟人)。"""
+        """A person's appearance description: prefer the one on this session's chain (the most
+        recent), and fall back to the `appearance` in the persistent record (someone already known)."""
         ref = self.draft.canonical_chain(self.draft.chain_ref(self.session_id, cast_id))
         desc = ((self.draft.get_chain(ref) or {}).get("desc_text") or "").strip()
         if desc:
@@ -83,10 +97,11 @@ class _DisplayResolver:
         return str(profile.get("appearance") or "").strip()
 
     def name_map(self, cast_ids) -> dict[str, str]:
-        """cast id → 展示名,供改写行文本里裸露的 id。
+        """cast id -> display name, used to rewrite bare ids inside line text.
 
-        注意必须一次性建好整张表再改写:resolve 对无名人物是**按调用顺序**发 人物#N 的,
-        边改写边 resolve 会让同一个人在不同行拿到不同编号。
+        Note the whole table must be built before any rewriting: resolve hands out 人物#N to unnamed
+        people **in call order**, so resolving while rewriting would give the same person a different
+        number on different lines.
         """
         return {c: self.resolve(c)[0] for c in cast_ids if c}
 
@@ -97,15 +112,17 @@ def flush_session_to_memory(
     chain_store: Any, llm: Any, embedder: Any, media_store: Any = None,
     clip_keys: Optional[dict[int, str]] = None, scenario: str = VIDEO_SCENARIO,
 ) -> Optional[CellBuild]:
-    """把 session 剧本行 flush 成带人物归属的 evidence + 一个 memcell。无行则返回 None。"""
+    """Flush the session's screenplay lines into evidence carrying character ownership plus one
+    memcell. Returns None when there are no lines."""
     lines = draft.all_lines(session_id)
     if not lines:
-        logger.info(f"视频记忆 flush:session={session_id} 无剧本行,跳过")
+        logger.info(f"video memory flush: session={session_id} no screenplay lines, skipping")
         return None
     clip_keys = clip_keys or {}
     resolver = _DisplayResolver(draft, char_store, by_chain, session_id)
 
-    # ① 原始媒体证据:每个有 key 的 clip 一条(modality=video,无 content_inline,不进 records)
+    # (1) Raw media evidence: one entry per clip that has a key (modality=video, no content_inline,
+    # not part of records)
     raw_id: dict[int, str] = {}
     for ci in sorted({r["clip"] for r in lines}):
         key = clip_keys.get(ci)
@@ -115,29 +132,37 @@ def flush_session_to_memory(
                              source={"session_id": session_id, "clip_index": ci, "kind": "raw_clip"})
         raw_id[ci] = evidence_store.append(rec)
 
-    # ② 派生行证据:holder=展示名,精确人物 id 走 source.character_id;时序收集喂 build_cell
-    # 先把全量 cast→展示名表建好(含 roster 里出场但没说过话的人:他们的 id 仍可能出现在别人
-    # 的动作行文本里),再逐行改写——不能边走边 resolve,否则无名人物的 人物#N 编号会漂。
-    # 顺序 = 首次出场顺序,不是 set 迭代序:人物#N 的编号必须可复现(否则同一段录像重跑,
-    # 同一个人会时而 人物#1 时而 人物#2)。没说过话的 roster 成员排在后面,按 id 排序兜底。
+    # (2) Derived line evidence: holder = display name, with the exact character id in
+    # source.character_id; collected in time order to feed build_cell.
+    # Build the complete cast -> display name table first (including roster members who appear but
+    # never speak: their ids can still show up inside someone else's action line), and only then
+    # rewrite line by line — resolving as we go would make the 人物#N numbering of unnamed people
+    # drift.
+    # The order is order of first appearance, not set iteration order: the 人物#N numbering has to be
+    # reproducible (otherwise re-running the same recording would make the same person 人物#1 one
+    # time and 人物#2 the next). Roster members who never spoke go at the end, sorted by id as a
+    # tiebreak.
     seen_order = list(dict.fromkeys(ln["who"] for ln in lines))
-    # 人物全集不能只取"说过话的 + roster":一个人可能整段没开口(佩戴者尤其常见),
-    # 却被别人的动作行提到("... while SW films")。commit 交付的 by_chain 才是权威全集。
+    # The full set of people cannot be just "those who spoke + the roster": someone may never open
+    # their mouth for the whole recording (especially common for the wearer) and yet be mentioned in
+    # someone else's action line ("... while SW films"). The by_chain that commit delivers is the
+    # authoritative full set.
     others = ({r.split(":")[-1] for r in by_chain} | set(draft.load_roster(session_id))
               | {WEARER_CAST_ID, ENV_WHO}) - set(seen_order)
     all_casts = seen_order + sorted(others)
     names = resolver.name_map(all_casts)
 
-    # ②.5 无名人物的说明行:每人**只列一次**,排在对话之前。
-    # 不然记忆里「人物#1」就是个空壳编号——episode/atom 读到它完全不知道是谁,
-    # 既没法判断跨会话是不是同一人,作答时也只能干巴巴复述这个编号。
-    # 有名字的人不用列:名字本身就是身份。挂 holder=env(这是旁白式说明,不是谁说的话)。
+    # (2.5) Intro lines for unnamed people: **listed once per person**, placed before the dialogue.
+    # Without them, 人物#1 is just a hollow number in memory — the episode/atom extraction has no
+    # idea who it refers to, there is no way to judge whether it is the same person across sessions,
+    # and answering can only parrot the number back. People with names need no intro: the name is the
+    # identity. Attached with holder=env (this is narration, not something anyone said).
     intro: list[EvidenceRecord] = []
     introduced: set[str] = set()
     for cast_id in all_casts:
         holder, cid = resolver.resolve(cast_id)
         if not holder.startswith(_ANON_PREFIX) or cid in introduced:
-            continue      # 两条 cast 可能在终审后并到同一人,按 character_id 去重
+            continue      # two casts may have merged into one person after final review, so dedup by character_id
         desc = rewrite_ids(resolver.describe(cast_id), names)
         if not desc:
             continue
@@ -156,7 +181,7 @@ def flush_session_to_memory(
             continue
         holder, cid = resolver.resolve(ln["who"])
         if (ln.get("kind") or "") == "action":
-            text = f"(action) {text}"      # 否则动作描述会被读成这个人说的话
+            text = f"(action) {text}"      # otherwise the action description gets read as words this person said
         ci = ln["clip"]
         rec = EvidenceRecord(
             holder=holder, content_inline=text, modality="video",
@@ -166,12 +191,12 @@ def flush_session_to_memory(
                     "raw_evidence_id": raw_id.get(ci)})
         evidence_store.append(rec)
         records.append(rec)
-    if len(records) == len(intro):     # 只有说明行、一句对话/动作都没有 → 没内容可记
-        logger.info(f"视频记忆 flush:session={session_id} 无可渲染行,跳过 build_cell")
+    if len(records) == len(intro):     # only intro lines, not a single line of dialogue or action -> nothing to record
+        logger.info(f"video memory flush: session={session_id} no renderable lines, skipping build_cell")
         return None
 
-    # ③ 一次 build_cell:全 session 行 = 一段录像一个 episode
-    logger.info(f"视频记忆 flush:session={session_id} lines={len(records) - len(intro)} "
+    # (3) One build_cell: all the session's lines = one recording, one episode
+    logger.info(f"video memory flush: session={session_id} lines={len(records) - len(intro)} "
                 f"intro={len(intro)} raw_clips={len(raw_id)} → build_cell")
     return build_cell(llm, embedder, evidence_store, cell_store, atom_store, records,
                       session_id=session_id, chain_store=chain_store, scenario=scenario)

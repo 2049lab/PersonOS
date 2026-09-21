@@ -1,12 +1,17 @@
-"""画像整理(consolidate):强模型一次出**补丁**,harness 打回 + 超限打回;短↔长 id 映射。
+"""Profile consolidation: a strong model emits a **patch** in one shot, with harness rejections and
+over-cap rejections; short <-> long id mapping.
 
-单阶段(无 digest):输入 = 当前画像(结构化,剥掉 sources 长 id)+ 上次出版本以来的新 cell
-(episode + atoms,标短标 c1..cN)+ 今天。LLM 只产补丁(增改汰,带自己选),profile_merge 合并,
-profile_harness 校验;两类打回:字段非法 / 某带超限。用尽:字段级不过保留旧版(返 None);
-仅超限则引擎踢最旧兜底后落库。
+Single-stage (no digest): the input is the current profile (structured, with the long source ids
+stripped) + the cells closed since the last published version (episode + atoms, labelled with the
+short handles c1..cN) + today's date. The LLM only produces a patch (add / rewrite / drop, choosing
+the band itself), profile_merge applies it, profile_harness validates it; there are two kinds of
+rejection: invalid fields, or a band over cap. Once retries run out: a field-level failure keeps the
+old version (returns None); a pure over-cap failure is persisted after the engine evicts the oldest
+as a backstop.
 
-id 映射规范(见记忆 llm-id-reference-short-long-mapping):LLM 只见/只写短标 c1..cN;
-校验按短标集;合并前短→长回填成真实 cell_id。
+Id mapping convention (see the llm-id-reference-short-long-mapping memory): the LLM only sees and
+only writes the short handles c1..cN; validation works on the short-handle set; before merging they
+are mapped back from short to the real cell_id.
 """
 
 from __future__ import annotations
@@ -23,7 +28,8 @@ from .llm import ChatLLM, chat_json, with_scenario
 from .profile_harness import validate_patch
 from .profile_merge import BAND_CAPS, apply_patch, enforce_caps, over_cap
 
-# 业务方场景注入 directive(只调关注度,不许编造画像)——见 llm.with_scenario
+# Directive for caller-scenario injection (it only tunes attention; inventing profile content is
+# forbidden) -- see llm.with_scenario
 _SCEN_DIR_PROFILE = ("Weight traits and facts in the caller's focus area as higher-value to keep and "
                      "keep current; it never licenses inventing profile content unsupported by the "
                      "memory.")
@@ -98,7 +104,8 @@ Write trait/fact text in the SAME language as the source dialogue.
 
 
 def _sanitized_profile_json(current: UserProfile | None) -> str:
-    """给 LLM 看的当前画像:剥掉 sources(真实长 id,LLM 不需要也不该抄),保留 id/text/band。"""
+    """The current profile as the LLM sees it: sources are stripped (they are real long ids, which the
+    LLM neither needs nor should copy), while id / text / band are kept."""
     if current is None:
         return "{}"
     d = current.model_dump()
@@ -113,7 +120,8 @@ def _sanitized_profile_json(current: UserProfile | None) -> str:
 
 def _render_input(current: UserProfile | None, cells: list[MemCell],
                   atoms_by_cell: dict[str, list[MemoryAtom]], today: date) -> tuple[str, dict[str, str]]:
-    """渲染用户消息 + 返回 {短标: 真实cell_id} 映射(新 cell 标 c1..cN)。"""
+    """Render the user message and return the {short handle: real cell_id} mapping (new cells are
+    labelled c1..cN)."""
     cell_map: dict[str, str] = {}
     blocks = []
     for i, c in enumerate(cells, 1):
@@ -134,11 +142,12 @@ def _render_input(current: UserProfile | None, cells: list[MemCell],
 
 
 def _remap_sources(patch: dict, cell_map: dict[str, str]) -> dict:
-    """短标 → 真实 cell_id 回填(校验已保证短标都在集内)。返回新 patch,不改入参。"""
+    """Map short handles back to real cell_ids (validation already guaranteed every handle is in the
+    set). Returns a new patch; the argument is not mutated."""
     def mp(src):
         return [cell_map[s] for s in (src or []) if s in cell_map]
 
-    out = json.loads(json.dumps(patch))          # 深拷贝
+    out = json.loads(json.dumps(patch))          # deep copy
     for t in (out.get("traits") or {}).values():
         if isinstance(t, dict) and "sources" in t:
             t["sources"] = mp(t["sources"])
@@ -162,9 +171,11 @@ def consolidate(llm: ChatLLM, *, current: UserProfile | None, cells: list[MemCel
                 atoms_by_cell: dict[str, list[MemoryAtom]], today: date,
                 max_retries: int = 2, max_tokens: int = 4096,
                 scenario: str = "") -> UserProfile | None:
-    """跑一次整理。无新 cell → None。字段级打回用尽仍不过 → None(保留旧版);
-    仅超限收敛不了 → 引擎踢最旧兜底后返回。
-    scenario:业务方场景描述(可空)——偏重调用方关注域的 traits/facts。"""
+    """Run one consolidation. No new cells -> None. Still failing after the field-level rejections run
+    out -> None (the old version is kept); a pure over-cap failure that will not converge -> return
+    after the engine evicts the oldest as a backstop.
+    scenario: the caller's scenario description (may be empty) — it biases traits/facts toward the
+    domains the caller cares about."""
     if not cells:
         return None
     today_str = today.isoformat()
@@ -174,7 +185,7 @@ def consolidate(llm: ChatLLM, *, current: UserProfile | None, cells: list[MemCel
                         scenario, _SCEN_DIR_PROFILE)
     messages = [{"role": "system", "content": sys},
                 {"role": "user", "content": user_msg}]
-    last_valid: UserProfile | None = None         # 字段合法但超限的候选(兜底用)
+    last_valid: UserProfile | None = None         # a candidate with valid fields but over cap (kept for the backstop)
 
     for attempt in range(max_retries + 1):
         raw = ""
@@ -182,7 +193,7 @@ def consolidate(llm: ChatLLM, *, current: UserProfile | None, cells: list[MemCel
             patch, raw = chat_json(llm, messages, max_tokens=max_tokens, temperature=0.2,
                                    stage="profile_consolidate")
             errs = validate_patch(patch, valid_cell_ids=valid)
-        except ValueError as e:                   # 输出非合法 JSON
+        except ValueError as e:                   # the output was not valid JSON
             raw = getattr(e, "raw", "")
             patch, errs = None, ["你的输出不是合法 JSON,请只输出 JSON 补丁本体"]
 
@@ -191,46 +202,52 @@ def consolidate(llm: ChatLLM, *, current: UserProfile | None, cells: list[MemCel
                                  today_str=today_str, evict=False)
             over = over_cap(merged)
             if not over:
-                logger.info(f"consolidate 成功 attempt={attempt + 1} cells={len(cells)}")
+                logger.info(f"consolidate succeeded attempt={attempt + 1} cells={len(cells)}")
                 return merged
-            last_valid = merged                    # 字段合法,仅超限
+            last_valid = merged                    # fields are valid, only the cap is exceeded
             errs = [f"{b} 带现有 {n} 条,超上限 {BAND_CAPS[b]};请合并/删除/升 long 收敛到上限内"
                     for b, n in over.items()]
 
         if attempt < max_retries:
-            logger.warning(f"consolidate 打回 attempt={attempt + 1} errs={errs[:3]}")
+            logger.warning(f"consolidate rejected attempt={attempt + 1} errs={errs[:3]}")
             messages = messages[:2] + [
                 {"role": "assistant", "content": raw},
                 {"role": "user", "content": _retry_msg(errs)},
             ]
 
-    if last_valid is not None:                     # 仅超限收敛不了 → 引擎兜底淘汰最旧后出版
+    if last_valid is not None:                     # pure over-cap that will not converge -> publish after the engine's backstop evicts the oldest
         enforce_caps(last_valid)
-        logger.warning(f"consolidate 超限打回未收敛,引擎踢最旧兜底后出版(cells={len(cells)})")
+        logger.warning(f"consolidate over-cap rejections did not converge, publishing after the engine evicted the oldest as a backstop (cells={len(cells)})")
         return last_valid
-    logger.warning(f"consolidate 字段打回 {max_retries} 次仍不过,保留旧版(cells={len(cells)})")
+    logger.warning(f"consolidate still failing field validation after {max_retries} rejections, keeping the previous version (cells={len(cells)})")
     return None
 
 
-# —— 触发退火 + 单 user 编排(runtime 接线用;拆出来便于单测)——
+# -- Trigger annealing + per-user orchestration (used by the runtime wiring; split out to make it
+# unit-testable) --
 
 def anneal_step(version_count: int) -> int:
-    """退火步长(按已出版本数):1,2,2,3,4,5…封顶 5。冷启动第 1 版尽早成形。"""
+    """The annealing step size (by number of published versions): 1, 2, 2, 3, 4, 5, ... capped at 5.
+    On a cold start this gets the first version into shape as early as possible."""
     ramp = (1, 2, 2, 3, 4, 5)
     return ramp[version_count] if version_count < len(ramp) else 5
 
 
 def should_consolidate(*, n_new: int, ep_chars: int, version_count: int,
                        ep_chars_trigger: int) -> bool:
-    """触发判定:新 cell 数达退火步长 或 episode 累计字数达上界,任一即触发。"""
+    """Trigger decision: fires when either the number of new cells reaches the annealing step size or
+    the accumulated episode character count reaches its ceiling."""
     return n_new >= anneal_step(version_count) or ep_chars >= ep_chars_trigger
 
 
 def run_user_consolidation(llm: ChatLLM, *, cells_store, atoms_store, profile_store,
                            today: date, scenario: str = "") -> int | None:
-    """一 user 的整理编排:读游标后新 cell + atoms → consolidate → 出版本。返回新版本号或 None。
+    """Consolidation orchestration for one user: read the cells + atoms after the cursor ->
+    consolidate -> publish a version. Returns the new version number or None.
 
-    幂等:读的是"上次出版本以来的新 cell";被单飞锁挡回/漏触发,下次触发自愈(读的仍是全部新 cell)。
+    Idempotent: what it reads is "the cells since the last published version", so if a single-flight
+    lock turns it away or a trigger is missed, the next trigger heals it (it still reads all the new
+    cells).
     """
     cur = profile_store.current()
     cursor = cur.up_to_cell_id if cur else ""
@@ -252,6 +269,6 @@ def run_user_consolidation(llm: ChatLLM, *, cells_store, atoms_store, profile_st
         facts_detail = "\n".join(
             f"    [{band}] " + " | ".join(f.text for f in merged.facts.get(band, []))
             for band in merged.facts)
-        logger.info(f"画像出版 v{version} user={getattr(profile_store, 'user_id', '?')} "
+        logger.info(f"profile published v{version} user={getattr(profile_store, 'user_id', '?')} "
                     f"cells={len(cells)}\n  ── traits ──\n{traits_detail}\n  ── facts ──\n{facts_detail}")
         return version

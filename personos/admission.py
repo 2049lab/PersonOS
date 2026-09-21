@@ -1,25 +1,30 @@
-"""后台在途任务的上限闸:满则拒(503),任务终态归还。
+"""Cap on in-flight background tasks: reject (503) when full, release on completion.
 
-上游故障、任务普遍变慢时,202 无限接单会让线程池队列无界膨胀(每项都攥着
-请求 payload 和闭包)——这是"用着用着内存吃穿"的最后防线。独立小模块、
-零 import 副作用,单测可直接引入(不触发 runtime 单例/连库)。
+When upstreams fail or tasks generally slow down, accepting 202s without limit lets
+the thread-pool queue grow unbounded (every entry holds on to a request payload and
+a closure) — this is the last line of defense against memory slowly being eaten up.
+A small standalone module with no import side effects, so unit tests can import it
+directly (no runtime singleton, no DB connection).
 """
 from __future__ import annotations
 
 import threading
 
-_MAX_PENDING = 200   # 后台在途任务上限(排队+执行中)
+_MAX_PENDING = 200   # Max in-flight background tasks (queued + running)
 
 
 class TaskOverloaded(RuntimeError):
-    """后台在途已满:调用方应快速失败/稍后重试,而不是继续堆积。"""
+    """In-flight capacity is full: callers should fail fast / retry later instead of
+    piling on more work."""
 
 
 class AdmissionGate:
-    """在途名额闸(threading.BoundedSemaphore 语义封装):满则拒,任务终态归还。
+    """In-flight permit gate (a wrapper around threading.BoundedSemaphore semantics):
+    reject when full, release when the task reaches a terminal state.
 
-    跨线程释放(提交线程占名额、worker 归还);归还次数超占用会炸 ValueError,
-    恰好是"每条路径都归还"的自检。"""
+    Release happens across threads (the submitting thread takes the permit, the worker
+    releases it); releasing more times than acquired raises ValueError, which is
+    exactly the self-check that "every path releases"."""
 
     def __init__(self, cap: int = _MAX_PENDING):
         self._sem = threading.BoundedSemaphore(cap)

@@ -22,28 +22,42 @@ from loguru import logger
 from personos import obs
 from personos.config import Config, get_config
 
-# 视频剧本调用**不能**共用文本 LLM 的超时(默认 120s):送进去的是整段 clip,
-# 模型侧还要自己去拉几十~上百 MB 视频再逐帧过,分钟级是常态——实测 60s/120帧 就要 109s,
-# 2min clip 必然顶穿 120s,表现为读超时→重试→判毒消息→**这条 clip 的记忆彻底丢**。
-# 这里给视频路径单独一个宽裕的上限;真正防呆靠 MAX_CLIP_DURATION_S 卡住过长 clip。
+# The screenplay call over video must **not** share the text LLM's timeout
+# (120s by default). We hand the model an entire clip, and the model service then
+# has to download tens to hundreds of MB itself and walk it frame by frame, so
+# minutes is normal: measured, a 60s/120-frame clip already takes 109s, which
+# means a 2-minute clip is certain to blow through 120s. The failure mode is
+# read timeout -> retry -> the message gets judged poisonous -> **the memory for
+# this clip is lost entirely**. So the video path gets its own generous ceiling,
+# and the real guard against runaway clips is MAX_CLIP_DURATION_S.
 VIDEO_TIMEOUT_S = float(os.environ.get("PERSONOS_VIDEO_MLLM_TIMEOUT", "600"))
 
 
 class ContentRejectedError(RuntimeError):
-    """内容审查拒绝(data_inspection_failed);上层可据此跳过该 clip。"""
+    """The content filter rejected the request (data_inspection_failed).
+
+    Callers use this to skip the clip.
+    """
 
 
 class MediaUnfetchableError(RuntimeError):
-    """模型服务侧**拉不动我们给的媒体 URL**(它自己下载超时/失败)。
+    """The model service **could not pull the media URL we gave it** — its own
+    download timed out or failed.
 
-    实测:2min @7.3Mbps(106MB)的 clip 必现 `Download multimodal file timed out`,同样时长
-    压到 1.6Mbps(23MB)则正常。属于"这个文件本身过大"的确定性失败——重试同一个 URL 只会
-    再烧一个下载窗口,故单独成类,由上层转成 ClipRejected 留痕跳过,而不是当瞬时故障重试。
+    Measured: a 2-minute clip at 7.3Mbps (106MB) reliably produces
+    `Download multimodal file timed out`, while the same duration re-encoded to
+    1.6Mbps (23MB) goes through. This is a deterministic "the file itself is too
+    big" failure, so retrying the same URL only burns another download window.
+    It gets its own class precisely so callers turn it into a recorded
+    ClipRejected and move on, rather than retrying it as a transient fault.
     """
 
 
 class OmniRunner:
-    """mm_runner 真后端:qwen3.5-omni-plus。chat(prompt, video_url=...) → 文本。"""
+    """The real mm_runner backend, talking to a hosted omni-style model.
+
+    chat(prompt, video_url=...) returns text.
+    """
 
     def __init__(self, cfg: Config | None = None, max_retries: int = 2) -> None:
         self.cfg = cfg or get_config()
@@ -70,7 +84,7 @@ class OmniRunner:
         if video_url:
             item: dict[str, Any] = {"type": "video_url", "video_url": {"url": video_url}}
             if video_fps is not None:
-                item["fps"] = float(video_fps)          # MAAS 只认 video_url 同级的 fps
+                item["fps"] = float(video_fps)          # the service only reads fps as a sibling of video_url
             content.append(item)
         for b64 in audio_b64_list or []:
             content.append({"type": "input_audio",
@@ -84,7 +98,9 @@ class OmniRunner:
         with obs.observation("omni.chat", as_type="generation", model=self.model,
                              input=prompt, metadata={"max_tokens": max_tokens,
                                                      "has_video": bool(video_url)}) as gen:
-            # 带视频的调用走长超时;纯图/纯文(仲裁、终审复核)仍用文本口径,快失败快重试
+            # Calls carrying video take the long timeout. Image-only and text-only
+            # calls (arbitration, final adjudication review) keep the text budget
+            # so they fail fast and retry fast.
             data = self._post(payload, timeout_s=VIDEO_TIMEOUT_S if video_url
                               else self.cfg.mllm_timeout)
             out = data["choices"][0]["message"]["content"] or ""
@@ -107,17 +123,19 @@ class OmniRunner:
             except (httpx.TransportError, httpx.HTTPStatusError) as e:
                 body = getattr(getattr(e, "response", None), "text", "") or ""
                 if "data_inspection_failed" in body:
-                    raise ContentRejectedError(f"Omni 内容审查拒绝: {body[:200]}") from e
+                    raise ContentRejectedError(f"rejected by the content filter: {body[:200]}") from e
                 if "Download multimodal file" in body:
-                    raise MediaUnfetchableError(f"模型侧拉取媒体失败: {body[:300]}") from e
+                    raise MediaUnfetchableError(f"the model service failed to fetch the media: {body[:300]}") from e
                 status = getattr(getattr(e, "response", None), "status_code", None)
-                if status and 400 <= status < 500:      # 客户端错误不重试
-                    # 截 200 字会把上游的真实原因切掉(实测 MAAS 的 detail 前缀就占一百多字),
-                    # 这类"不重试"的终态错误必须留全,否则只能靠再复现一次才能定位。
-                    logger.error(f"Omni 4xx 不重试: {status} {body[:1500]}")
+                if status and 400 <= status < 500:      # client errors are not retried
+                    # Truncating to 200 chars cuts off the upstream's actual reason
+                    # (measured: the service's detail prefix alone runs past a
+                    # hundred characters). Terminal, non-retried errors have to be
+                    # logged in full, or diagnosing them means reproducing them.
+                    logger.error(f"4xx, not retrying: {status} {body[:1500]}")
                     raise
                 attempt += 1
                 if attempt >= self.max_retries:
                     raise
-                logger.warning(f"Omni 第{attempt}次失败({e}),退避重试")
+                logger.warning(f"attempt {attempt} failed ({e}), backing off and retrying")
                 time.sleep(0.5 * attempt)

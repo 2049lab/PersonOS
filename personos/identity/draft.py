@@ -1,18 +1,30 @@
-"""会话草稿(⑤):身份链 / roster / 评估台账 / 暂存素材的会话态存取。
+"""Session drafts: session-scoped state for identity chains, the roster, the
+evaluation ledger and staged assets.
 
-移植 mneme AnchorStore 的 chain/roster 段(逐处对齐:union-find canonical、presence 累积、
-评估台账 append、commit_chain 标记),但**有意偏离**:mneme 这四类会话态在单 SQLite,personos
-禁 sqlite——落 Redis(key 经 redis_client.key() 收口,带滑动 TTL),持久层仍是 MySQL CharacterStore。
+The chain/roster machinery is a union-find over canonical pointers, with presence
+accumulation, an append-only evaluation ledger, and a commit_chain marker. All
+four kinds of session state live in Redis, keyed through redis_client.key() with a
+sliding TTL; sqlite is not allowed here. The persistent layer remains the
+MySQL-backed CharacterStore.
 
-素材偏离:harvest 出的 crop 即时传 OSS,草稿只存 oss_key + 归一化向量 + 质量(不内联 b64,Redis 不膨胀);
-仲裁卡按需从 OSS 取 b64。commit 时赢家 staged→character_assets 行 + cloud.learn(见 commit.py)。
+Assets are handled deliberately differently from the rest: a crop is uploaded to
+OSS the moment harvest produces it, and the draft keeps only the oss_key, the
+normalized vector and the quality. Nothing is inlined as b64, so Redis does not
+balloon; arbitration cards fetch b64 from OSS on demand. At commit time the
+winner's staged assets become character_assets rows and feed cloud.learn (see
+commit.py).
 
-存储布局:一个会话一个 STRING 键存整块 state JSON(chains/evals/roster/staged),读改写在会话写锁内
-(身份处理已持 session_lock),单命令 SET ... EX 原子写值+TTL(对齐 seg_store 踩坑:corvus 不走
-pipeline/Lua)。单键单命令,无多键 → 不需 hash-tag。
+Storage layout: one STRING key per session holding the whole state JSON (chains,
+evals, roster, staged). Read-modify-write happens inside the session write lock,
+which identity processing already holds, and the write itself is a single
+SET ... EX command so value and TTL land atomically. We avoid pipelines and Lua
+here for the same reason seg_store does: the Redis proxy we run behind mishandles
+them. One key and one command means no multi-key access, so no hash tag is needed.
 
-原则沿用 mneme:chain 只维护"当前假设"(hypothesis),全局归属推迟到会话末终审(commit.py);
-canonical=None 为链根,别名指向根(合并时压平一层深),pending=未提交且是链根。
+The governing principle: a chain only ever holds the *current hypothesis*. Global
+attribution is deferred to end-of-session final adjudication in commit.py.
+canonical=None marks a chain root, aliases point at the root (merging flattens
+them to one level deep), and pending means uncommitted and a root.
 """
 
 from __future__ import annotations
@@ -27,24 +39,33 @@ from loguru import logger
 from personos.identity.types import CastEvidence
 from personos.storage.redis_client import key as _redis_key
 
-# 会话草稿滑动 TTL:每次写续期;一个会话超过一天没有下一 clip,草稿作废(未提交链丢失=可接受,
-# 终审只处理仍在的 pending 链,重跑兜底)。与 seg_store SEG_TTL_S 同量级。
+# Sliding TTL for the session draft, renewed on every write. If a session goes a
+# whole day without another clip the draft expires. Losing uncommitted chains that
+# way is acceptable: final adjudication only handles pending chains that are still
+# there, and a re-run is the fallback. Same order of magnitude as seg_store's
+# SEG_TTL_S.
 IDDRAFT_TTL_S = 24 * 3600
 
-# chain 可更新字段白名单(逐字对齐 mneme AnchorStore._CHAIN_FIELDS)。
+# The whitelist of chain fields that may be updated.
 _CHAIN_FIELDS = frozenset({"canonical", "status", "hypothesis", "hypo_method", "best_face_q",
                            "best_voice_q", "named", "desc_text", "presence", "final_character_id"})
 
 
 def read_b64(media_store: Any, oss_key: str) -> str:
-    """OSS 素材 → b64(取素材失败返回空串:该角度缺失仍可凭其他角度判,不阻塞)。
-    身份层各处(候选卡/query卡/roster)共用,收口在最底层的 draft 模块。"""
+    """Read an asset out of OSS as b64.
+
+    A failed read returns an empty string rather than raising: with one angle
+    missing the decision can still be made from the others, so this must not
+    block. Shared by everything in the identity layer that builds cards
+    (candidate cards, query cards, roster), and kept here in the lowest-level
+    draft module so there is only one copy.
+    """
     if not oss_key or media_store is None:
         return ""
     try:
         return base64.b64encode(media_store.read_bytes(oss_key)).decode()
     except Exception as e:  # noqa: BLE001
-        logger.warning(f"取素材失败 {oss_key}: {e}")
+        logger.warning(f"failed to read asset {oss_key}: {e}")
         return ""
 
 
@@ -57,13 +78,18 @@ def _emb_arr(x: Any) -> Optional[np.ndarray]:
 
 
 class DraftStore:
-    """会话草稿存取基类:所有链/roster/评估/素材逻辑在此(纯 state dict 操作),
-    IO 由子类的 _read/_write 提供。实例绑定 user_id(圈死本用户社交圈,对齐 CharacterStore)。"""
+    """Base class for session-draft access.
+
+    All the chain, roster, evaluation and asset logic lives here as pure
+    operations on a state dict; subclasses supply the IO through _read/_write.
+    An instance is bound to one user_id, fencing it to that user's own social
+    circle just as CharacterStore does.
+    """
 
     def __init__(self, user_id: str) -> None:
         self.user_id = user_id
 
-    # ── 子类实现:整块 state 的读/写(按 session 隔离)──────────────────
+    # ── Implemented by subclasses: read/write the whole state, isolated per session ──
     def _read(self, session_id: str) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -76,8 +102,15 @@ class DraftStore:
                 "clip_seq": 0, "clip_keys": {}, "clips_done": {}}
 
     def next_clip_seq(self, session_id: str, clip_key: str = "") -> int:
-        """会话全局单调 clip 序号(每条视频消息 +1)+ 记 clip_index→oss_key。消费侧据此定 clip_index,
-        不信调用方——变态调用方(文→clips→文→clips)每批从 0 重编会撞 presence/lines,全局序号避免。"""
+        """Hand out the next session-global monotonic clip sequence number (one per
+        video message) and record clip_index -> oss_key.
+
+        The consuming side takes its clip_index from here rather than trusting the
+        caller. An awkward caller that interleaves text and clips (text -> clips ->
+        text -> clips) would renumber from 0 on each batch, and those repeated
+        indices would collide in presence and lines. A session-global counter
+        makes that impossible.
+        """
         state = self._read(session_id)
         seq = int(state.get("clip_seq", 0))
         state["clip_seq"] = seq + 1
@@ -87,33 +120,42 @@ class DraftStore:
         return seq
 
     def clip_keys(self, session_id: str) -> dict[int, str]:
-        """会话内 clip_index→oss_key(供 flush 时 raw_clip 证据回链)。"""
+        """clip_index -> oss_key within the session, so a flush can link raw_clip evidence back."""
         return {int(k): v for k, v in self._read(session_id).get("clip_keys", {}).items()}
 
-    # ── clip 级幂等 ────────────────────────────────────────────────
-    # 队列重投是**整条消息**重放的(一条消息最多 20 个 clip),而 clip 处理会累积 presence/
-    # lines/staged 素材。若不去重,批内第 19 个 clip 遇到瞬时故障就会让前 18 个重跑一遍,
-    # 出场记两遍、台词进两次 memcell、素材传两份——不是浪费算力,是**记错**。
+    # ── Per-clip idempotency ──────────────────────────────────────
+    # A queue redelivery replays the **whole message**, and one message carries up
+    # to 20 clips, while processing a clip accumulates presence, lines and staged
+    # assets. Without deduplication, a transient failure on the 19th clip of a
+    # batch re-runs the first 18: appearances counted twice, dialogue entering a
+    # memcell twice, assets uploaded twice. That is not wasted compute, it is
+    # **remembering something false**.
     #
-    # 去重必须挂在「已完成」上,不能挂在 next_clip_seq 的序号分配上:序号是在剧本 MLLM
-    # **之前**分配的,挂在那儿会让"剧本失败的 clip"在重投时被误判成已处理而跳过,
-    # 把重复记账换成静默丢记忆——更糟。故单独记一份 clip_key→已完成的 clip_index。
+    # The dedup marker has to hang off "finished", not off the sequence allocation
+    # in next_clip_seq. The sequence number is handed out *before* the screenplay
+    # model runs, so keying on it would make a clip whose screenplay failed look
+    # already-processed on redelivery and get skipped — trading double-counting for
+    # silently losing the memory, which is worse. Hence a separate record of
+    # clip_key -> the clip_index it completed as.
     def clip_done_index(self, session_id: str, clip_key: str) -> Optional[int]:
-        """该 clip 是否已**完整处理**过;是则返回它当时的 clip_index,否则 None。"""
+        """Whether this clip has already been processed **to completion**.
+
+        Returns the clip_index it had at the time, or None.
+        """
         if not clip_key:
             return None
         v = self._read(session_id).get("clips_done", {}).get(clip_key)
         return int(v) if v is not None else None
 
     def mark_clip_done(self, session_id: str, clip_key: str, clip_index: int) -> None:
-        """clip 全部环节落草稿后调用;此后同 key 重投即跳过。"""
+        """Call once every stage of the clip has landed in the draft; a redelivery of the same key then skips it."""
         if not clip_key:
             return
         state = self._read(session_id)
         state.setdefault("clips_done", {})[clip_key] = int(clip_index)
         self._write(session_id, state)
 
-    # ── chain_ref 约定(与 mneme 一致)────────────────────────────────
+    # ── The chain_ref convention ─────────────────────────────────────
     @staticmethod
     def chain_ref(session_id: str, cast_id: str) -> str:
         return f"chain:{session_id}:{cast_id}"
@@ -129,7 +171,7 @@ class DraftStore:
 
     @staticmethod
     def _default_chain(session_id: str, cast_id: str) -> dict[str, Any]:
-        """新链初始态(逐字对齐 mneme chain 表 DEFAULT)。"""
+        """The initial state of a new chain."""
         return {"chain_ref": DraftStore.chain_ref(session_id, cast_id),
                 "session_id": session_id, "cast_id": cast_id,
                 "canonical": None, "status": "pending", "hypothesis": "NEW",
@@ -153,7 +195,10 @@ class DraftStore:
         return dict(row) if row else None
 
     def canonical_chain(self, chain_ref: str) -> str:
-        """跟随 canonical 到链根,带环路守卫(merge_chain 已拒环,双保险)。"""
+        """Follow canonical pointers to the chain root, guarding against cycles.
+
+        merge_chain already refuses to create one; this is the second line of defence.
+        """
         chains = self._read(self._session_of(chain_ref))["chains"]
         seen: set[str] = set()
         current = chain_ref
@@ -178,8 +223,13 @@ class DraftStore:
         self._write(session_id, state)
 
     def merge_chain(self, src_ref: str, dst_ref: str) -> None:
-        """src 并入 dst:src.canonical=dst 根,压平 src 的既有别名到 dst 根(保持一层深,
-        commit 单层收集依赖此),证据(best_*/named/presence)并入 dst 根。逐字对齐 mneme。"""
+        """Merge src into dst.
+
+        src.canonical is set to dst's root and src's existing aliases are flattened
+        onto that root too, keeping the structure one level deep — commit's
+        single-level collection depends on that. The evidence (best_*, named,
+        presence) is merged into the dst root.
+        """
         dst = self.canonical_chain(dst_ref)
         if self.canonical_chain(src_ref) == dst:
             return
@@ -204,16 +254,19 @@ class DraftStore:
         return sorted(ref for ref, row in chains.items() if row.get("canonical") == chain_ref)
 
     def pending_chains(self, session_id: str) -> list[dict[str, Any]]:
-        """未提交且是链根(canonical=None)的链,按 cast_id 序。"""
+        """Chains that are uncommitted and are roots (canonical=None), ordered by cast_id."""
         chains = self._read(session_id)["chains"]
         rows = [dict(r) for r in chains.values()
                 if r["status"] == "pending" and not r.get("canonical")]
         return sorted(rows, key=lambda r: r["cast_id"])
 
     def commit_chain(self, canonical_ref: str, final_character_id: str) -> None:
-        """终审提交(草稿侧):链及其别名标 committed + final_character_id。
-        素材/名字的实际落库由 commit.py 走 CharacterStore(personos 无 anchor_line 表,
-        故 mneme commit_chain 的 line/asset 迁移不在此)。"""
+        """The draft side of a final-adjudication commit: mark the chain and its
+        aliases committed and record final_character_id.
+
+        Actually persisting assets and names is commit.py's job, through
+        CharacterStore.
+        """
         session_id = self._session_of(canonical_ref)
         state = self._read(session_id)
         for ref in (canonical_ref, *[r for r, row in state["chains"].items()
@@ -224,7 +277,7 @@ class DraftStore:
                 row["final_character_id"] = final_character_id
         self._write(session_id, state)
 
-    # ── chain 评估台账(append-only)─────────────────────────────────
+    # ── The chain evaluation ledger, append-only ────────────────────
     def add_chain_evaluation(self, chain_ref: str, *, session_id: str, clip_index: int,
                              reason: str, verdict: Optional[str],
                              evidence: Optional[dict[str, Any]] = None,
@@ -239,7 +292,7 @@ class DraftStore:
     def evaluations_for(self, chain_ref: str) -> list[dict[str, Any]]:
         return list(self._read(self._session_of(chain_ref))["evals"].get(chain_ref, []))
 
-    # ── roster(会话续接名册)─────────────────────────────────────────
+    # ── The roster: this session's continuation register ────────────
     def load_roster(self, session_id: str) -> dict[str, dict[str, Any]]:
         roster: dict[str, dict[str, Any]] = {}
         for cast_id, entry in self._read(session_id)["roster"].items():
@@ -249,8 +302,12 @@ class DraftStore:
         return roster
 
     def names_for(self, chain_ref: str) -> list[str]:
-        """会话内链名:从 roster 卡取(chain_ref→cast_id→roster[cast_id].name)。
-        持久档的名字在 CharacterStore.names_for;链名会话末归并进档(commit.py)。"""
+        """The chain's name within this session, read off the roster card
+        (chain_ref -> cast_id -> roster[cast_id].name).
+
+        Names on the persistent profile live in CharacterStore.names_for; the
+        chain's name is merged into the profile at end-of-session by commit.py.
+        """
         cast_id = chain_ref.split(":")[-1]
         card = self._read(self._session_of(chain_ref))["roster"].get(cast_id, {}).get("card") or {}
         name = card.get("name")
@@ -263,11 +320,17 @@ class DraftStore:
         state["roster"][cast_id] = {"character_id": character_id, "card": payload}
         self._write(session_id, state)
 
-    # ── 剧本行缓冲(会话末 flush 成带人物归属的 evidence,见 online/video_memory)──
+    # ── The screenplay line buffer. At end-of-session it is flushed into
+    #    evidence carrying person attribution; see online/video_memory ──
     def stage_lines(self, session_id: str, clip_index: int,
                     lines: list[tuple[float, float, str, str, str]]) -> None:
-        """缓存一个 clip 的剧本行。lines=[(t0,t1,who,kind,text)],who=已映射的会话 cast id
-        (cast_map.get(line.who))/ 'SW' / 'ENV'(env 行)。会话内追加,时序由 clip_index+t0 定。"""
+        """Buffer one clip's screenplay lines.
+
+        lines is [(t0, t1, who, kind, text)], where who is the already-mapped
+        session cast id (cast_map.get(line.who)), or 'SW', or 'ENV' for
+        environment lines. Lines append within the session, and their order is
+        determined by clip_index plus t0.
+        """
         state = self._read(session_id)
         for t0, t1, who, kind, text in lines:
             state["lines"].append({"clip": clip_index, "t0": float(t0), "t1": float(t1),
@@ -275,14 +338,18 @@ class DraftStore:
         self._write(session_id, state)
 
     def all_lines(self, session_id: str) -> list[dict[str, Any]]:
-        """全 session 剧本行,按 (clip_index, t0) 时序返回(供 commit flush)。"""
+        """All of the session's screenplay lines in (clip_index, t0) order, for the commit flush."""
         return sorted(self._read(session_id)["lines"], key=lambda r: (r["clip"], r["t0"]))
 
-    # ── 暂存素材(crop 走 OSS,草稿只存 key+向量+质量)──────────────────
+    # ── Staged assets: crops go to OSS, the draft keeps only key, vector and quality ──
     def stage_evidence(self, chain_ref: str, *, session_id: str, clip_index: int,
                        evidence: CastEvidence, media_store: Any) -> None:
-        """把一个 cast 本 clip 的证据素材暂存:crop 即时传 OSS,元数据(oss_key/向量/q/t)入草稿。
-        供仲裁卡取素材 + 终审时赢家学云入库(commit.py)。"""
+        """Stage one cast's evidence assets from this clip: the crop is uploaded to
+        OSS immediately and the metadata (oss_key, vector, q, t) goes into the draft.
+
+        This is what arbitration cards draw their assets from, and what the winner
+        learns into the cloud and persists from at final adjudication (commit.py).
+        """
         state = self._read(session_id)
         st = state["staged"].setdefault(chain_ref, {"face": [], "body": [], "voice": []})
         for f in evidence.faces:
@@ -307,13 +374,20 @@ class DraftStore:
         self._write(session_id, state)
 
     def active_staged(self, chain_ref: str, kind: str) -> list[dict[str, Any]]:
-        """某 kind 的暂存素材,按 q 降序(终审学云/入库用;emb 还原成 np 向量)。"""
+        """Staged assets of one kind, ordered by q descending.
+
+        Used by final adjudication for cloud learning and persistence; emb is
+        restored to a numpy vector.
+        """
         items = self._read(self._session_of(chain_ref))["staged"].get(chain_ref, {}).get(kind, [])
         out = [{**it, "embedding": _emb_arr(it.get("emb"))} for it in items]
         return sorted(out, key=lambda a: a["q"], reverse=True)
 
     def best_pair(self, chain_ref: str) -> Optional[dict[str, Any]]:
-        """质量最高的脸 + 最佳全身(仲裁卡素材)。返回 oss_key(卡侧再从 OSS 取 b64)。"""
+        """The highest-quality face plus the best body shot, as arbitration card material.
+
+        Returns oss_keys; the card side then fetches the b64 from OSS.
+        """
         staged = self._read(self._session_of(chain_ref))["staged"].get(chain_ref, {})
         faces = staged.get("face") or []
         bodies = staged.get("body") or []
@@ -332,7 +406,8 @@ class DraftStore:
         best = max(voices, key=lambda a: a["q"])
         return {"oss_key": best.get("oss_key", ""), "quality": best["q"]}
 
-    # ── OSS 落地(素材偏离:crop 即时进 OSS,失败不阻塞——向量仍在草稿)──
+    # ── Landing in OSS. The crop goes up immediately, and a failure does not
+    #    block: the vector is still in the draft ─────────────────────────
     def _save_img(self, media_store: Any, b64: str, content_type: str) -> str:
         if media_store is None or not b64:
             return ""
@@ -340,7 +415,7 @@ class DraftStore:
             return media_store.save_image(base64.b64decode(b64), owner=self.user_id,
                                           content_type=content_type).key
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"草稿素材存 OSS 失败: {e}")
+            logger.warning(f"failed to store draft asset in the object store: {e}")
             return ""
 
     def _save_audio(self, media_store: Any, wav_bytes: Optional[bytes]) -> str:
@@ -349,15 +424,18 @@ class DraftStore:
         try:
             return media_store.save_audio(wav_bytes, owner=self.user_id)
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"草稿声纹 wav 存 OSS 失败: {e}")
+            logger.warning(f"failed to store draft voiceprint wav in the object store: {e}")
             return ""
 
 
 class RedisDraftStore(DraftStore):
-    """生产实现:corvus 上一个会话一个 STRING 键存整块 state JSON。
+    """The production implementation: one STRING key per session on Redis, holding
+    the whole state JSON.
 
-    key = {env}:personos:iddraft:{user}:{session};SET ... EX 单命令原子写值+TTL
-    (不走 pipeline/Lua——对齐 seg_store:corvus 对 pipeline 会错位串包)。
+    key = {env}:personos:iddraft:{user}:{session}, written with a single
+    SET ... EX so the value and its TTL land atomically. No pipelines and no Lua,
+    for the same reason as seg_store: the Redis proxy we run behind can misframe
+    pipelined commands and cross responses between them.
     """
 
     def __init__(self, client, user_id: str, ttl_s: int = IDDRAFT_TTL_S) -> None:
@@ -380,7 +458,9 @@ class RedisDraftStore(DraftStore):
 
 
 class MemoryDraftStore(DraftStore):
-    """进程内实现(本地脚本/单测/未配 Redis 的单副本)。state 按 (user, session) 存内存。"""
+    """The in-process implementation, for local scripts, unit tests, and single-replica
+    deployments with no Redis configured. State is held in memory per (user, session).
+    """
 
     def __init__(self, user_id: str) -> None:
         super().__init__(user_id)

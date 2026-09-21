@@ -1,7 +1,8 @@
-"""⑤b ChainBook 单测:MemoryDraftStore,无网/无模型。
+"""ChainBook unit tests backed by MemoryDraftStore, with no network and no model calls.
 
-覆盖 observe_clip 四类刷新触发、apply_verdict 同框合并守卫、vote_summary/strong_majority、
-pending_cards 排除同框。逐处对照 mneme chains.py 语义。
+Covers the four refresh triggers of observe_clip, the co-presence merge guard in apply_verdict,
+vote_summary/strong_majority, and pending_cards excluding co-present chains. Matched point by point against the
+reference implementation's chain semantics.
 """
 
 from __future__ import annotations
@@ -40,27 +41,29 @@ def test_observe_first_seen_then_better_face():
     sc = _script([CastDecl(local_id="P1", desc="a man")], {"P1": "S1"})
     r1 = book.observe_clip(S, 0, sc, {"S1": CastEvidence("S1", faces=[_face(0.5)])})
     ref = book.store.chain_ref(S, "S1")
-    assert r1[ref] == [FIRST_SEEN]                          # 首见只报 first_seen
+    assert r1[ref] == [FIRST_SEEN]                          # the first sighting reports first_seen only
     chain = book.store.get_chain(ref)
     assert chain["best_face_q"] == 0.5 and chain["presence"] == [0] and chain["desc_text"] == "a man"
-    # 更好的脸 → better_face(first_seen 不再报)
+    # A better face triggers better_face, and first_seen is no longer reported.
     r2 = book.observe_clip(S, 1, sc, {"S1": CastEvidence("S1", faces=[_face(0.8)])})
     assert r2[ref] == [BETTER_FACE]
     assert book.store.get_chain(ref)["best_face_q"] == 0.8 and book.store.get_chain(ref)["presence"] == [0, 1]
-    # 更差的脸 → 不刷新
+    # A worse face triggers no refresh at all.
     r3 = book.observe_clip(S, 2, sc, {"S1": CastEvidence("S1", faces=[_face(0.3)])})
     assert ref not in r3
 
 
 def test_observe_first_name_trigger():
     book = _book()
-    # 首见 + 被介绍的名字应同报 first_seen(first_seen 已含首证据,不并列 first_name)
+    # A first sighting that already carries an introduced name still reports only first_seen, because first_seen
+    # already covers the first evidence and first_name is not reported alongside it.
     sc = _script([CastDecl(local_id="P1", name="Bob", name_evidence="introduction", desc="d")],
                  {"P1": "S1"})
     r = book.observe_clip(S, 0, sc, {"S1": CastEvidence("S1")})
     ref = book.store.chain_ref(S, "S1")
     assert r[ref] == [FIRST_SEEN] and book.store.get_chain(ref)["named"] == 1
-    # 第二 clip 若首次得名(此前无名)才触发 FIRST_NAME:构造一条本来无名的链
+    # FIRST_NAME only fires when a name arrives for the first time on a previously unnamed chain, so build a chain
+    # that starts out nameless.
     sc2 = _script([CastDecl(local_id="P2", desc="d2")], {"P2": "S2"})
     book.observe_clip(S, 0, sc2, {"S2": CastEvidence("S2")})
     sc2b = _script([CastDecl(local_id="P2", name="Al", name_evidence="explicit_dialogue", desc="d2")],
@@ -71,14 +74,14 @@ def test_observe_first_name_trigger():
 
 def test_apply_verdict_copresent_merge_rejected():
     book = _book()
-    # 两条链同框(presence 交集非空),企图把 S1 并入 S2 应被拒
+    # The two chains are co-present (their presence sets intersect), so trying to merge S1 into S2 must be rejected.
     for c in ("S1", "S2"):
         book.store.ensure_chain(S, c)
         book.store.update_chain(book.store.chain_ref(S, c), presence=[0])
     r1, r2 = book.store.chain_ref(S, "S1"), book.store.chain_ref(S, "S2")
     out = book.apply_verdict(r1, r2, session_id=S, clip_index=0,
                              reason="collision_rearbitration", issues=[])
-    assert out == book.store.canonical_chain(r1)            # 假设不变,未合并
+    assert out == book.store.canonical_chain(r1)            # the hypothesis is unchanged and no merge happened
     assert book.store.canonical_chain(r1) != book.store.canonical_chain(r2)
 
 
@@ -86,7 +89,7 @@ def test_apply_verdict_hypothesis_and_vote_majority():
     book = _book()
     book.store.ensure_chain(S, "S1")
     ref = book.store.chain_ref(S, "S1")
-    # 3 次证据触发评估都判 char_a → 强多数
+    # Three evidence-triggered evaluations all land on char_a, which is a strong majority.
     for i in range(3):
         book.apply_verdict(ref, "char_a", session_id=S, clip_index=i,
                            reason=FIRST_SEEN if i == 0 else BETTER_FACE, issues=[])
@@ -100,12 +103,12 @@ def test_pending_cards_excludes_copresent():
     book = _book()
     for c in ("S1", "S2", "S3"):
         book.store.ensure_chain(S, c)
-    # S1 与 S2 同框;S3 独立
+    # S1 and S2 are co-present; S3 stands alone.
     book.store.update_chain(book.store.chain_ref(S, "S1"), presence=[0])
     book.store.update_chain(book.store.chain_ref(S, "S2"), presence=[0])
     book.store.update_chain(book.store.chain_ref(S, "S3"), presence=[1])
     cards = book.pending_cards(S, for_chain=book.store.chain_ref(S, "S1"))
     ids = {c.character_id for c in cards}
-    assert book.store.chain_ref(S, "S2") not in ids         # 同框排除
+    assert book.store.chain_ref(S, "S2") not in ids         # excluded because it is co-present
     assert book.store.chain_ref(S, "S3") in ids
-    assert book.store.chain_ref(S, "S1") not in ids         # 自身排除
+    assert book.store.chain_ref(S, "S1") not in ids         # the chain itself is excluded

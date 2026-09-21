@@ -1,7 +1,9 @@
-"""V0 身份层:CharacterStore(3 表存取)+ CloudEngine(概率云)+ per-user 隔离。
+"""V0 identity layer: CharacterStore (reads/writes across 3 tables) + CloudEngine (the probability
+cloud) + per-user isolation.
 
-用 conftest 的 autouse `db`(rollback_scope,写入测试结束回退,共享 SIT 库零污染)。
-向量 roundtrip 走真 MySQL 的 UNHEX/HEX hex 通道(float32)。
+Uses the autouse `db` fixture from conftest (a rollback scope, so every write is reverted when the
+test ends and the shared integration database stays clean). Vector round-trips go through the real
+MySQL UNHEX/HEX channel (float32).
 """
 
 from __future__ import annotations
@@ -18,7 +20,8 @@ U2 = "vtest_user_b"
 
 
 def _e(i: int, dim: int = 8) -> np.ndarray:
-    """第 i 个坐标轴的单位向量(彼此正交,便于构造"像/不像")。"""
+    """Unit vector along the i-th axis; these are mutually orthogonal, which makes it easy to
+    construct "similar" and "dissimilar" cases."""
     v = np.zeros(dim, dtype=np.float64)
     v[i] = 1.0
     return v
@@ -57,7 +60,7 @@ def test_name_claim_count_and_primary(store):
     cid = store.create_character()
     store.add_name_claim(cid, "李四", "被叫到")
     store.add_name_claim(cid, "老李", "别称")
-    store.add_name_claim(cid, "李四", "又被叫")           # 李四 cnt=2
+    store.add_name_claim(cid, "李四", "又被叫")           # count for 李四 is now 2
     assert store.names_for(cid) == ["李四", "老李"]
     assert store.get_character(cid)["primary_name"] == "李四"
 
@@ -81,7 +84,7 @@ def test_prototype_roundtrip_and_tau_mirror(store):
     store.save_prototype(cid, "face", mean, tau=3.5, n_obs=4)
     m, tau, n = store.load_prototype(cid, "face")
     assert np.allclose(m.astype(np.float64), mean, atol=1e-6) and tau == 3.5 and n == 4
-    assert store.get_character(cid)["face_tau"] == 3.5   # τ 镜像到 characters
+    assert store.get_character(cid)["face_tau"] == 3.5   # tau is mirrored onto the characters row
 
 
 def test_template_add_list_remove(store):
@@ -95,7 +98,7 @@ def test_template_add_list_remove(store):
 
 
 def test_per_user_isolation(db, store):
-    """A 建的角色,B 一律查不到——user_id 是墙。"""
+    """A character created by user A is entirely invisible to user B -- user_id is the wall."""
     cid = store.create_character()
     other = CharacterStore(db, U2)
     assert other.get_character(cid) is None
@@ -129,12 +132,12 @@ def test_score_similar_beats_dissimilar(store, cloud):
 
 def test_score_none_when_no_cloud(store, cloud):
     cid = store.create_character()
-    assert cloud.score_observation(cid, "voice", _e(0), 1.0) is None   # 该模态无云
+    assert cloud.score_observation(cid, "voice", _e(0), 1.0) is None   # no cloud for that modality
 
 
 def test_template_cap_enforced(store, cloud):
     cid = store.create_character()
-    for i in range(5):                       # cap=3,喂 5 个不同向量
+    for i in range(5):                       # cap=3, feed 5 different vectors
         cloud.learn(cid, "face", _e(i), q=0.5 + 0.1 * i)
     assert len(store.templates(cid, "face")) == 3
 
@@ -157,4 +160,4 @@ def test_score_evidence_fuses_modalities(store, cloud):
                       faces=[FacePick(t=0.0, embedding=_e(0), q=1.0)],
                       voices=[VoiceSample(t0=0.0, t1=1.0, embedding=_e(2), q=1.0)])
     only_face = CastEvidence(cast_id="P1", faces=[FacePick(t=0.0, embedding=_e(0), q=1.0)])
-    assert cloud.score_evidence(cid, ev) > cloud.score_evidence(cid, only_face)  # 双模态相加更高
+    assert cloud.score_evidence(cid, ev) > cloud.score_evidence(cid, only_face)  # two modalities add up to a higher score
