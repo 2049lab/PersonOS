@@ -594,8 +594,13 @@ class SessionWriter:
         img_text = ""
         if self.mllm is not None and getattr(self.mllm, "available", False):
             ctx = _transcript((context or [])[-_BOUNDARY_WINDOW:]) if context else ""
-            purpose = (f"本段对话正在聊:\n{ctx}\n\n带着这段上下文,说明图片里与之相关的事实。"
-                       if ctx else "客观说明图片里可见的事实(人物/文字/场景/可数对象)。")
+            # English, so that an image description comes back in the library's
+            # default language rather than following the prompt's. The model
+            # still describes content in whatever language the image contains.
+            purpose = (f"This conversation is about:\n{ctx}\n\nWith that context, "
+                       "state the facts in the image that relate to it."
+                       if ctx else "State the facts visible in the image: people, text, "
+                                   "scene, countable objects.")
             img_text = self.mllm.look_image(image, purpose, content_type=content_type)
         return content_ref, sha256, img_text
 
@@ -614,7 +619,7 @@ class SessionWriter:
             if img_text:
                 # The image understanding text is merged into the utterance: the user's caption first,
                 # the observed facts after (so W1 and W2 read them together)
-                content_inline = (m.text + "\n" if m.text.strip() else "") + f"[图片] {img_text}"
+                content_inline = (m.text + "\n" if m.text.strip() else "") + f"[image] {img_text}"
         evidence_id = append_utterance(self.evidence_store, session_id=self.session_id,
                                        speaker=m.speaker, text=content_inline, now_dt=now_dt,
                                        modality=modality, content_ref=content_ref, sha256=sha256)

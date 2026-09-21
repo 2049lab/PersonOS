@@ -57,6 +57,13 @@ class Config:
     llm_model: str = "gpt-4o-mini"
     llm_timeout: float = 120.0      # non-streaming with large max_tokens: 60s+ is normal
     llm_app_id: str = ""            # some gateways require an application id header
+    # Which provider implementation to use, by registry name. Exists so a fork
+    # can register a private gateway and select it with an environment variable
+    # instead of patching shipped code — see providers/registry.py.
+    llm_provider: str = "openai"
+    embedder_provider: str = "openai"
+    mllm_provider: str = "openai"
+    reranker_provider: str = ""     # empty = pick automatically from the rerank settings
 
     embedding_base_url: str = ""    # falls back to llm_base_url
     embedding_api_key: str = ""     # falls back to llm_api_key
@@ -190,6 +197,10 @@ def load_config() -> Config:
         llm_model=_env("PERSONOS_LLM_MODEL", "gpt-4o-mini"),
         llm_timeout=float(_env("PERSONOS_LLM_TIMEOUT", "120")),
         llm_app_id=_env("PERSONOS_LLM_APP_ID"),
+        llm_provider=_env("PERSONOS_LLM_PROVIDER", "openai"),
+        embedder_provider=_env("PERSONOS_EMBEDDER_PROVIDER", "openai"),
+        mllm_provider=_env("PERSONOS_MLLM_PROVIDER", "openai"),
+        reranker_provider=_env("PERSONOS_RERANKER_PROVIDER"),
         embedding_base_url=_env("PERSONOS_EMBEDDING_BASE_URL"),
         embedding_api_key=_env("PERSONOS_EMBEDDING_API_KEY"),
         embedding_model=_env("PERSONOS_EMBEDDING_MODEL", "text-embedding-3-small"),

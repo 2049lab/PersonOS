@@ -89,9 +89,10 @@ class Memory:
         # Providers are resolved by name, so a fork can register its own gateway
         # without editing this file. Chat and embedding are separate objects
         # even though one endpoint usually serves both.
-        self.llm = build_provider("llm", "openai")
-        self.embedder = build_provider("embedder", "openai")
-        reranker_provider = "openai" if settings.rerank_api_key and settings.rerank_model else "noop"
+        self.llm = build_provider("llm", settings.llm_provider)
+        self.embedder = build_provider("embedder", settings.embedder_provider)
+        reranker_provider = settings.reranker_provider or (
+            "openai" if settings.rerank_api_key and settings.rerank_model else "noop")
         scorer = build_provider("reranker", reranker_provider) if reranker_provider == "openai" else None
         # R2: wrap the scorer so a failed rerank degrades to pass-through order
         # instead of blocking the main path (see ScoringReranker).
@@ -102,7 +103,8 @@ class Memory:
         # Object storage is built lazily — wired up on the first ingest that carries an
         # image; if credentials are missing media_store stays None, so the original
         # image isn't kept but nothing is blocked.
-        self.mllm = build_provider("mllm", "openai" if settings.mllm_api_key else "none")
+        self.mllm = build_provider(
+            "mllm", settings.mllm_provider if settings.mllm_api_key else "none")
         self._media_store = None
         self._media_guard = threading.Lock()
         # -- Cross-replica session state (segments / locks): wired up on first use

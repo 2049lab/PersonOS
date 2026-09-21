@@ -15,26 +15,28 @@ from datetime import datetime
 
 from ..storage.profile_store import BANDS, PMO16, UserProfile
 
-_DISCLAIMER = ("USER PROFILE(关于提问用户的已知信息,仅用于理解问题与组织回答,"
-               "不可当作回答事实依据):")
+_DISCLAIMER = ("USER PROFILE (what is known about the person asking. Use it to interpret "
+               "the question and shape the answer; never cite it as evidence):")
 
-# English key -> Chinese label (the injected text goes to the answering / rewriting LLM, and reads
-# better in a Chinese context)
+# Display labels for the profile dimensions. This text is injected into the
+# rewriting and answering prompts, so it is part of what the model reads.
 _KEY_LABELS = {
-    "personality": "性格", "communication_style": "沟通风格", "social_style": "社交倾向",
-    "occupation": "职业", "goals": "目标", "values": "价值观", "work_style": "工作模式",
-    "learning_style": "学习模式", "tech_environment": "技术环境", "lifestyle": "生活方式",
-    "health": "健康", "finance": "财务",
-    "identity": "身份", "location": "地域", "family": "家庭", "interests": "兴趣",
+    "personality": "personality", "communication_style": "communication style",
+    "social_style": "social style", "occupation": "occupation", "goals": "goals",
+    "values": "values", "work_style": "work style", "learning_style": "learning style",
+    "tech_environment": "tech environment", "lifestyle": "lifestyle",
+    "health": "health", "finance": "finance",
+    "identity": "identity", "location": "location", "family": "family",
+    "interests": "interests",
 }
-_STATUS_CN = {"confirmed": "确认", "inferred": "推断"}
+_STATUS_LABELS = {"confirmed": "confirmed", "inferred": "inferred"}
 
 
 def _fmt_date(s: str) -> str:
-    """2026-09-10 -> the Chinese date form; returned unchanged when it cannot be parsed."""
+    """Normalise a date for display; returned unchanged when it cannot be parsed."""
     try:
         d = datetime.strptime(s, "%Y-%m-%d")
-        return f"{d.year}年{d.month:02d}月{d.day:02d}日"
+        return d.strftime("%Y-%m-%d")
     except (ValueError, TypeError):
         return s or "?"
 
@@ -50,10 +52,10 @@ def render(profile: UserProfile | None, *, mode: str = "full") -> str:
     for key in PMO16:                                    # fixed order (L1 -> L3), stable and unit-testable
         t = profile.traits.get(key)
         if t and t.text:
-            lc = f",印证于{_fmt_date(t.last_confirmed)}" if t.last_confirmed else ""
-            trait_lines.append(f"{_KEY_LABELS.get(key, key)}: {t.text}({_STATUS_CN.get(t.status, t.status)}{lc})")
+            lc = f", last confirmed {_fmt_date(t.last_confirmed)}" if t.last_confirmed else ""
+            trait_lines.append(f"{_KEY_LABELS.get(key, key)}: {t.text}({_STATUS_LABELS.get(t.status, t.status)}{lc})")
     if trait_lines:
-        lines.append("[基本特征]")
+        lines.append("[Traits]")
         lines.extend(trait_lines)
 
     if mode == "full":
@@ -63,7 +65,7 @@ def render(profile: UserProfile | None, *, mode: str = "full") -> str:
                 if f.text:
                     fact_lines.append(f"- {f.text}")     # the date is already in the body text, so rendering adds no prefix
         if fact_lines:
-            lines.append("[近期事实]")
+            lines.append("[Recent facts]")
             lines.extend(fact_lines)
 
     if not lines:                                        # nothing at all -> empty string (the consumer's None path)

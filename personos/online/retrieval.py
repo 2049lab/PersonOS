@@ -598,4 +598,4 @@ def answer_from_cells(
 
 # Chinese names for the epistemic status, shared by the answering material and the public view (the
 # three object_type categories, which affect how the answer is worded).
-_TYPE_CN = {"event": "经历", "fact": "事实", "claim": "说法"}
+_TYPE_LABELS = {"event": "experience", "fact": "fact", "claim": "claim"}

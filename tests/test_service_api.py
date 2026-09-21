@@ -27,7 +27,7 @@ def test_memory_view_is_clean_and_traceable():
     assert v["atom_id"] == a.id and v["evidence_refs"] == ["ev_1", "ev_2"] and v["evidence"] == []
     # The semantic / ownership / time fields are complete, and the owning cell pointer is
     # exposed so the caller can look the episode narrative up again.
-    assert v["type"] == "事实" and v["holder"] == "user" and v["cell_id"] == "cell_1"
+    assert v["type"] == "fact" and v["holder"] == "user" and v["cell_id"] == "cell_1"
     assert v["domains"] == ["D05"] and v["occurred_at"].startswith("2026-07-13")
     assert v["kind"] == "K09"
     # Leaks NOTHING internal: scoring, RRF score, rerank score and prompts stay out of the
@@ -56,6 +56,6 @@ def test_memory_view_inlines_evidence_with_qa(db):
 def test_memory_view_falls_back_to_recorded_at():
     a = MemoryAtom(object_type="claim", text="随口一说")
     v = memory_view(a)
-    assert v["occurred_at"] is not None and v["type"] == "说法"
+    assert v["occurred_at"] is not None and v["type"] == "claim"
     assert v["cell_id"] is None                            # not attached to a cell -> None, no crash
     assert v["evidence_refs"] == [] and v["evidence"] == []      # no evidence, still no crash

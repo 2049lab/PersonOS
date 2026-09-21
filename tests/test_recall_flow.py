@@ -131,8 +131,8 @@ def test_empty_store_short_circuits_no_answer_no_review(db, evidence_store):
     assert o.hits == [] and o.ranked == [] and o.reviews == []
     assert llm.calls["answerer"] == 0 and llm.calls["answer reviewer"] == 0   # neither station is called
     assert o.escalated                                       # auto mode escalates to the deep track, which fails under the doubles and falls back
-    assert "结论:记忆库中没有足以回答该问题的相关记忆" in o.ans.answer
-    assert "可能原因" in o.ans.answer and "检索范围" in o.ans.answer
+    assert "No memory relevant enough to answer this was found" in o.ans.answer
+    assert "Possible reason" in o.ans.answer and "Searched:" in o.ans.answer
 
 
 def test_defect_retries_once_then_ok(db, evidence_store):
@@ -189,7 +189,7 @@ def test_insufficient_escalates_directly(db, evidence_store):
                    session_id="s1", query="画展什么时候", now_dt=_T)
     assert llm.calls["answerer"] == 1 and not o.retried       # no re-answer
     assert o.escalated                                        # straight to the deep track, which fails under the double and falls back
-    assert "缺口:只有画展筹备,没有具体展期" in o.ans.answer    # the critique lands in the factual explanation
+    assert "Gap: 只有画展筹备,没有具体展期" in o.ans.answer    # the critique lands in the factual explanation
 
 
 def test_fast_mode_insufficient_keeps_draft(db, evidence_store):

@@ -23,15 +23,15 @@ def test_none_and_empty_render_to_blank():
 
 def test_full_render_has_traits_and_facts():
     out = render(_profile(), mode="full")
-    assert "USER PROFILE" in out and "不可当作回答事实依据" in out   # the disclaimer line
-    assert "[基本特征]" in out and "沟通风格: direct and terse(推断,印证于2026年09月01日)" in out
-    assert "[近期事实]" in out and "- 2026-09-14 had ramen" in out   # the date lives in the body text
+    assert "USER PROFILE" in out and "never cite it as evidence" in out   # the disclaimer line
+    assert "[Traits]" in out and "communication style: direct and terse(inferred, last confirmed 2026-09-01)" in out
+    assert "[Recent facts]" in out and "- 2026-09-14 had ramen" in out   # the date lives in the body text
 
 
 def test_traits_mode_omits_facts():
     out = render(_profile(), mode="traits")
-    assert "[基本特征]" in out
-    assert "[近期事实]" not in out and "ramen" not in out
+    assert "[Traits]" in out
+    assert "[Recent facts]" not in out and "ramen" not in out
 
 
 def test_confirmed_label():
@@ -39,4 +39,4 @@ def test_confirmed_label():
     p.traits["identity"] = ProfileTrait(text="engineer", status="confirmed",
                                         last_confirmed="2026-09-10", sources=["c1"])
     out = render(p, mode="traits")
-    assert "身份: engineer(确认,印证于2026年09月10日)" in out
+    assert "identity: engineer(confirmed, last confirmed 2026-09-10)" in out

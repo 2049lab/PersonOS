@@ -8,7 +8,7 @@ quantity (scores, RRF scores, prompts, provenance).
 from __future__ import annotations
 
 from ..models import atom_anchor
-from .retrieval import _TYPE_CN
+from .retrieval import _TYPE_LABELS
 from .trust import evidence_entries
 
 
@@ -25,7 +25,7 @@ def memory_view(a, evidence_store=None, media_store=None) -> dict:
         "atom_id": a.id,
         "cell_id": a.memcell_id or None,     # the cell it belongs to (from which the segment narrative topic/episode can be looked up)
         "text": a.text,
-        "type": _TYPE_CN.get(a.object_type, a.object_type),   # experience / fact / claim
+        "type": _TYPE_LABELS.get(a.object_type, a.object_type),   # experience / fact / claim
         "holder": a.holder,                  # who said it / whose attribute it is (ownership)
         "domains": a.domains,
         "kind": a.kind,                      # memory type code on the K axis (aligned with the trust chain)

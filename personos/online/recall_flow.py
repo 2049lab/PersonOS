@@ -73,21 +73,23 @@ def _no_answer_note(rw, review, deep) -> str:
     if rw:
         scope = []
         if rw.subject:
-            scope.append(f"主体「{rw.subject}」")
+            scope.append(f"subject {rw.subject!r}")
         tw = f"{_fmt_day(rw.time_start)}~{_fmt_day(rw.time_end)}".strip("~")
         if tw:
-            scope.append(f"时间窗 {tw}")
+            scope.append(f"time window {tw}")
         if rw.domains:
-            scope.append("域 " + "/".join(rw.domains))
-        parts.append("检索范围:" + ("、".join(scope) if scope else "全库语义检索") + ";")
+            scope.append("domains " + "/".join(rw.domains))
+        parts.append("Searched: " + (", ".join(scope) if scope else "the whole store") + ". ")
     if deep:
-        parts.append("结论:深轨多步翻阅记忆后,未能在限定步数内定位到可作答的记忆。")
+        parts.append("The deep track read through memory over several steps and did not "
+                     "find anything that answers this within its step budget. ")
     else:
-        parts.append("结论:记忆库中没有足以回答该问题的相关记忆。")
-    reason = "该信息可能从未在过往对话中出现,或出现时未被收入记忆(检索索引未覆盖)。"
+        parts.append("No memory relevant enough to answer this was found. ")
+    reason = ("Either this never came up in a recorded conversation, or it did but was "
+              "not indexed for retrieval.")
     if review and review.critique:
-        reason += f"缺口:{review.critique}。"
-    parts.append("可能原因:" + reason)
+        reason += f" Gap: {review.critique}"
+    parts.append("Possible reason: " + reason)
     return "".join(parts)
 
 
