@@ -93,11 +93,11 @@ def test_maas_client_rerank_maps_index_and_uses_score_endpoint(monkeypatch):
 
     monkeypatch.setattr(m, "_post", fake_post)
     assert m.rerank("q", ["甲", "乙"]) == [0.1, 0.9]      # 按 index 对齐文档序
-    assert seen["timeout"] == settings.maas_io_timeout    # rerank 走紧档
+    assert seen["timeout"] == settings.io_timeout    # rerank 走紧档
     assert seen["path"] == "/score"
     assert seen["payload"]["model"] == settings.rerank_model
     assert seen["payload"]["text_2"] == ["甲", "乙"]
-    assert seen["headers"]["api-key"] == (settings.rerank_key or settings.chat_key)
+    assert seen["headers"]["api-key"] == (settings.rerank_api_key or settings.llm_api_key)
     assert m.rerank("q", []) == []                        # 空输入不打网关
 
 
@@ -116,7 +116,7 @@ def test_maas_client_chat_timeout_tiering_and_override(monkeypatch):
 
     monkeypatch.setattr(m, "_post", fake_post)
     m.chat([{"role": "user", "content": "hi"}])
-    assert seen["timeout"] == settings.maas_chat_timeout    # 宽档(非流式长生成)
+    assert seen["timeout"] == settings.llm_timeout    # 宽档(非流式长生成)
 
     m2 = MaasClient(timeout=180.0)
     monkeypatch.setattr(m2, "_post", fake_post)

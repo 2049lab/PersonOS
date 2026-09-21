@@ -203,7 +203,7 @@ def main():
         "periods": periods_out,
         "probes": outline.get("probes", []),
         "meta": {"periods": len(periods_out), "turns": total_turns,
-                 "months": args.months, "model": maas.cfg.chat_model},
+                 "months": args.months, "model": maas.cfg.llm_model},
     }
     out.write_text(json.dumps(corpus, ensure_ascii=False, indent=2), encoding="utf-8")
 

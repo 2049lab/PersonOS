@@ -48,7 +48,7 @@ class OmniRunner:
 
     @property
     def available(self) -> bool:
-        return bool(self.cfg.mllm_key)
+        return bool(self.cfg.mllm_api_key)
 
     def chat(self, prompt: str, *, video_url: str | None = None,
              images_b64: list[str] | None = None, audio_b64_list: list[str] | None = None,
@@ -80,7 +80,7 @@ class OmniRunner:
             return out
 
     def _post(self, payload: dict, *, timeout_s: float | None = None) -> dict:
-        headers = {"Content-Type": "application/json", "api-key": self.cfg.mllm_key}
+        headers = {"Content-Type": "application/json", "api-key": self.cfg.mllm_api_key}
         attempt = 0
         while True:
             try:

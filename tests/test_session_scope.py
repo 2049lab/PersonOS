@@ -44,7 +44,7 @@ def test_key_escapes_percent_unambiguously():
 
 def test_key_normal_ids_stay_readable():
     """常规 id 不受影响:键保持人类可读的形态(只转义出问题的字符)。"""
-    os.environ.pop("XHS_ENV", None)
+    os.environ.pop("PERSONOS_ENV", None)
     assert rkey("seg", "u1", "chat-001") == "local:personos:seg:u1:chat-001"
 
 

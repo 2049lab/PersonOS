@@ -54,14 +54,14 @@ class MaasClient:
         self._client = httpx.Client(trust_env=False)   # 客户端级不设超时,逐请求按接口给
 
     def _chat_timeout(self) -> float:
-        return self.timeout if self.timeout is not None else self.cfg.maas_chat_timeout
+        return self.timeout if self.timeout is not None else self.cfg.llm_timeout
 
     def _io_timeout(self) -> float:
-        return self.timeout if self.timeout is not None else self.cfg.maas_io_timeout
+        return self.timeout if self.timeout is not None else self.cfg.io_timeout
 
     def _post(self, path: str, headers: dict, payload: dict, timeout: float) -> dict:
         """带重试的 POST;网络异常与 5xx 按 max_retries 退避,429 另给深预算(指数退避),其余 4xx 直接抛。"""
-        url = f"{self.cfg.maas_base_url}{path}"
+        url = f"{self.cfg.llm_base_url}{path}"
         attempt = 0   # 网络异常 / 5xx 计数
         rl = 0        # 429 计数(独立预算)
         while True:
@@ -98,19 +98,19 @@ class MaasClient:
     def chat(self, messages: list[dict], temperature: float = 0.3, max_tokens: int = 10240) -> str:
         headers = {
             "Content-Type": "application/json",
-            "api-key": self.cfg.chat_key,
-            "x-maas-app-id": self.cfg.app_id,
+            "api-key": self.cfg.llm_api_key,
+            "x-maas-app-id": self.cfg.llm_app_id,
             "x-maas-user-email": "",
         }
         payload = {
-            "model": self.cfg.chat_model,
+            "model": self.cfg.llm_model,
             "messages": messages,
             "stream": False,
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
         with obs.observation(obs.current_stage() or "maas.chat", as_type="generation",
-                             model=self.cfg.chat_model, input=messages,
+                             model=self.cfg.llm_model, input=messages,
                              metadata={"stage": obs.current_stage() or "chat",
                                        "temperature": temperature, "max_tokens": max_tokens}) as gen:
             data = self._post("/chat/completions", headers, payload, timeout=self._chat_timeout())
@@ -123,7 +123,7 @@ class MaasClient:
         """批量取向量,返回 shape=(n, dim) 的 float32 矩阵。"""
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.cfg.embedding_key}",
+            "Authorization": f"Bearer {self.cfg.effective_embedding_api_key}",
         }
         payload = {"model": self.cfg.embedding_model, "input": texts, "encoding_format": "float"}
         with obs.observation("maas.embed", as_type="embedding", model=self.cfg.embedding_model,
@@ -143,8 +143,8 @@ class MaasClient:
             return []
         headers = {
             "Content-Type": "application/json",
-            "api-key": self.cfg.rerank_key or self.cfg.chat_key,
-            "x-maas-app-id": self.cfg.app_id,
+            "api-key": self.cfg.rerank_api_key or self.cfg.llm_api_key,
+            "x-maas-app-id": self.cfg.llm_app_id,
             "x-maas-user-email": "",
         }
         payload = {"model": self.cfg.rerank_model, "text_1": query, "text_2": documents}

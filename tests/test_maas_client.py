@@ -14,8 +14,8 @@ import pytest
 from personos.clients.maas import MaasClient
 
 
-class _Cfg:  # _post 只读 maas_base_url,测试替身免真实 .env
-    maas_base_url = "https://maas.example"
+class _Cfg:  # _post 只读 llm_base_url,测试替身免真实 .env
+    llm_base_url = "https://maas.example"
 
 
 def _client(handler) -> MaasClient:

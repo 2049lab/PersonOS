@@ -251,9 +251,9 @@ def test_max_drain_must_be_below_queue_depth_or_the_valve_never_fires():
     "占住名额直到该会话排空"。线上曾是 20 > 15 的失效态,视频场景下单个会话最坏能
     独占一个池名额十几小时(15 批 × 每批 20 clip × 约 216s)。
     """
-    from personos.config import load_settings
+    from personos.config import load_config
 
-    s = load_settings()
+    s = load_config()
     assert s.max_drain_per_cycle < s.max_queue_depth, (
         f"max_drain={s.max_drain_per_cycle} 未小于 max_queue_depth={s.max_queue_depth},"
         "公平阀门不会触发,长会话将独占池名额")

@@ -309,7 +309,7 @@ class Database:
         共享库零污染(Django TestCase 同款模式)。不可嵌套;仅测试单线程使用。
         """
         if self._pinned is not None:
-            raise RuntimeError("rollback_scope 不可嵌套")
+            raise RuntimeError("rollback_scope cannot be nested")
         conn = self.engine.connect()
         tx = conn.begin()
         self._pinned = conn

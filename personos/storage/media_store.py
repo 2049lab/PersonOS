@@ -151,12 +151,12 @@ class OSSMediaStore:
     def save_image(self, data: bytes, *, owner: str, content_type: str = "") -> StoredImage:
         """校验 + 存图(内容寻址,相同字节不重传),返回 StoredImage(key 即 content_ref)。"""
         if not data:
-            raise MediaStoreError("图片内容为空")
+            raise MediaStoreError("image payload is empty")
         if len(data) > _MAX_IMAGE_BYTES:
-            raise MediaStoreError(f"图片超过 {_MAX_IMAGE_BYTES} 字节上限")
+            raise MediaStoreError(f"image exceeds the {_MAX_IMAGE_BYTES} byte limit")
         detected = _detect_image_type(data[:32])
         if detected is None:
-            raise MediaStoreError(f"无法识别的图片格式(声明 {content_type or '未知'})")
+            raise MediaStoreError(f"unrecognised image format (declared: {content_type or 'none'})")
         # 以魔数探测结果为准(客户端声明可能不准/缺失)
         extension = _EXTENSIONS[detected]
         sha256 = hashlib.sha256(data).hexdigest()
@@ -179,12 +179,12 @@ class OSSMediaStore:
     def save_video(self, data: bytes, *, owner: str, content_type: str = "") -> StoredVideo:
         """校验 + 存 clip(内容寻址,相同字节不重传)。返回 StoredVideo(key 供 sign_url 喂 Omni)。"""
         if not data:
-            raise MediaStoreError("视频内容为空")
+            raise MediaStoreError("video payload is empty")
         if len(data) > _MAX_VIDEO_BYTES:
-            raise MediaStoreError(f"视频超过 {_MAX_VIDEO_BYTES} 字节上限")
+            raise MediaStoreError(f"video exceeds the {_MAX_VIDEO_BYTES} byte limit")
         detected = _detect_video_type(data[:32])
         if detected is None:
-            raise MediaStoreError(f"无法识别的视频格式(声明 {content_type or '未知'})")
+            raise MediaStoreError(f"unrecognised video format (declared: {content_type or 'none'})")
         extension = _VIDEO_EXTENSIONS[detected]
         sha256 = hashlib.sha256(data).hexdigest()
         key = self._clip_key(sha256, extension, owner)
@@ -199,7 +199,7 @@ class OSSMediaStore:
     def save_audio(self, data: bytes, *, owner: str) -> str:
         """存声纹样本 wav(16k 单声道),返回 OSS key(供仲裁听声辨人)。内容寻址,voice/ 子前缀。"""
         if not data or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
-            raise MediaStoreError("音频非 WAV(RIFF/WAVE)")
+            raise MediaStoreError("audio is not WAV (expected a RIFF/WAVE header)")
         sha256 = hashlib.sha256(data).hexdigest()
         root = self.prefix.strip("/")
         head = f"{root}/" if root else ""

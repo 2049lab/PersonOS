@@ -6,7 +6,7 @@
 - 应签头「最小集」:content-type、x-user-token —— 请求里出现(非空)就必须纳入签名(防被剥离/篡改)。
 - 服务端流程:字段齐 → 时间窗 → 查 AK → nonce 防重放 → 重建规范串 → 常量时间比对;失败对外统一「认证失败」,内部日志记真因。
 - **无条件强制**:不留任何 env 旁路(避免"一个环境变量关掉鉴权"的安全气味);测试用 dependency_overrides 显式绕过。
-- AK→SK 从 KMS(config.get_secret("PERSONOS_AKSK_MAP") 的 JSON)读并缓存;SK 不出网、不落库。
+- AK→SK 从环境变量 PERSONOS_AKSK_MAP(JSON)读并缓存;SK 不出网、不落库。
 
 服务端验签与调用方签名共用 canonical_string/sign,构造上保证两侧一致(见 sign_request)。
 """
@@ -156,5 +156,5 @@ async def verify_signature(request: Request) -> None:
                      list(request.query_params.multi_items()), request.headers, body)
     except _SigError as e:
         logger.warning(f"AK/SK 验签失败 path={request.url.path}: {e}")   # 内部记真因
-        raise HTTPException(status_code=401, detail="认证失败")          # 对外统一,不暴露 AK 是否存在
+        raise HTTPException(status_code=401, detail="authentication failed")          # 对外统一,不暴露 AK 是否存在
     request.state.caller_ak = ak

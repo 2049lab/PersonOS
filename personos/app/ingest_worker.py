@@ -115,7 +115,7 @@ class SessionConsumer:
                     video_ingest.finalize_video(self._video_deps(user_id), session_id=session_id)
             elif env.kind == "video":
                 if self._video_deps is None:
-                    raise RuntimeError("本进程未装配视频 backends(纯文本 pod),不能消费视频消息")
+                    raise RuntimeError("video backends are not configured in this process (text-only worker), cannot consume a video message")
                 from personos.online import video_ingest
                 deps = self._video_deps(user_id)
                 for m in env.payload.get("messages", []):     # 一批可含多 clip,逐 clip 顺序处理

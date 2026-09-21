@@ -27,6 +27,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Optional, Protocol
 
+from ..config import get_config
 from .redis_client import _esc, key as _key
 
 # 入队锁释放(单 EVAL,corvus 支持;与 session_lock 同款 token 比对):只删自己的锁
@@ -40,7 +41,7 @@ end
 
 
 def _env() -> str:
-    return os.environ.get("XHS_ENV") or "local"
+    return get_config().env
 
 
 def _sess_tag(user_id: str, session_id: str) -> str:

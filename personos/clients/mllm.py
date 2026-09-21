@@ -48,10 +48,10 @@ class MllmClient:
     @property
     def available(self) -> bool:
         """未配 key 时不可用;调用方应据此降级(纯文本链路不依赖本客户端)。"""
-        return bool(self.cfg.mllm_key)
+        return bool(self.cfg.mllm_api_key)
 
     def _post(self, payload: dict) -> dict:
-        headers = {"Content-Type": "application/json", "api-key": self.cfg.mllm_key}
+        headers = {"Content-Type": "application/json", "api-key": self.cfg.mllm_api_key}
         attempt = 0
         while True:
             try:
@@ -128,5 +128,18 @@ class MllmClient:
         return text
 
 
-# 进程级单例(与 settings 同生命周期);测试可自行构造 MllmClient(cfg=...)
-mllm = MllmClient()
+_singleton: MllmClient | None = None
+
+
+def get_mllm() -> MllmClient:
+    """Process-wide client, built on first use.
+
+    Deliberately not a module-level instance: constructing at import time opens
+    an HTTP client (and, before the config rewrite, read a secret) merely
+    because someone imported the module. Tests can still build their own
+    ``MllmClient(cfg=...)``.
+    """
+    global _singleton
+    if _singleton is None:
+        _singleton = MllmClient()
+    return _singleton

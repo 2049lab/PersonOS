@@ -23,7 +23,7 @@ from loguru import logger
 
 from .. import obs
 from ..clients.maas import MaasClient
-from ..clients.mllm import mllm as _mllm
+from ..clients.mllm import get_mllm
 from ..config import settings
 from .admission import AdmissionGate, TaskOverloaded
 from .ingest_worker import Dispatcher, SessionConsumer
@@ -78,7 +78,7 @@ class Runtime:
         self.task_store = TaskStore(self.db)
         # 图片输入:MLLM 看图客户端(未配 key 时 available=False,写入侧自动降级为纯文本);
         # OSS 存储懒建(首次带图 ingest 时装配,凭证缺失则 media_store 保持 None,原图不留底但不阻塞)。
-        self.mllm = _mllm
+        self.mllm = get_mllm()
         self._media_store = None
         self._media_guard = threading.Lock()
         # —— 跨副本会话态(seg/锁):首次使用时才装配(懒建池,import 不触网) ——
@@ -347,20 +347,21 @@ class Runtime:
 
     @staticmethod
     def _warn_redis_env_mismatch() -> None:
-        """启动即亮明会话态落点;非 sit 环境仍用 sit 默认 Redis 集群时大声告警。
+        """Announce where cross-replica session state lives, at startup.
 
-        REDIS_CLUSTER 代码默认 sns-redis-sit(sit 部署零配置),代价是 prod 忘了
-        覆盖会静默连 sit 集群——这个告警把"忘了"从静默变成启动日志里的明喇叭。
+        Without Redis the process keeps segment state, locks and the queue in
+        memory, which is correct for a single worker and silently wrong for
+        several. Saying so once at startup is cheaper than diagnosing it later.
         """
-        env = os.environ.get("XHS_ENV", "")
-        if not settings.redis_cluster:
-            logger.warning("REDIS_CLUSTER 未配置:进程内单副本模式(多副本部署不可用!)")
+        env = settings.env
+        if not settings.redis_cluster and not settings.redis_url:
+            logger.warning(
+                "Redis is not configured: running single-process. Segment state, "
+                "session locks and the ingest queue are in memory, so multiple "
+                "workers would not see each other. Set PERSONOS_REDIS_URL to share them.")
             return
-        logger.info(f"跨副本会话态:Redis 集群 {settings.redis_cluster}"
-                    f"(env={env or 'local'},key 前缀 {env or 'local'}:personos:*)")
-        if env and env not in ("sit", "local") and settings.redis_cluster == "sns-redis-sit":
-            logger.warning(f"XHS_ENV={env} 但 Redis 仍是 SIT 默认集群 sns-redis-sit!"
-                           f"prod 部署须在环境变量覆盖 REDIS_CLUSTER(prod 集群中段名)")
+        logger.info(f"Cross-replica session state on Redis "
+                    f"(env={env}, key prefix {env}:personos:*)")
 
     # —— 异步基建(状态落 tasks 表,跨副本可查) ——
     def submit_task(self, kind: str, user_id: str, session_id: str, fn) -> str:

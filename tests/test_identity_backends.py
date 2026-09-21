@@ -47,7 +47,7 @@ def test_mock_omni_chat_canned():
 
 def test_unknown_profile_raises():
     import pytest
-    with pytest.raises(ValueError, match="mock/real"):
+    with pytest.raises(ValueError, match="none/real/mock"):
         make_backends("bogus")
 
 
@@ -80,10 +80,30 @@ def test_omni_video_call_uses_long_timeout(monkeypatch):
     r = omni_mod.OmniRunner()
     r._client = _Client()
     monkeypatch.setattr(omni_mod, "VIDEO_TIMEOUT_S", 600.0)
-    r.cfg = type("C", (), {"mllm_key": "k", "mllm_endpoint": "http://x",
+    r.cfg = type("C", (), {"mllm_api_key": "k", "mllm_endpoint": "http://x",
                            "mllm_timeout": 120.0})()
 
     r.chat("p", video_url="https://oss/a.mp4")
     r.chat("p", images_b64=["Zg=="])                  # 仲裁:纯图,无需长超时
     assert seen == [600.0, 120.0], f"超时路由错了:{seen}"
     assert isinstance(httpx.Timeout(1.0).read, float)
+
+
+def test_none_profile_is_the_default_and_explains_how_to_enable(monkeypatch):
+    """默认 none:不装依赖就碰视频时,给一句能照做的话,而不是 worker 线程深处的 ImportError。
+
+    这条默认值是**有意改动**(原先是 real)。理由见 factory 模块文档:real 对内网部署
+    是对的(缺依赖当场炸),但对 pip 装的库是错的——identity extra 约 2GB,纯文本用户
+    不该为此付费,更不该以导入爆炸的形式得知。
+    """
+    import pytest
+
+    from personos.config import Config, reset_config, set_config
+    from personos.identity.backends.factory import make_backends
+
+    set_config(Config())          # 全默认 = video_backend 'none'
+    try:
+        with pytest.raises(RuntimeError, match=r"personos\[identity\]"):
+            make_backends()
+    finally:
+        reset_config()

@@ -2,7 +2,7 @@
 
 - 懒加载:import 本模块不触网;首次 get_redis() 才建池(EDS 发现 corvus-<cluster>)。
   服务/测试只要不真正用 Redis,就不需要 EDS 环境变量。
-- key 一律经 key() 构造:"{环境}:{应用}:{其余段}"。环境取平台注入的 XHS_ENV
+- key 一律经 key() 构造:"{环境}:{应用}:{其余段}"。环境取 PERSONOS_ENV
   (本地不设 → local,天然与线上键隔离),前缀使共享集群里的键可区分、可按段清理。
 - 约束:所有 key 必须带 TTL(共享集群不留常驻键)。
 - 依赖:redis-py 必须锁 6.x——redinfra 0.1.19 与 8.x 的握手协议不兼容(requirements 已锁)。
@@ -50,5 +50,5 @@ def key(*parts: str) -> str:
     读写(seg 键存对话原文,最高敏)。入口层另有字符白名单(session_scope),
     这里是纵深兜底——就算某条路径漏校验,也拼不出碰撞键。
     """
-    env = os.environ.get("XHS_ENV") or "local"
+    env = settings.env
     return f"{env}:personos:" + ":".join(_esc(p) for p in parts)

@@ -671,7 +671,7 @@ def test_omni_maps_media_download_failure_to_its_own_error():
 
     r = omni_mod.OmniRunner()
     r._client = _Client()
-    r.cfg = type("C", (), {"mllm_key": "k", "mllm_endpoint": "http://x",
+    r.cfg = type("C", (), {"mllm_api_key": "k", "mllm_endpoint": "http://x",
                            "mllm_timeout": 120.0})()
     with pytest.raises(omni_mod.MediaUnfetchableError):
         r.chat("p", video_url="https://oss/a.mp4")
