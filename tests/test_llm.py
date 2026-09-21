@@ -62,3 +62,28 @@ def test_network_error_is_not_retried():
     llm = BoomLLM()
     with pytest.raises(ConnectionError):
         chat_json(llm, [{"role": "user", "content": "q"}], max_tokens=10, num_tries=3)
+
+
+def test_strip_fences_removes_a_leading_reasoning_block():
+    """Reasoning models put <think>...</think> inside content, before the answer.
+
+    DeepSeek-R1, QwQ and MiniMax-M3 all do it, and JSON parsing fails on the
+    whole string. Some providers offer a flag to turn it off, but relying on
+    that would make the library work with one vendor's parameter and silently
+    break with the next — so the block is stripped instead.
+    """
+    from personos.online.llm import strip_fences
+
+    assert strip_fences('<think>reasoning</think>\n\n{"ok": 1}') == '{"ok": 1}'
+    assert strip_fences('<thinking>x</thinking>{"ok": 1}') == '{"ok": 1}'
+    # Combined with a code fence, which models also add unprompted.
+    assert strip_fences('<think>x</think>\n```json\n{"ok": 1}\n```') == '{"ok": 1}'
+
+
+def test_strip_fences_leaves_unrelated_text_alone():
+    """Only a well-formed leading block is removed. Content that merely mentions
+    the tag must survive, or stripping would corrupt legitimate payloads."""
+    from personos.online.llm import strip_fences
+
+    assert strip_fences('{"note": "we use <think> tags"}') == '{"note": "we use <think> tags"}'
+    assert strip_fences('{"ok": 1}') == '{"ok": 1}'

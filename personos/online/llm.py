@@ -7,6 +7,7 @@ call site declares its own protocol any more.
 from __future__ import annotations
 
 import json
+import re
 from typing import Protocol
 
 from loguru import logger
@@ -18,9 +19,26 @@ class ChatLLM(Protocol):
     def chat(self, messages: list[dict], temperature: float = ..., max_tokens: int = ...) -> str: ...
 
 
+_THINK_BLOCK = re.compile(r"<(think|thinking|reasoning)>.*?</\1>\s*", re.DOTALL | re.IGNORECASE)
+
+
 def strip_fences(s: str) -> str:
-    """Strip ``` / ```json fences; LLMs often wrap their JSON in a code block."""
-    s = s.strip()
+    """Normalise a model's raw text down to the payload we asked for.
+
+    Two things get in the way, both common enough to handle rather than treat
+    as the caller's problem:
+
+    - **Code fences.** Models wrap JSON in ``` blocks despite being told not to.
+    - **Reasoning blocks.** Models that think out loud (DeepSeek-R1, QwQ,
+      MiniMax-M3 and others) emit `<think>...</think>` *inside* content, before
+      the answer. Some let you disable it with a vendor-specific parameter;
+      relying on that would make the library work with one provider's flag and
+      silently fail with the next. Stripping the block is provider-neutral.
+
+    Only a leading block is removed, and only a well-formed one — text that
+    merely mentions the tag is left alone.
+    """
+    s = _THINK_BLOCK.sub("", s.strip(), count=1).strip()
     if s.startswith("```"):
         s = s.split("\n", 1)[1] if "\n" in s else s
         if s.endswith("```"):

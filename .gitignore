@@ -20,3 +20,4 @@ logs/
 # 第三方评测语料
 data/
 .env.livetest
+.env.mmtest
