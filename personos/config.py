@@ -85,21 +85,17 @@ class Config:
     mllm_timeout: float = 120.0
 
     # ── Storage ──────────────────────────────────────────────────────────
-    # Empty db_url means the local SQLite file under data_dir, tables created
-    # automatically. Set it to a SQLAlchemy URL for MySQL.
+    # Empty means the local SQLite file under data_dir, tables created
+    # automatically. A SQLAlchemy URL switches to MySQL.
+    #
+    # This is the *only* switch. Reading bare names like MYSQL_HOST was a trap:
+    # those get set for unrelated reasons on plenty of machines, and finding one
+    # would silently move the store away from the documented default — which is
+    # how a local run ended up writing to a shared database instead of SQLite.
     db_url: str = ""
     data_dir: Path = field(default_factory=lambda: Path.home() / ".personos")
     db_pool_size: int = 10
     db_max_overflow: int = 20
-    # Legacy discrete MySQL settings, still read by storage/db.py. Phase 3 of the
-    # open-sourcing plan replaces them with db_url plus a SQLite default; kept
-    # until then so the existing storage layer and its tests are untouched.
-    mysql_host: str = ""
-    mysql_port: int = 3306
-    mysql_user: str = "personos"
-    mysql_password: str = ""
-    mysql_database: str = "personos"
-
     # Object storage. Empty means the local filesystem under data_dir/media.
     media_backend: str = "local"    # local | oss
     media_base_url: str = ""        # public prefix; required for video + a remote MLLM
@@ -218,20 +214,15 @@ def load_config() -> Config:
         data_dir=data_dir,
         db_pool_size=int(_env("PERSONOS_DB_POOL_SIZE", "10")),
         db_max_overflow=int(_env("PERSONOS_DB_MAX_OVERFLOW", "20")),
-        mysql_host=_env("MYSQL_HOST"),
-        mysql_port=int(_env("MYSQL_PORT", "3306")),
-        mysql_user=_env("MYSQL_USER", "personos"),
-        mysql_password=_env("MYSQL_PASSWORD"),
-        mysql_database=_env("MYSQL_DATABASE", "personos"),
         media_backend=_env("PERSONOS_MEDIA_BACKEND", "local").strip().lower(),
         media_base_url=_env("PERSONOS_MEDIA_BASE_URL").rstrip("/"),
-        oss_access_key_id=_env("OSS_ACCESS_KEY_ID"),
-        oss_access_key_secret=_env("OSS_ACCESS_KEY_SECRET"),
-        oss_bucket=_env("OSS_BUCKET"),
-        oss_endpoint=_env("OSS_ENDPOINT"),
-        oss_region=_env("OSS_REGION"),
-        oss_prefix=_env("OSS_PREFIX", "personos/"),
-        oss_url_expires_seconds=int(_env("OSS_URL_EXPIRES_SECONDS", "3600")),
+        oss_access_key_id=_env("PERSONOS_OSS_ACCESS_KEY_ID"),
+        oss_access_key_secret=_env("PERSONOS_OSS_ACCESS_KEY_SECRET"),
+        oss_bucket=_env("PERSONOS_OSS_BUCKET"),
+        oss_endpoint=_env("PERSONOS_OSS_ENDPOINT"),
+        oss_region=_env("PERSONOS_OSS_REGION"),
+        oss_prefix=_env("PERSONOS_OSS_PREFIX", "personos/"),
+        oss_url_expires_seconds=int(_env("PERSONOS_OSS_URL_EXPIRES_SECONDS", "3600")),
         redis_url=_env("PERSONOS_REDIS_URL"),
         env=_env("PERSONOS_ENV", "local"),
         video_backend=_env("PERSONOS_VIDEO_BACKEND", "none").strip().lower(),

@@ -216,7 +216,7 @@ def _resolve_backend():
     from personos.storage.db.mysql import MySQLDatabase
     from personos.storage.db.sqlite import SQLiteDatabase
 
-    cfg = get_config()
-    if cfg.db_url or cfg.mysql_host:
-        return MySQLDatabase
-    return SQLiteDatabase
+    # One switch, by design: a database URL means MySQL, its absence means the
+    # local SQLite file. Anything cleverer here would make "where did my data
+    # go" depend on environment variables a user never set on purpose.
+    return MySQLDatabase if get_config().db_url else SQLiteDatabase

@@ -4,7 +4,6 @@ what makes this path provably unchanged by the SQLite work."""
 from __future__ import annotations
 
 from sqlalchemy import create_engine
-from sqlalchemy.engine import URL
 
 from personos.config import get_config
 from personos.storage.db.base import Database
@@ -15,15 +14,15 @@ class MySQLDatabase(Database):
 
     def _make_engine(self):
         cfg = get_config()
-        url = cfg.db_url or URL.create(
-            "mysql+pymysql",
-            username=cfg.mysql_user,
-            password=cfg.mysql_password,
-            host=cfg.mysql_host,
-            port=cfg.mysql_port,
-            database=cfg.mysql_database,
-            query={"charset": "utf8mb4"},
-        )
+        if not cfg.db_url:
+            from personos.errors import MissingCapability
+
+            raise MissingCapability(
+                "MySQL storage",
+                "no database URL is configured",
+                "set PERSONOS_DB_URL, e.g. "
+                "mysql+pymysql://user:pass@host:3306/personos?charset=utf8mb4")
+        url = cfg.db_url
         # pool_pre_ping: check liveness on checkout. Proxies and managed MySQL
         # both drop idle connections, and the failure is otherwise a confusing
         # error on the first query after a quiet period.

@@ -155,7 +155,7 @@ def health():
     cells = rt.db.fetch_one("SELECT COUNT(*) AS n FROM memcells")["n"]
     return {"status": "ok", "users": rt.users.count(), "atoms": atoms,
             "cells": cells, "evidence": ev,
-            "db": f"{settings.mysql_host}/{settings.mysql_database}"}
+            "db": settings.db_url.rsplit("@", 1)[-1] if settings.db_url else "sqlite"}
 
 
 @router.post("/users/register", status_code=201)

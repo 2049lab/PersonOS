@@ -153,3 +153,55 @@ def test_calls_that_need_a_model_raise_with_a_remedy(cfg_scope, tmp_path):
             m.search("hello?", user_id="u")
     finally:
         m.close()
+
+
+# ── .env.example is the source of truth for variable names ──────────────
+
+def test_documented_and_read_environment_variables_match():
+    """Every variable the code reads must be in .env.example, and vice versa.
+
+    Without this the two drift silently and in the worst direction: a rename
+    leaves the old name in .env.example, someone sets it, nothing happens, and
+    the library appears to ignore its own documentation. That is exactly what
+    happened once here — a stale .env still carried the pre-rename names, so
+    the model settings in it were dead, while an unrelated MYSQL_HOST left in
+    the same file quietly switched the storage backend away from the
+    documented SQLite default.
+
+    Pairing the two directions is the point. Read-but-undocumented hides a
+    knob; documented-but-unread advertises one that does nothing.
+    """
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    source = (root / "personos" / "config.py").read_text(encoding="utf-8")
+    example = (root / ".env.example").read_text(encoding="utf-8")
+
+    read = set(re.findall(r'_(?:env|flag)\("([A-Z_]+)"', source))
+    documented = set(re.findall(r"^#?\s*([A-Z][A-Z0-9_]+)=", example, re.M))
+
+    assert not (read - documented), (
+        f"read by config.py but missing from .env.example: {sorted(read - documented)}")
+    assert not (documented - read), (
+        f"in .env.example but never read: {sorted(documented - read)}")
+
+
+def test_configuration_variables_are_namespaced():
+    """Names must be ours or a vendor's, never generic.
+
+    A bare name like MYSQL_HOST is set on plenty of machines for unrelated
+    reasons. Reading one means the library's behaviour depends on a variable
+    the user never set for us — and the symptom is data appearing somewhere
+    other than where the documentation says.
+    """
+    import re
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parent.parent / "personos" / "config.py").read_text()
+    read = set(re.findall(r'_(?:env|flag)\("([A-Z_]+)"', source))
+    # Vendor-standard names users already have set are fine, and expected.
+    vendor = {"ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL"}
+    generic = {v for v in read
+               if not v.startswith(("PERSONOS_", "LANGFUSE_")) and v not in vendor}
+    assert not generic, f"un-namespaced configuration variables: {sorted(generic)}"

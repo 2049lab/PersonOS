@@ -23,7 +23,6 @@ def main():
     from loguru import logger
 
     logger.info(f"PersonOS starting http://{host}:{port} · "
-                f"db=mysql://{settings.mysql_host}/{settings.mysql_database} · "
                 f"log_dir={settings.log_dir}")
     uvicorn.run(app, host=host, port=port, reload=False, log_level=log_level)
 

@@ -48,7 +48,7 @@ def inspect(cfg: Config | None = None) -> list[Capability]:
         "" if emb_key else "set PERSONOS_LLM_API_KEY, or PERSONOS_EMBEDDING_API_KEY",
         required=True))
 
-    using_mysql = bool(c.db_url or c.mysql_host)
+    using_mysql = bool(c.db_url)
     out.append(Capability(
         "storage", True,
         "MySQL" if using_mysql else f"SQLite at {c.sqlite_path}",
