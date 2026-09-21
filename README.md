@@ -110,10 +110,17 @@ MissingCapability: video understanding is unavailable: no multimodal model is co
 The rule is: **cannot do it at all → raise; did it partially → return and say
 so** in `result.warnings`. A missing optional capability never fails a write.
 
+## Examples
+
+Three, each writing something into memory and then asking about it in words:
+[text](examples/01_text_memory.py) · [images](examples/02_image_memory.py) ·
+[video and person identity](examples/03_video_memory.py). See
+[examples/README.md](examples/README.md) for what each needs and real output.
+
 ## API
 
 ```python
-m.add(messages, user_id=..., session_id=...)   # a string, a dict, or a list of dicts
+m.add(messages, user_id=..., session_id=...)   # text, a dict with an image, or video clips
 m.end_session(user_id=..., session_id=...)     # build memories from the open segment
 m.search(query, user_id=..., mode="auto")      # "auto" | "fast" | "deep"
 m.profile(user_id=...)                         # distilled user profile

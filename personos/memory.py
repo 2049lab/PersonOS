@@ -28,6 +28,7 @@ import os
 import threading
 import time
 import uuid
+from pathlib import Path
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 
@@ -278,7 +279,8 @@ class Memory:
         store = CharacterStore(self.db, user_id)
         return VideoDeps(
             store=store, cloud=CloudEngine(store), draft=self._draft_for(user_id),
-            backends=self.video_backends(), media_store=self._media(), llm=self.llm,
+            backends=self.video_backends(), media_store=self._media(),
+            llm=self.llm, embedder=self.embedder,
             evidence=ctx.evidence, cells=ctx.cells, atoms=ctx.atoms, chains=ctx.chains)
 
     def visual_deps(self, user_id: str):
@@ -513,20 +515,61 @@ class Memory:
         that partially succeeded.
         """
         from .errors import image_not_understood
-        from .online.write_path import FeedMsg
 
         self._require_core()
-        msgs = _normalise_messages(messages)
-        has_image = any(m.image for m in msgs)
-        if has_image and not getattr(self.mllm, "available", False):
+        msgs, videos = _normalise_messages(messages)
+
+        # Video takes a different path: a clip is not a turn to be appended to a
+        # segment, it is a recording to be watched. Mixing the two in one call
+        # would make the batch non-atomic, so they are rejected together.
+        if videos and msgs:
+            raise ValueError(
+                "a single add() carries either conversation turns or video clips, "
+                "not both — send them as separate calls")
+        if videos:
+            return self._add_videos(videos, user_id=user_id, session_id=session_id)
+
+        warn = []
+        if any(m.image for m in msgs) and not getattr(self.mllm, "available", False):
             warn = [image_not_understood()]
-        else:
-            warn = []
 
         writer = self.writer_for(user_id, session_id)
         out = writer.feed_batch(msgs, now_dt=now_dt, source_extra=source_extra,
                                 task_type=task_type, scenario=scenario)
         out.warnings.extend(warn)
+        return out
+
+    def _add_videos(self, videos: list, *, user_id: str, session_id: str):
+        """Consume clips into the session's identity draft.
+
+        Nothing is committed here. Faces, body shots and voice samples
+        accumulate across clips, and who-is-who is only decided at
+        end_session() — a person glimpsed in one clip and seen clearly in the
+        next has to be resolvable as one person, which cannot be settled while
+        clips are still arriving.
+        """
+        from .errors import no_identity_backend, no_vision
+        from .online.video_ingest import process_clip
+
+        if not getattr(self.mllm, "available", False):
+            raise no_vision()
+        try:
+            deps = self.video_deps(user_id)
+        except RuntimeError as e:          # backends disabled or not installed
+            raise no_identity_backend() from e
+
+        from .online.write_path import BatchStepResult
+
+        out = BatchStepResult(evidence_ids=[], records=[])
+        media = self._media()
+        for item in videos:
+            if isinstance(item, (str, Path)) or getattr(item, "read", None):
+                data = Path(item).read_bytes() if not hasattr(item, "read") else item.read()
+                stored = media.save_video(data, owner=user_id)
+                index = process_clip(deps, session_id=session_id, clip_key=stored.key)
+            else:                           # already a URL the model service can fetch
+                index = process_clip(deps, session_id=session_id, clip_url=str(item))
+            out.evidence_ids.append(f"clip:{index}")
         return out
 
     def end_session(self, *, user_id: str = "default", session_id: str,
@@ -538,8 +581,28 @@ class Memory:
         written. Returns the cells built by the close.
         """
         self._require_core()
-        return self.writer_for(user_id, session_id).end_session(
+        cells = self.writer_for(user_id, session_id).end_session(
             task_type=task_type, scenario=scenario)
+        # If clips were fed into this session, identity is adjudicated now and
+        # the attributed dialogue becomes memory through the same build_cell
+        # path as text. Sessions with no video simply skip it.
+        video_cell = self._finalize_video(user_id, session_id)
+        if video_cell is not None:
+            cells = [*cells, video_cell]
+        return cells
+
+    def _finalize_video(self, user_id: str, session_id: str):
+        try:
+            from .online.video_ingest import finalize_video
+        except ImportError:
+            return None
+        try:
+            deps = self.video_deps(user_id)
+        except (RuntimeError, ImportError):
+            return None                     # video was never configured for this process
+        if not deps.draft.pending_chains(session_id):
+            return None                     # this session had no clips
+        return finalize_video(deps, session_id=session_id)
 
     def search(self, query: str, *, user_id: str = "default", session_id: str = "",
                mode: str = "auto", top_k: int = 30, rewrite: bool = True,
@@ -659,25 +722,27 @@ def _deep_available() -> bool:
     return importlib.util.find_spec("langchain_classic") is not None
 
 
-def _normalise_messages(messages) -> list:
-    """Accept a string, a dict, or a list of either — and produce FeedMsg.
+def _normalise_messages(messages) -> tuple[list, list]:
+    """Split the input into conversation turns and video clips.
 
     Being liberal here is worth it: ``m.add("...")`` is what people try first,
     and OpenAI-shaped dicts are what they paste from an existing app.
     """
-    from pathlib import Path
-
     from .online.write_path import FeedMsg
 
     if isinstance(messages, (str, dict)):
         messages = [messages]
-    out = []
+    out, videos = [], []
     for raw in messages:
         if isinstance(raw, str):
             out.append(FeedMsg(speaker="user", text=raw))
             continue
         if isinstance(raw, FeedMsg):
             out.append(raw)
+            continue
+        video = raw.get("video")
+        if video:
+            videos.append(video)
             continue
         speaker = raw.get("speaker") or raw.get("role") or "user"
         text = raw.get("text") or raw.get("content") or ""
@@ -686,7 +751,7 @@ def _normalise_messages(messages) -> list:
             image = Path(image).read_bytes()
         out.append(FeedMsg(speaker=speaker, text=text, image=image,
                            image_content_type=raw.get("image_content_type", "image/jpeg")))
-    return out
+    return out, videos
 
 
 

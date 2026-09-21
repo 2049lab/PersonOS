@@ -527,7 +527,7 @@ def _fake_deps(monkeypatch, omni_calls):
 
     return video_ingest.VideoDeps(
         store=type("S", (), {"user_id": "u"})(), cloud=None, draft=MemoryDraftStore("u"),
-        backends={"mm_runner": _Omni()}, media_store=_MS(), llm=None,
+        backends={"mm_runner": _Omni()}, media_store=_MS(), llm=None, embedder=None,
         evidence=None, cells=None, atoms=None, chains=None)
 
 
@@ -769,7 +769,7 @@ def _idem_deps(monkeypatch, calls, fail_on=None):
     monkeypatch.setattr(video_ingest, "harvest_clip", _harvest)
     return video_ingest.VideoDeps(
         store=type("S", (), {"user_id": "u"})(), cloud=None, draft=MemoryDraftStore("u"),
-        backends={"mm_runner": _Omni()}, media_store=_MS(), llm=None,
+        backends={"mm_runner": _Omni()}, media_store=_MS(), llm=None, embedder=None,
         evidence=None, cells=None, atoms=None, chains=None)
 
 

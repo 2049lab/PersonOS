@@ -7,7 +7,7 @@ produce a memcell and its atoms. This makes "Bob said he likes hiking" land as a
 holder=Bob, converging on the same character across sessions and modalities.
 
 Design (already agreed with the user):
-- holder = the display name (the person's name when known, otherwise a stable short handle 人物#N;
+- holder = the display name (the person's name when known, otherwise a stable short handle Person #N;
   SW -> "user", ENV -> "env"), while the exact character id travels in source.character_id (so the
   rendering layer sees a clean speaker name and ownership/reference is not polluted by a bare ULID;
   the exact id persists in the payload).
@@ -48,15 +48,15 @@ from personos.online.write_path import CellBuild, build_cell
 VIDEO_SCENARIO = ("first-person wearable/robot video: the transcript below is a screenplay of one"
                   " recording — speaker lines are spoken words, plus action and environment"
                   " observations. 'user' is the camera wearer; other names are people in view."
-                  " A speaker labelled 人物#N is a person whose name is not known yet; the first"
+                  " A speaker labelled Person #N is a person whose name is not known yet; the first"
                   " lines of the transcript describe what each of them looks like.")
 
-_ANON_PREFIX = "人物#"      # prefix of the stable short handle for an unnamed person
+_ANON_PREFIX = "Person #"   # stable short handle for someone whose name is not yet known
 
 
 class _DisplayResolver:
     """Session cast -> (holder display name, character_id). An unnamed person gets the stable short
-    handle 人物#N (consistent within this flush)."""
+    handle Person #N (consistent within this flush)."""
 
     def __init__(self, draft: DraftStore, char_store: CharacterStore,
                  by_chain: dict[str, str], session_id: str) -> None:
@@ -65,7 +65,7 @@ class _DisplayResolver:
         self.by_chain = by_chain
         self.session_id = session_id
         self.wearer = char_store.session_wearer(session_id) or char_store.wearer_character() or ""
-        self._handle: dict[str, str] = {}   # cid -> 人物#N (stable)
+        self._handle: dict[str, str] = {}   # cid -> Person #N (stable)
 
     def resolve(self, who: str) -> tuple[str, str]:
         if who == ENV_WHO:
@@ -99,7 +99,7 @@ class _DisplayResolver:
     def name_map(self, cast_ids) -> dict[str, str]:
         """cast id -> display name, used to rewrite bare ids inside line text.
 
-        Note the whole table must be built before any rewriting: resolve hands out 人物#N to unnamed
+        Note the whole table must be built before any rewriting: resolve hands out Person #N to unnamed
         people **in call order**, so resolving while rewriting would give the same person a different
         number on different lines.
         """
@@ -136,11 +136,11 @@ def flush_session_to_memory(
     # source.character_id; collected in time order to feed build_cell.
     # Build the complete cast -> display name table first (including roster members who appear but
     # never speak: their ids can still show up inside someone else's action line), and only then
-    # rewrite line by line — resolving as we go would make the 人物#N numbering of unnamed people
+    # rewrite line by line — resolving as we go would make the Person #N numbering of unnamed people
     # drift.
-    # The order is order of first appearance, not set iteration order: the 人物#N numbering has to be
-    # reproducible (otherwise re-running the same recording would make the same person 人物#1 one
-    # time and 人物#2 the next). Roster members who never spoke go at the end, sorted by id as a
+    # The order is order of first appearance, not set iteration order: the Person #N numbering has to be
+    # reproducible (otherwise re-running the same recording would make the same person Person #1 one
+    # time and Person #2 the next). Roster members who never spoke go at the end, sorted by id as a
     # tiebreak.
     seen_order = list(dict.fromkeys(ln["who"] for ln in lines))
     # The full set of people cannot be just "those who spoke + the roster": someone may never open
@@ -153,7 +153,7 @@ def flush_session_to_memory(
     names = resolver.name_map(all_casts)
 
     # (2.5) Intro lines for unnamed people: **listed once per person**, placed before the dialogue.
-    # Without them, 人物#1 is just a hollow number in memory — the episode/atom extraction has no
+    # Without them, Person #1 is just a hollow number in memory — the episode/atom extraction has no
     # idea who it refers to, there is no way to judge whether it is the same person across sessions,
     # and answering can only parrot the number back. People with names need no intro: the name is the
     # identity. Attached with holder=env (this is narration, not something anyone said).

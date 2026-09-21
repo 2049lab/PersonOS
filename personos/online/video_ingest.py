@@ -53,7 +53,10 @@ class VideoDeps:
     draft: DraftStore              # session draft (Redis, accumulated across clips)
     backends: dict[str, Any]       # {mm_runner, face_detector, voiceprint} -- process singletons
     media_store: Any               # OSS
-    llm: Any                       # text LLM + embedder (used by build_cell)
+    llm: Any                       # chat model, for building the memory cell
+    embedder: Any                  # embedding model; a separate object since the
+                                   # provider split — one endpoint often serves both,
+                                   # but they are not the same client.
     evidence: Any
     cells: Any
     atoms: Any
@@ -424,7 +427,7 @@ def finalize_video(deps: VideoDeps, *, session_id: str) -> Optional[CellBuild]:
         cb = flush_session_to_memory(
             draft, report["by_chain"], session_id=session_id, char_store=store,
             evidence_store=deps.evidence, cell_store=deps.cells, atom_store=deps.atoms,
-            chain_store=deps.chains, llm=deps.llm, embedder=deps.llm, media_store=ms,
+            chain_store=deps.chains, llm=deps.llm, embedder=deps.embedder, media_store=ms,
             clip_keys=draft.clip_keys(session_id))
     # The end of a session is a **fixed tail that runs once per session** (weakly correlated with
     # clip count, strongly with the number of characters), so it gets its own line for aggregation

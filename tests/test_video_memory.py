@@ -109,7 +109,7 @@ def test_unnamed_gets_stable_handle(db):
         llm=FakeLLM([_EPISODE, '{"atoms":[]}']), embedder=FakeEmbedder(),
         clip_keys={0: "oss/c.mp4"})
     line = next(r for r in ev.by_session(S) if (r.source or {}).get("kind") == "speech")
-    assert line.holder == "人物#1" and line.source["character_id"] == anon
+    assert line.holder == "Person #1" and line.source["character_id"] == anon
 
 
 def test_rewrite_ids_word_boundary_and_longest_first():
@@ -170,9 +170,9 @@ def test_flush_rewrites_ids_in_text_and_marks_actions(db):
              for r in ev.by_session(S) if (r.source or {}).get("kind") != "raw_clip"}
     assert "S1" not in texts["S2"] and "S2" not in texts["S2"] and "SW" not in texts["S2"], \
         f"bare ids still left in the text: {texts['S2']!r}"
-    assert texts["S2"] == "(action) 人物#1 enters holding a basketball while user films", texts["S2"]
+    assert texts["S2"] == "(action) Person #1 enters holding a basketball while user films", texts["S2"]
     # S2 appeared first, so it is person #1.
-    assert texts["S1"] == "人物#1, you are so stinky", texts["S1"]
+    assert texts["S1"] == "Person #1, you are so stinky", texts["S1"]
     # An env line gets no action marker.
     assert texts["ENV"] == "Bob is seated at the table", texts["ENV"]
 
@@ -219,7 +219,7 @@ def test_anon_person_gets_one_intro_line_with_description(db):
     intros = [r for r in ev.by_session(S) if (r.source or {}).get("kind") == "cast_intro"]
     assert len(intros) == 1, \
         f"an unnamed person should get exactly one intro line (Bob has a name, so none): {[r.content_inline for r in intros]}"
-    assert intros[0].content_inline == "人物#1 is a woman in a pink dress with a ponytail"
+    assert intros[0].content_inline == "Person #1 is a woman in a pink dress with a ponytail"
     assert intros[0].holder == "env", \
         "the description is narration and must not be attributed to the person, or it reads as something they said"
     assert (intros[0].source or {}).get("character_id") == anon
