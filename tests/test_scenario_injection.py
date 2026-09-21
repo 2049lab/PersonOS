@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from personos.app.recall_flow import run_recall
+from personos.online.recall_flow import run_recall
 from personos.online.llm import _SCEN_HEADER, with_scenario
 from personos.online import write_path as W
 from personos.online import retrieval as R

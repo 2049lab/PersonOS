@@ -20,21 +20,21 @@ from fastapi.responses import JSONResponse
 from loguru import logger
 from pydantic import BaseModel
 
-from .. import obs
-from ..config import settings
-from ..logging_setup import trace
-from ..models import now
-from ..online.profile_render import render as render_profile
-from ..online.trust import build_trust_chain, trace_evidence
-from ..storage.msg_queue import EnqueueBusy
-from ..storage.profile_store import BANDS, ProfileStore
+from personos import obs
+from personos.config import settings
+from personos.logging_setup import trace
+from personos.models import now
+from personos.online.profile_render import render as render_profile
+from personos.online.trust import build_trust_chain, trace_evidence
+from personos.storage.msg_queue import EnqueueBusy
+from personos.storage.profile_store import BANDS, ProfileStore
 from fastapi import Depends as _Depends
-from .recall_flow import PUBLIC_MODES, run_recall
+from personos.online.recall_flow import PUBLIC_MODES, run_recall
 from .response import EnvelopeRoute
-from .runtime import UserContext, rt
-from .session_scope import scoped_session, valid_user_id
+from server.runtime import UserContext, rt
+from personos.session_scope import scoped_session, valid_user_id
 from .signing import verify_signature
-from .views import memory_view as _memory_view
+from personos.online.views import memory_view as _memory_view
 
 # route_class:中心化把每个 handler 的返回响应包成 {code,data,msg}(不逐个改端点体)
 # dependencies:router 级 AK/SK 验签,先于各端点 _ctx 跑;pytest 下 no-op。所有 /api/v1 接口(含 register)都验签。
@@ -378,7 +378,7 @@ def recall(body: RecallBody, ctx: UserContext = Depends(_ctx)):
         # 查询图**额外**做格式校验:它是查询输入,认不出格式则整个视觉理解无从谈起,
         # 与其回 200 + 一个没用上图的答案(调用方无从察觉),不如当场告诉他图有问题。
         # /ingest 的图片不加这道:那是**内容**,看不了就降级成纯文本,消息本身仍有价值。
-        from ..storage.media._common import _detect_image_type
+        from personos.storage.media._common import _detect_image_type
         if _detect_image_type(img[:32]) is None:
             raise HTTPException(status_code=400,
                                 detail="image_b64 不是可识别的图片(支持 jpeg/png/webp/gif/heic)")
@@ -432,35 +432,13 @@ def recall(body: RecallBody, ctx: UserContext = Depends(_ctx)):
     # 无答案就诚实地空着,让 answer 里的客观交代(查了什么/结论/原因)说话。深轨负面作答
     # 也可能引用"查过"的 cells(auto 升级后 review 仍是快链判定)——同样按最终核判门禁。
     verdict = o.reviews[-1].verdict if o.reviews else None
-    final_insuff = verdict == "insufficient_material"
-    mem_atoms: list = []
-    if o.deep and o.ans and o.ans.cited_cells and not final_insuff:
-        for cid in o.ans.cited_cells:
-            mem_atoms.extend(ctx.atoms.list_by_cell(cid))
-    elif verdict is not None and not final_insuff:
-        for h in o.ranked[:_PUBLIC_FAST_MEMORIES]:
-            mem_atoms.extend(a.atom for a in h.atoms)
-    memories = [_memory_view(a, ctx.evidence, rt._media()) for a in mem_atoms[:_PUBLIC_FAST_MEMORIES]
-                if a is not None]
-    return {
-        "query": o.query, "mode": o.mode,
-        "verdict": verdict,
-        "critique": o.reviews[-1].critique if o.reviews else "",
-        "retried": o.retried,
-        "answer": o.ans.answer if o.ans else "",
-        "cited_cells": o.ans.cited_cells if o.ans else [],
-        "memories": memories,
-        "xrayTraceId": tid,
-        # 带图时回显视觉理解结果:没有它,调用方分不清"认出人后答不上来"与"根本没认出人"——
-        # 两者该给用户的提示完全不同(换个问法 vs 换张清楚的照片)。
-        # 这三项都是对**调用方输入**的解释,不是内部量(不含打分/prompt/深轨 steps)。
-        **({"visual": {
-            "faces": o.vis.faces,
-            "matched": [{"character_id": m.get("character_id", ""), "name": m.get("name", "")}
-                        for m in o.vis.matched],
-            "resolved_query": o.vis.query,
-        }} if o.vis is not None else {}),
-    }
+    # One renderer, shared with the library: Memory.search(...).to_public() and
+    # this endpoint produce the same shape by construction, so the two cannot
+    # drift into describing the same recall differently.
+    payload = o.to_public(atoms=ctx.atoms, evidence=ctx.evidence,
+                          media_store=rt._media(), max_memories=_PUBLIC_FAST_MEMORIES)
+    payload["xrayTraceId"] = tid
+    return payload
 
 
 def _public_profile(cur) -> dict:

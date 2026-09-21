@@ -495,6 +495,11 @@ class BatchStepResult:
     boundary: Optional[BoundaryDecision] = None   # None = 段首批(无界可判)或安全阀强制闭合
     forced_close: bool = False                    # True = 安全阀闭合,非 LLM 判定
     closed_cell: Optional[CellBuild] = None       # 本批触发闭合的 cell(闭合的是旧段,不含本批)
+    # Things that partially succeeded. A write is never rejected for a missing
+    # optional capability, but it must not silently do less than asked either —
+    # an image stored without understanding contributes nothing to retrieval,
+    # and the caller deserves to know that rather than discover it at recall.
+    warnings: list[str] = field(default_factory=list)
 
 
 class SessionWriter:

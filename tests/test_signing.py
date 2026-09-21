@@ -11,7 +11,7 @@ import types
 
 import pytest
 
-from personos.app import signing
+from server import signing
 
 AK, SK = "rokid", "testsk-abc"
 

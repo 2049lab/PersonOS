@@ -20,15 +20,15 @@ from datetime import datetime
 
 from loguru import logger
 
-from ..online.arbitrate import ReviewResult, review_answer
-from ..online.chain_face import UnitAssembly, assemble_units
-from ..online.deep_recall import DeepOutcome, run_deep
-from ..online.rerank import NoopReranker, Reranker, rerank_cells
-from ..online.retrieval import (
+from .arbitrate import ReviewResult, review_answer
+from .chain_face import UnitAssembly, assemble_units
+from .deep_recall import DeepOutcome, run_deep
+from .rerank import NoopReranker, Reranker, rerank_cells
+from .retrieval import (
     AtomHit, CellHit, MemoryAnswer, QueryRewrite, answer_from_cells, rewrite_query, search_atoms,
 )
-from ..online.session_context import build_history
-from ..online.visual_query import VisualRewrite, enrich_query_with_image
+from .session_context import build_history
+from .visual_query import VisualRewrite, enrich_query_with_image
 from ..storage.atom_store import AtomStore
 from ..storage.cell_store import CellStore
 from ..storage.chain_store import ChainStore
@@ -96,6 +96,65 @@ class RecallOutcome:
     asm: UnitAssembly | None = None          # 单元组装透视(池/链/织写/普通计数 + 残缺提示)
     vis: VisualRewrite | None = None       # 视觉改写(仅当调用方带了图片;None=纯文本召回)
     secs: dict[str, float] = field(default_factory=dict)   # 各工位耗时(汇总日志/评测统计用)
+    # Capabilities that were asked for but unavailable, stated rather than
+    # silently skipped: an image that could not be looked at, a deep track that
+    # could not run. The answer is still returned; the caller decides what to
+    # do about the gap.
+    warnings: list[str] = field(default_factory=list)
+
+    def to_public(self, *, atoms=None, evidence=None, media_store=None,
+                  max_memories: int = 20) -> dict:
+        """Flatten to a plain dict, for an HTTP response or a simpler caller.
+
+        This is the *only* renderer. The server calls it too, so the library
+        and the API cannot drift into describing the same recall differently.
+
+        What is deliberately not here: scores, prompts, raw model output, deep
+        track steps. They are internals; publishing them turns implementation
+        detail into contract.
+        """
+        verdict = self.reviews[-1].verdict if self.reviews else None
+        insufficient = verdict == "insufficient_material"
+
+        mem: list[dict] = []
+        if atoms is not None and evidence is not None and not insufficient:
+            from .views import memory_view
+
+            picked: list = []
+            if self.deep and self.ans and self.ans.cited_cells:
+                for cid in self.ans.cited_cells:
+                    picked.extend(atoms.list_by_cell(cid))
+            elif verdict is not None:
+                for hit in self.ranked[:max_memories]:
+                    picked.extend(a.atom for a in hit.atoms)
+            mem = [memory_view(a, evidence, media_store)
+                   for a in picked[:max_memories] if a is not None]
+
+        out = {
+            "query": self.query,
+            "mode": self.mode,
+            "verdict": verdict,
+            "critique": self.reviews[-1].critique if self.reviews else "",
+            "retried": self.retried,
+            "escalated": self.escalated,
+            "answer": self.ans.answer if self.ans else "",
+            "cited_cells": self.ans.cited_cells if self.ans else [],
+            "memories": mem,
+        }
+        if self.warnings:
+            out["warnings"] = list(self.warnings)
+        # Only when an image was actually sent. Without this a caller cannot
+        # tell "recognised the person but could not answer" from "did not
+        # recognise anyone" — and the advice to give the user differs
+        # completely (rephrase the question vs send a clearer photo).
+        if self.vis is not None:
+            out["visual"] = {
+                "faces": self.vis.faces,
+                "matched": [{"character_id": m.get("character_id", ""),
+                             "name": m.get("name", "")} for m in self.vis.matched],
+                "resolved_query": self.vis.query,
+            }
+        return out
 
 
 def run_recall(

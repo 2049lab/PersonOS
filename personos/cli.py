@@ -22,6 +22,14 @@ def _schema(args: argparse.Namespace) -> int:
     return 0
 
 
+def _doctor(args: argparse.Namespace) -> int:
+    from personos.diagnostics import inspect, render
+
+    caps = inspect()
+    print(render(caps))
+    return 0 if all(c.available for c in caps if c.required) else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="personos")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -33,6 +41,10 @@ def main(argv: list[str] | None = None) -> int:
     group.add_argument("--mysql", action="store_true", default=True)
     group.add_argument("--sqlite", action="store_true")
     schema.set_defaults(func=_schema)
+
+    doctor = sub.add_parser(
+        "doctor", help="report what the current configuration can do, and how to unlock the rest")
+    doctor.set_defaults(func=_doctor)
 
     args = parser.parse_args(argv)
     return args.func(args)

@@ -24,10 +24,10 @@ from typing import Any, Callable
 
 from loguru import logger
 
-from .. import obs
-from ..online.write_path import FeedMsg, SessionWriter
-from ..storage.msg_queue import Envelope, MsgQueue
-from ..storage.session_lock import SessionLock
+from . import obs
+from .online.write_path import FeedMsg, SessionWriter
+from .storage.msg_queue import Envelope, MsgQueue
+from .storage.session_lock import SessionLock
 
 
 @dataclass

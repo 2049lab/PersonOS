@@ -17,8 +17,8 @@ os.environ["PERSONOS_LOG_DIR"] = "/tmp/personos_smoke/logs"
 
 from fastapi.testclient import TestClient   # noqa: E402
 
-from personos.app.server import app          # noqa: E402
-from personos.app import runtime as rt_mod   # noqa: E402
+from server.app import app          # noqa: E402
+from personos import runtime as rt_mod   # noqa: E402
 
 # 本次运行唯一 user 后缀:重跑不撞旧数据(register 409),结束统一清理
 SUFFIX = time.strftime("%m%d-%H%M%S")

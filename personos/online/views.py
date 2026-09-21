@@ -6,8 +6,8 @@
 from __future__ import annotations
 
 from ..models import atom_anchor
-from ..online.retrieval import _TYPE_CN
-from ..online.trust import evidence_entries
+from .retrieval import _TYPE_CN
+from .trust import evidence_entries
 
 
 def memory_view(a, evidence_store=None, media_store=None) -> dict:

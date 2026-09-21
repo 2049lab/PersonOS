@@ -37,13 +37,13 @@ def _seeded() -> ProfileVersion:
 
 
 def test_public_profile_empty():
-    from personos.app.service_api import _public_profile
+    from server.api import _public_profile
     v = _public_profile(None)
     assert v["exists"] is False and v["version"] == 0 and v["traits"] == {}
 
 
 def test_public_profile_seeded_strips_internal_ids():
-    from personos.app.service_api import _public_profile
+    from server.api import _public_profile
     v = _public_profile(_seeded())
     assert v["exists"] is True and v["version"] == 3
     t = v["traits"]["communication_style"]

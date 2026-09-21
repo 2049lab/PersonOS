@@ -14,7 +14,7 @@ import tempfile
 
 import pytest
 
-from personos.app.ingest_worker import SessionConsumer
+from personos.ingest_worker import SessionConsumer
 from personos.online import video_ingest
 from personos.storage.msg_queue import MemoryMsgQueue
 from personos.storage.session_lock import MemorySessionLock
@@ -538,7 +538,7 @@ def test_session_end_without_video_still_finalizes_noop(spy):
 def test_dispatcher_routes_video_to_dedicated_pool():
     """**视频独立池**:队头是 video 的会话派到视频池,文本会话派到文本池——
     视频忙不占文本 worker(不会把文本消费饿死)。"""
-    from personos.app.ingest_worker import Dispatcher
+    from personos.ingest_worker import Dispatcher
 
     submitted = {"text": [], "video": []}
 
@@ -565,7 +565,7 @@ def test_dispatcher_routes_video_to_dedicated_pool():
 
 def test_video_pool_full_does_not_block_text():
     """视频池占满时,文本会话仍能被派发(隔离的核心价值)。"""
-    from personos.app.ingest_worker import Dispatcher
+    from personos.ingest_worker import Dispatcher
 
     got = []
 

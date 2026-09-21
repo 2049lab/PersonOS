@@ -5,7 +5,7 @@
 
 from datetime import datetime, timezone
 
-from personos.app.views import memory_view
+from personos.online.views import memory_view
 from personos.models import EvidenceRecord, EvidenceRef, MemoryAtom
 from personos.storage.evidence_store import EvidenceStore
 

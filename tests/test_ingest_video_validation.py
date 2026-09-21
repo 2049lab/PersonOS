@@ -12,10 +12,10 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from personos.app.runtime import UserContext, rt
-from personos.app.server import app
-from personos.app.service_api import _ctx
-from personos.app.signing import verify_signature
+from server.runtime import UserContext, rt
+from server.app import app
+from server.api import _ctx
+from server.signing import verify_signature
 
 U = "vtest_ingest_valid"
 _SIDS = ("valid", "vurl", "vkey", "vbad", "vempty", "vtext", "vbig")
@@ -94,7 +94,7 @@ def test_plain_text_unaffected(client):
 
 def test_caller_duration_over_limit_rejected(client):
     """调用方声明的时长超上限 → 入口就 400(便宜的一道)。"""
-    from personos.app.service_api import _MAX_CLIP_DURATION_S
+    from server.api import _MAX_CLIP_DURATION_S
     r = _post(client, [{"speaker": "user", "video_url": "https://x/a.mp4",
                         "duration_sec": _MAX_CLIP_DURATION_S + 1}], sid="vlong")
     assert r.status_code == 400 and "时长" in r.text
@@ -102,7 +102,7 @@ def test_caller_duration_over_limit_rejected(client):
 
 def test_unreachable_url_rejected_at_ingest(client, monkeypatch):
     """外链不可达(4xx/5xx)→ 入口 HEAD 预检当场 400,不让调用方收了 202 才悄悄失败。"""
-    import personos.app.service_api as api
+    import server.api as api
 
     monkeypatch.setattr(api, "_precheck_video_url", lambda url: "不可访问(HTTP 403)")
     r = _post(client, [{"speaker": "user", "video_url": "https://expired/a.mp4"}], sid="vdead")
@@ -113,7 +113,7 @@ def test_precheck_passes_on_network_flake(monkeypatch):
     """预检本身抖动/对端禁 HEAD → 放行(交给消费侧真下载判定),不误杀正常数据。"""
     import httpx
 
-    import personos.app.service_api as api
+    import server.api as api
 
     def _boom(*a, **k):
         raise httpx.ConnectTimeout("flaky")
@@ -129,7 +129,7 @@ def test_oversized_clip_rejected_at_ingest_both_paths(client, monkeypatch):
     `Download multimodal file timed out`——调用方早就走了,只能靠留痕事后查。
     体积在入口就能知道(外链看 Content-Range,我方 key 问 OSS),没有理由拖到消费侧才发现。
     """
-    from personos.app import service_api
+    from server import api as service_api
 
     big = service_api._MAX_CLIP_UPSTREAM_BYTES + 1
 
@@ -155,7 +155,7 @@ def test_oversized_clip_rejected_at_ingest_both_paths(client, monkeypatch):
 def test_oss_size_lookup_failure_does_not_block_ingest(client, monkeypatch):
     """取不到对象大小(key 不存在 / OSS 抖动)必须**放行**,交消费侧判定——宁放勿杀。
     入口校验是快速兜底,不能因为一次 OSS 抖动就把正常调用打回去。"""
-    from personos.app import service_api
+    from server import api as service_api
 
     def _boom():
         raise RuntimeError("oss down")
@@ -180,7 +180,7 @@ def test_recall_rejects_bad_image_base64(client):
 def test_recall_rejects_oversized_image(client):
     import base64
 
-    from personos.app import service_api
+    from server import api as service_api
     big = base64.b64encode(b"x" * (service_api._MAX_IMAGE_BYTES + 1)).decode()
     r = client.post("/api/v1/recall", json={
         "session_id": "vrimg", "query": "他是谁?", "image_b64": big})
@@ -189,7 +189,7 @@ def test_recall_rejects_oversized_image(client):
 
 def test_recall_image_validation_runs_before_anything_expensive(client, monkeypatch):
     """坏图必须在进召回链路**之前**就拒掉 —— 别先占并发闸、再去装配重模型才发现图是坏的。"""
-    from personos.app import service_api
+    from server import api as service_api
 
     def _boom(*a, **k):
         raise AssertionError("坏图不该走到 run_recall")
@@ -222,7 +222,7 @@ def test_recall_accepts_real_png(client, monkeypatch):
 
     from PIL import Image
 
-    from personos.app import service_api
+    from server import api as service_api
     buf = io.BytesIO()
     Image.new("RGB", (8, 8), (1, 2, 3)).save(buf, format="PNG")
 

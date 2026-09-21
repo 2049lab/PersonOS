@@ -16,7 +16,7 @@ import threading
 
 import pytest
 
-from personos.app.session_scope import scoped_session, valid_user_id
+from personos.session_scope import scoped_session, valid_user_id
 from personos.models import EvidenceRecord
 from personos.storage.redis_client import key as rkey
 from personos.storage.seg_store import RedisSegStore

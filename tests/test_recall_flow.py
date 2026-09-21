@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from personos.app.recall_flow import run_recall
+from personos.online.recall_flow import run_recall
 from personos.storage.cell_store import CellStore
 
 from .test_retrieval import Env, TableEmbedder, _v
@@ -246,7 +246,7 @@ def test_image_without_deps_is_a_noop(db, evidence_store):
 
 def test_visual_rewrite_output_feeds_r0(db, evidence_store, monkeypatch):
     """视觉改写的结果必须成为 R0 的输入 —— 否则认出了人也白认。"""
-    from personos.app import recall_flow
+    from personos.online import recall_flow
     from personos.online.visual_query import VisualRewrite
 
     env, _c1 = _env_with_two_cells(db)
@@ -280,7 +280,7 @@ def test_visual_block_surfaces_what_the_image_resolved(db, evidence_store, monke
     两者的响应此前长得一模一样。(我自己写回归时也因此只能用"答案里有没有人名"做
     间接判据,结果被 "没有关于 Bob 的任何信息" 骗出过假阳性。)
     """
-    from personos.app import recall_flow
+    from personos.online import recall_flow
     from personos.online.visual_query import VisualRewrite
 
     env, _c1 = _env_with_two_cells(db)

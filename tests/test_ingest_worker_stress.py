@@ -17,7 +17,7 @@ import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
-from personos.app.ingest_worker import Dispatcher, SessionConsumer
+from personos.ingest_worker import Dispatcher, SessionConsumer
 from personos.storage.msg_queue import MemoryMsgQueue
 from personos.storage.session_lock import MemorySessionLock
 

@@ -6,7 +6,7 @@ import threading
 
 import pytest
 
-from personos.app.admission import AdmissionGate, TaskOverloaded
+from personos.admission import AdmissionGate, TaskOverloaded
 
 
 def test_gate_fills_then_rejects():

@@ -13,7 +13,7 @@ import json
 import pytest
 from fastapi.responses import JSONResponse
 
-from personos.app.response import ResponseUtils, _wrap_response
+from server.response import ResponseUtils, _wrap_response
 
 
 # —— 纯函数层 ——
@@ -60,8 +60,8 @@ def _assert_envelope(body):
 def client():
     """真 app,覆写掉 AK/SK 验签(生产无条件强制,测试用 dependency_overrides 绕过)。"""
     from fastapi.testclient import TestClient
-    from personos.app.server import app
-    from personos.app.signing import verify_signature
+    from server.app import app
+    from server.signing import verify_signature
     app.dependency_overrides[verify_signature] = lambda: None
     try:
         with TestClient(app) as c:
@@ -74,10 +74,10 @@ def client():
 def auth_client():
     """真 app + 覆写 _ctx 注入只读 UserContext(不写 DB,绕过 register 护栏)+ 绕过验签。"""
     from fastapi.testclient import TestClient
-    from personos.app import service_api
-    from personos.app.runtime import rt
-    from personos.app.server import app
-    from personos.app.signing import verify_signature
+    from server import api as service_api
+    from server.runtime import rt
+    from server.app import app
+    from server.signing import verify_signature
 
     app.dependency_overrides[service_api._ctx] = lambda: rt.for_user("envtest_ro")
     app.dependency_overrides[verify_signature] = lambda: None

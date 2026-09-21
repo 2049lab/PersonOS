@@ -26,7 +26,7 @@ from pathlib import Path
 
 from loguru import logger
 
-from personos.app.recall_flow import run_recall
+from personos.online.recall_flow import run_recall
 from personos.providers.openai_compat import OpenAIChatLLM, OpenAIEmbedder
 from personos.providers.anthropic_compat import AnthropicChatLLM
 from personos.online.rerank import ScoringReranker

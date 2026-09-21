@@ -72,7 +72,7 @@ def test_pagination(db):
 
 def test_episode_vo_shape():
     """VO 只暴露段粒度对外字段(id/会话/起止/主题/叙事/分类),不含 payload/atoms/向量。"""
-    from personos.app.service_api import _episode_vo
+    from server.api import _episode_vo
     base = now()
     c = MemCell(session_id="s1", topic="lunch", episode="had ramen", episode_type="food",
                 t_start=base, t_end=base + timedelta(minutes=2))
@@ -85,7 +85,7 @@ def test_episode_vo_shape():
 
 
 def test_episode_vo_null_times():
-    from personos.app.service_api import _episode_vo
+    from server.api import _episode_vo
     vo = _episode_vo(MemCell(session_id="s", topic="t", episode="e"))
     assert vo["start_time"] is None and vo["end_time"] is None
 

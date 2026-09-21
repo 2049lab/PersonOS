@@ -1,13 +1,25 @@
-"""进程内运行时单例:持久 DB + 用户注册表 + MAAS 客户端 + 异步任务基建。
+"""The public entry point: :class:`Memory`.
 
-多租户形态:全局单件持连接/客户端/线程池;每 user 一套绑定好的 stores(rt.for_user
-缓存,LRU 上限)——业务代码拿到的 evidence/atoms/cells 天然只属于该 user,隔离由
-store 层的 user_id 绑定保证,不存在"忘带过滤"的泄露面。
+    from personos import Memory
 
-pod 无状态化(可水平扩容/滚动发布):跨请求会话态全部外置——
-- 任务登记 → MySQL tasks 表(任意副本可轮询;内存 dict 重部署即丢);
-- 未闭合段 + 会话写锁 → Redis(配置 REDIS_CLUSTER 时;否则进程内单副本实现);
-- 写入状态机无实例态,writer_for 每次新建;常驻 dict 只剩 _uctx(有 LRU 上限)。
+    m = Memory()
+    m.add("I moved to Shanghai in June", user_id="alice", session_id="chat-1")
+    m.end_session(user_id="alice", session_id="chat-1")
+    print(m.search("where do I live?", user_id="alice").ans.answer)
+
+``add`` and ``search`` are thin wrappers. They normalise arguments, check that
+the capabilities the call needs are actually configured, and hand off to the
+pipeline unchanged — the memory algorithms are reached by exactly the same code
+path whether you call this class or the HTTP server.
+
+Multi-tenancy: one process-wide object holds connections, model clients and
+thread pools; each user gets its own bound stores (cached, LRU-capped). The
+stores carry their user_id internally, so isolation is structural rather than a
+filter someone has to remember to add.
+
+Stateless by design, so several workers can run: unclosed segments, session
+locks and the ingest queue live in Redis when it is configured, and in memory
+otherwise. The write state machine holds no instance state.
 """
 
 from __future__ import annotations
@@ -21,29 +33,29 @@ from concurrent.futures import ThreadPoolExecutor
 
 from loguru import logger
 
-from .. import obs
-from ..providers.registry import build as build_provider
-from ..config import settings
+from . import obs
+from .providers.registry import build as build_provider
+from .config import settings
 from .admission import AdmissionGate, TaskOverloaded
 from .ingest_worker import Dispatcher, SessionConsumer
-from ..logging_setup import setup_logging
-from ..models import now
-from ..online.profile_consolidate import run_user_consolidation, should_consolidate
-from ..online.rerank import ScoringReranker
-from ..storage.profile_store import ProfileStore
-from ..online.write_path import MAX_SEGMENT_TURNS, SessionWriter
-from ..storage.atom_store import AtomStore
-from ..storage.cell_store import CellStore
-from ..storage.chain_store import ChainStore
-from ..storage.db import Database
-from ..storage.evidence_store import EvidenceStore
-from ..storage.media import media_store_from_settings
-from ..storage.msg_queue import MemoryMsgQueue, MsgQueue, RedisMsgQueue
-from ..storage.redis_client import get_redis
-from ..storage.seg_store import MemorySegStore, RedisSegStore, SegStore
-from ..storage.session_lock import LOCK_TTL_S, MemorySessionLock, RedisSessionLock, SessionLock
-from ..storage.task_store import TaskStore
-from ..storage.user_store import UserStore
+from .logging_setup import setup_logging
+from .models import now
+from .online.profile_consolidate import run_user_consolidation, should_consolidate
+from .online.rerank import ScoringReranker
+from .storage.profile_store import ProfileStore
+from .online.write_path import MAX_SEGMENT_TURNS, SessionWriter
+from .storage.atom_store import AtomStore
+from .storage.cell_store import CellStore
+from .storage.chain_store import ChainStore
+from .storage.db import Database
+from .storage.evidence_store import EvidenceStore
+from .storage.media import media_store_from_settings
+from .storage.msg_queue import MemoryMsgQueue, MsgQueue, RedisMsgQueue
+from .storage.redis_client import get_redis
+from .storage.seg_store import MemorySegStore, RedisSegStore, SegStore
+from .storage.session_lock import LOCK_TTL_S, MemorySessionLock, RedisSessionLock, SessionLock
+from .storage.task_store import TaskStore
+from .storage.user_store import UserStore
 
 _UCTX_CAP = 1024          # 用户上下文 LRU 上限;stores 重建零成本,超限逐最旧
 _SWEEP_INTERVAL_S = 300   # 任务表僵尸收割/过期清理的触发间隔
@@ -61,8 +73,8 @@ class UserContext:
         self.chains = ChainStore(db, user_id=user_id)
 
 
-class Runtime:
-    """进程内单例:持久 DB + 用户注册表 + MAAS 客户端 + 跨副本会话态 + 异步任务基建。"""
+class Memory:
+    """Layered long-term memory. See the module docstring for a quickstart."""
 
     def __init__(self):
         setup_logging(settings.log_dir)
@@ -202,7 +214,7 @@ class Runtime:
         if self._video_backends is None:
             with self._video_guard:
                 if self._video_backends is None:
-                    from ..identity.backends.factory import make_backends
+                    from .identity.backends.factory import make_backends
                     self._video_backends = make_backends()   # env gate 在 make_backends 内
                     logger.info("视频身份 backends 装配完成(进程单例)")
         return self._video_backends
@@ -212,7 +224,7 @@ class Runtime:
         with self._draft_guard:
             d = self._draft_stores.get(user_id)
             if d is None:
-                from ..identity.draft import MemoryDraftStore, RedisDraftStore
+                from .identity.draft import MemoryDraftStore, RedisDraftStore
                 d = (RedisDraftStore(get_redis(), user_id) if settings.redis_cluster
                      else MemoryDraftStore(user_id))
                 self._draft_stores[user_id] = d
@@ -222,9 +234,9 @@ class Runtime:
 
     def video_deps(self, user_id: str):
         """装配视频消费的一整套依赖(VideoDeps):backends=进程单例,其余 per-user。"""
-        from ..identity.cloud import CloudEngine
-        from ..identity.store import CharacterStore
-        from ..online.video_ingest import VideoDeps
+        from .identity.cloud import CloudEngine
+        from .identity.store import CharacterStore
+        from .online.video_ingest import VideoDeps
         ctx = self.for_user(user_id)
         store = CharacterStore(self.db, user_id)
         return VideoDeps(
@@ -239,10 +251,10 @@ class Runtime:
         区别是**不写草稿**——看图改写是读路径,不产生任何身份变更。
         draft 传 None:只用到 registry.candidate_card,那条路径不碰 draft。
         """
-        from ..identity.cloud import CloudEngine
-        from ..identity.registry import AnchorRegistry
-        from ..identity.store import CharacterStore
-        from ..online.visual_query import VisualDeps
+        from .identity.cloud import CloudEngine
+        from .identity.registry import AnchorRegistry
+        from .identity.store import CharacterStore
+        from .online.visual_query import VisualDeps
         store = CharacterStore(self.db, user_id)
         cloud = CloudEngine(store)
         return VisualDeps(store=store, cloud=cloud, backends=self.video_backends(),
@@ -414,5 +426,214 @@ class Runtime:
     def get_task(self, task_id: str) -> dict | None:
         return self.task_store.get(task_id)
 
+    # ══════════════════════════════════════════════════════════════════
+    # Public API
+    #
+    # Everything below is a wrapper. The bodies stay short and free of
+    # branching on purpose: if library and server ever disagree about what a
+    # call does, it should be impossible to blame this layer.
+    # ══════════════════════════════════════════════════════════════════
 
-rt = Runtime()
+    def add(self, messages, *, user_id: str = "default", session_id: str,
+            now_dt=None, source_extra: dict | None = None,
+            task_type: list[str] | None = None, scenario: str = ""):
+        """Record a turn, or a batch of turns, into memory.
+
+        ``messages`` is a string, one dict, or a list of dicts::
+
+            m.add("I am allergic to peanuts", user_id="alice", session_id="s1")
+            m.add([{"role": "user", "content": "..."},
+                   {"role": "assistant", "content": "..."}], ...)
+
+        A dict may carry ``image`` (bytes or a path) alongside its text.
+
+        The batch is atomic with respect to segmentation: it either joins the
+        current segment or starts a new one, and is never split down the
+        middle. Returns a ``BatchStepResult`` whose ``warnings`` lists anything
+        that partially succeeded.
+        """
+        from .errors import image_not_understood
+        from .online.write_path import FeedMsg
+
+        self._require_core()
+        msgs = _normalise_messages(messages)
+        has_image = any(m.image for m in msgs)
+        if has_image and not getattr(self.mllm, "available", False):
+            warn = [image_not_understood()]
+        else:
+            warn = []
+
+        writer = self.writer_for(user_id, session_id)
+        out = writer.feed_batch(msgs, now_dt=now_dt, source_extra=source_extra,
+                                task_type=task_type, scenario=scenario)
+        out.warnings.extend(warn)
+        return out
+
+    def end_session(self, *, user_id: str = "default", session_id: str,
+                    task_type: list[str] | None = None, scenario: str = ""):
+        """Close the trailing segment so its memories are built now.
+
+        Without this the last segment stays open until enough turns accumulate,
+        which for a conversation that simply ended means its memories are never
+        written. Returns the cells built by the close.
+        """
+        self._require_core()
+        return self.writer_for(user_id, session_id).end_session(
+            task_type=task_type, scenario=scenario)
+
+    def search(self, query: str, *, user_id: str = "default", session_id: str = "",
+               mode: str = "auto", top_k: int = 30, rewrite: bool = True,
+               now_dt=None, image: bytes | None = None,
+               image_content_type: str = "image/jpeg", scenario: str = "",
+               with_profile: bool = True):
+        """Answer a question from memory.
+
+        ``mode`` is ``auto`` (fast path, escalating to the deep agent when the
+        answer is judged insufficient), ``fast``, or ``deep``.
+
+        Returns a ``RecallOutcome``: the answer plus how it was reached — the
+        rewritten query, the retrieved atoms, the ranked materials, the
+        adjudication verdicts. Call ``.to_public()`` for a plain dict.
+        """
+        from .errors import no_deep_track, visual_recall_unavailable
+        from .models import now as _now
+        from .online.recall_flow import run_recall
+
+        self._require_core()
+        warn: list[str] = []
+        if mode == "deep" and not _deep_available():
+            raise no_deep_track()
+        if image is not None and not getattr(self.mllm, "available", False):
+            warn.append(visual_recall_unavailable())
+            image = None
+
+        ctx = self.for_user(user_id)
+        profile_full = profile_traits = ""
+        if with_profile:
+            profile_full, profile_traits = self._profile_strings(user_id)
+
+        out = run_recall(
+            self.llm, self.embedder, ctx.atoms, ctx.cells, ctx.evidence,
+            session_id=session_id or "default", query=query, now_dt=now_dt or _now(),
+            mode=mode, top_k=top_k, rewrite=rewrite, reranker=self.reranker,
+            media_store=self._media(), mllm=self.mllm, image=image,
+            image_content_type=image_content_type,
+            visual_deps=self.visual_deps(user_id) if image is not None else None,
+            profile_full=profile_full, profile_traits=profile_traits, scenario=scenario)
+        out.warnings.extend(warn)
+        return out
+
+    def profile(self, *, user_id: str = "default") -> dict | None:
+        """The distilled user profile, or None if not built yet."""
+        prof = ProfileStore(self.db, user_id).current()
+        return prof.to_dict() if prof and hasattr(prof, "to_dict") else prof
+
+    def trace(self, node_id: str, *, user_id: str = "default") -> dict:
+        """Follow provenance from an atom forward, or from evidence backward."""
+        from .online.trust import build_trust_chain, trace_evidence
+
+        ctx = self.for_user(user_id)
+        if node_id.startswith("ev_"):
+            return trace_evidence(node_id, ctx.evidence, ctx.atoms, ctx.cells)
+        return build_trust_chain(node_id, ctx.atoms, ctx.cells, ctx.evidence)
+
+    def capabilities(self) -> list:
+        """What this configuration can do. Same data as ``personos doctor``."""
+        from .diagnostics import inspect
+
+        return inspect()
+
+    def reset(self, *, user_id: str) -> None:
+        """Delete everything belonging to one user. Irreversible."""
+        from .storage.db.ddl import TABLE_NAMES
+
+        for table in TABLE_NAMES:
+            if table == "users":
+                continue
+            self.db.execute(f"DELETE FROM {table} WHERE user_id=%s", (user_id,))
+        self.close_user(user_id)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+    def close(self) -> None:
+        self.db.close()
+
+    # —— internals ——
+
+    def _require_core(self) -> None:
+        """Required capabilities are checked here, not at construction.
+
+        Constructing Memory() must stay cheap and side-effect free — it is the
+        first line of every quickstart, and failing there would make the
+        library look broken before the user has asked it to do anything.
+        """
+        from .errors import no_embedder, no_llm
+
+        if not getattr(self.llm, "available", True):
+            raise no_llm()
+        if not getattr(self.embedder, "available", True):
+            raise no_embedder()
+
+    def _profile_strings(self, user_id: str) -> tuple[str, str]:
+        from .online.profile_render import render as render_profile
+
+        try:
+            prof = ProfileStore(self.db, user_id).current()
+        except Exception:  # noqa: BLE001  a profile is an enhancement, never a blocker
+            return "", ""
+        if not prof:
+            return "", ""
+        try:
+            return render_profile(prof), render_profile(prof, traits_only=True)
+        except TypeError:
+            return render_profile(prof), ""
+
+
+def _deep_available() -> bool:
+    import importlib.util
+
+    return importlib.util.find_spec("langchain_classic") is not None
+
+
+def _normalise_messages(messages) -> list:
+    """Accept a string, a dict, or a list of either — and produce FeedMsg.
+
+    Being liberal here is worth it: ``m.add("...")`` is what people try first,
+    and OpenAI-shaped dicts are what they paste from an existing app.
+    """
+    from pathlib import Path
+
+    from .online.write_path import FeedMsg
+
+    if isinstance(messages, (str, dict)):
+        messages = [messages]
+    out = []
+    for raw in messages:
+        if isinstance(raw, str):
+            out.append(FeedMsg(speaker="user", text=raw))
+            continue
+        if isinstance(raw, FeedMsg):
+            out.append(raw)
+            continue
+        speaker = raw.get("speaker") or raw.get("role") or "user"
+        text = raw.get("text") or raw.get("content") or ""
+        image = raw.get("image")
+        if isinstance(image, (str, Path)):
+            image = Path(image).read_bytes()
+        out.append(FeedMsg(speaker=speaker, text=text, image=image,
+                           image_content_type=raw.get("image_content_type", "image/jpeg")))
+    return out
+
+
+
+# Deliberately no module-level instance here. Constructing Memory opens a
+# database connection, and doing that merely because someone imported the
+# module is the same import-time side effect the configuration layer works to
+# avoid. The server owns its singleton in server/runtime.py.
+
+# The class was called Runtime before it grew a public API.
+Runtime = Memory

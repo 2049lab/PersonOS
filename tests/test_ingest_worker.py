@@ -9,7 +9,7 @@ from __future__ import annotations
 import threading
 import time
 
-from personos.app.ingest_worker import Dispatcher, SessionConsumer
+from personos.ingest_worker import Dispatcher, SessionConsumer
 from personos.storage.msg_queue import MemoryMsgQueue
 from personos.storage.session_lock import MemorySessionLock
 

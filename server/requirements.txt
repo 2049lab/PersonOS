@@ -1,0 +1,6 @@
+# The server's own dependencies. The library is installed with the extras a
+# service deployment wants; the pip package itself stays minimal.
+personos[deep,mysql,redis,oss,image,observability]
+fastapi>=0.110
+uvicorn[standard]>=0.29
+gunicorn>=21.2

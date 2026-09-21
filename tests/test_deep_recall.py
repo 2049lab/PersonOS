@@ -663,7 +663,7 @@ def test_handoff_translates_fast_window_handles_to_deep_handles(db):
 # —— run_recall 分岔(编排层断言)——
 
 def test_run_recall_deep_mode_bypasses_fast(db, evidence_store):
-    from personos.app.recall_flow import run_recall
+    from personos.online.recall_flow import run_recall
     env = Env(db)
     c = env.add_cell(topic="画展", episode="画展叙事。",
                      atoms=[{"text": "展期 2026-09", "vec": _v(1, 0, 0, 0)}])
@@ -696,7 +696,7 @@ def test_run_recall_deep_mode_bypasses_fast(db, evidence_store):
 
 
 def test_run_recall_auto_insufficient_escalates_and_deep_overrides(db, evidence_store):
-    from personos.app.recall_flow import run_recall
+    from personos.online.recall_flow import run_recall
     env = Env(db)
     c = env.add_cell(topic="画展", episode="画展叙事。",
                      atoms=[{"text": "展期 2026-09", "vec": _v(1, 0, 0, 0)}])
@@ -727,7 +727,7 @@ def test_run_recall_auto_insufficient_escalates_and_deep_overrides(db, evidence_
 
 
 def test_run_recall_auto_ok_does_not_escalate(db, evidence_store):
-    from personos.app.recall_flow import run_recall
+    from personos.online.recall_flow import run_recall
     env = Env(db)
     env.add_cell(topic="画展", episode="画展叙事。",
                  atoms=[{"text": "展期 2026-09", "vec": _v(1, 0, 0, 0)}])

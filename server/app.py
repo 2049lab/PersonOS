@@ -1,6 +1,6 @@
 """PersonOS FastAPI 入口:只挂对外记忆服务(service_api,前缀 /api/v1)。
 
-运行:  uvicorn personos.app.server:app --reload --port 8000
+运行:  uvicorn server.app:app --reload --port 8000
        python -m personos          # 生产单进程(host/port 从 env 读)
 """
 
@@ -13,12 +13,12 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 from loguru import logger
 
-from ..config import settings
-from ..storage.redis_client import get_redis
-from .runtime import rt
-from ..online.event_forward import install as _install_event_forward
+from personos.config import settings
+from personos.storage.redis_client import get_redis
+from server.runtime import rt
+from personos.online.event_forward import install as _install_event_forward
 from .response import install as _install_envelope
-from .service_api import router as service_router
+from .api import router as service_router
 
 
 @asynccontextmanager
@@ -39,7 +39,7 @@ async def lifespan(app: FastAPI):
         rt.ingest_exec.shutdown(wait=True, cancel_futures=True)
         # 画像整理池同理收尾:在途 consolidate 持 profile 单飞锁,跑完才松;排队的取消(下次触发自愈)。
         rt.profile_exec.shutdown(wait=True, cancel_futures=True)
-        from .. import obs
+        from personos import obs
         obs.flush()                                    # 冲出缓冲的 langfuse trace
         logger.info("PersonOS 停止:ingest dispatcher 已收尾")
 

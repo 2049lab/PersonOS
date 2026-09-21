@@ -23,7 +23,7 @@ import time
 from fastapi import HTTPException, Request
 from loguru import logger
 
-from ..config import get_secret, settings
+from personos.config import get_secret, settings
 
 _WINDOW = int(os.environ.get("PERSONOS_SIGN_WINDOW_S", "300"))   # 时间戳窗口(秒)
 _MIN_SIGNED = ("content-type", "x-user-token")                  # 应签头最小集(出现即必签)
@@ -97,7 +97,7 @@ def _seen_nonce(ak: str, nonce: str, ttl: int) -> bool:
     """原子记录 AK+Nonce;已存在=重放返回 True。有 Redis 用 Redis(多副本),否则内存兜底。"""
     if settings.redis_cluster:
         try:
-            from ..storage.redis_client import get_redis, key
+            from personos.storage.redis_client import get_redis, key
             ok = get_redis().set(key("nonce", ak, nonce), "1", nx=True, ex=ttl)
             return not ok
         except Exception:                          # noqa: BLE001  Redis 异常 → 退内存(尽力而为)

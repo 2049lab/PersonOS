@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from personos.app.views import memory_view
+from personos.online.views import memory_view
 from personos.models import EvidenceRecord, EvidenceRef, MemoryAtom
 from personos.online.trust import _ev_dict, evidence_entries
 
