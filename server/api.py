@@ -124,6 +124,7 @@ class IngestBody(BaseModel):
     session_id: str               # Letters/digits/underscore/hyphen/dot only, <=95 (no colon: it's the Redis key separator)
     messages: list[IngestMessage] # A batch of messages (atomic): the whole batch joins the current segment or the whole batch starts a new one; a batch is never split
     context: CallerContext | None = None  # Optional: the caller's scenario + classification vocabulary (see CallerContext)
+    sync: bool = False            # False (default): return 202 as soon as the batch is queued. True: hold the request until this session's queue has drained (the batch's memories exist by the time we answer)
 
 
 class RecallBody(BaseModel):
@@ -146,6 +147,24 @@ class SessionEndBody(BaseModel):
     caller: str = ""              # Same as ingest
     session_id: str
     context: CallerContext | None = None  # Optional: the caller's scenario + the classification vocabulary for the trailing segment (see CallerContext)
+    sync: bool = False            # True: hold the request until the wrap-up has actually run (the trailing segment is closed into memories by the time we answer)
+
+
+_SYNC_WAIT_S = 600.0    # Upper bound for sync=True holds (same bound the library's flush uses)
+
+
+def _wait_drained(user_id: str, session_id: str) -> bool:
+    """Block until the session's queue is fully consumed (sync=True requests).
+
+    Any pod may be the one consuming, so this just watches the shared queue
+    state rather than driving consumption locally. False means the backlog did
+    not drain in time — the messages are not lost, poll GET /queue/status.
+    """
+    try:
+        rt.flush(user_id=user_id, session_id=session_id, timeout_s=_SYNC_WAIT_S)
+        return True
+    except TimeoutError:
+        return False
 
 
 @router.get("/health")
@@ -388,8 +407,11 @@ def ingest(body: IngestBody, ctx: UserContext = Depends(_ctx)):
     except EnqueueBusy:   # Severe contention enqueuing on this session timed out: reject and let the caller retry (never force it through and corrupt the order or lose a message)
         return JSONResponse(status_code=503, headers={"Retry-After": "1"},
                             content={"error": "enqueuing on this session is busy, retry later"})
-    return {"accepted": True, "msg_id": msg_id, "seq": seq,
-            "queue_depth": rt.queue_depth(ctx.user_id, sid), "trace_id": tid}
+    out = {"accepted": True, "msg_id": msg_id, "seq": seq,
+           "queue_depth": rt.queue_depth(ctx.user_id, sid), "trace_id": tid}
+    if body.sync:
+        out["consumed"] = _wait_drained(ctx.user_id, sid)
+    return out
 
 
 @router.post("/session/end", status_code=202)
@@ -410,8 +432,11 @@ def session_end(body: SessionEndBody, ctx: UserContext = Depends(_ctx)):
         ctx.user_id, sid,
         {"task_type": cc.task_type, "scenario": cc.scenario, "trace_id": tid},
         kind="session_end")
-    return {"accepted": True, "msg_id": msg_id, "seq": seq, "session_id": body.session_id,
-            "trace_id": tid}
+    out = {"accepted": True, "msg_id": msg_id, "seq": seq,
+           "session_id": body.session_id, "trace_id": tid}
+    if body.sync:
+        out["consumed"] = _wait_drained(ctx.user_id, sid)
+    return out
 
 
 @router.get("/queue/status")

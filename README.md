@@ -13,7 +13,7 @@ from personos import Memory
 m = Memory()                      # SQLite under ~/.personos; one env var to set
 
 m.add("I moved from Hangzhou to Shanghai in June", user_id="alice", session_id="s1")
-m.end_session(user_id="alice", session_id="s1")
+m.end_session(user_id="alice", session_id="s1", sync=True)   # wait for the queue to drain
 
 print(m.search("where do I live?", user_id="alice").ans.answer)
 ```
@@ -122,7 +122,7 @@ itself between days) · [with a photo](examples/images.py) ·
 
 ```python
 m.add(messages, user_id=..., session_id=...)   # text, a dict with an image, or video clips
-m.end_session(user_id=..., session_id=...)     # build memories from the open segment
+m.end_session(user_id=..., session_id=...)     # close the segment and build memories
 m.search(query, user_id=..., mode="auto")      # "auto" | "fast" | "deep"
 m.profile(user_id=...)                         # distilled user profile
 m.trace(node_id, user_id=...)                  # provenance, both directions
@@ -130,8 +130,28 @@ m.capabilities()                               # what this configuration can do
 m.reset(user_id=...)                           # delete one user's data
 ```
 
-Everything is synchronous. There is no `AsyncMemory` yet, and rather than
-pretend, the honest workaround is `await asyncio.to_thread(m.search, q)`.
+**Writes are asynchronous by default.** `add()`/`end_session()` enqueue onto a
+per-session ordered queue (the same machinery the server deployment uses —
+FIFO per session, fair scheduling across sessions, backpressure when a session
+is overloaded) and return an `AddReceipt` immediately, so memory writes never
+block your application's own work:
+
+```python
+receipt = m.add(..., user_id=..., session_id=...)   # returns at once
+# ... your code keeps running; a background dispatcher builds the memories ...
+
+m.flush(user_id=..., session_id=...)                # or: wait until the queue drains
+m.end_session(..., sync=True)                       # or: close and wait in one call
+```
+
+Pass `sync=True` to `add()`/`end_session()`, or call `flush()`, whenever you
+need to read your own writes. `queue_status()` reports a session's depth and
+cursor. A full queue raises `QueueBusy` — the same contract the HTTP API
+expresses as `503 + Retry-After`.
+
+Reads (`search`, `profile`, `trace`) are synchronous. There is no `AsyncMemory`
+yet, and rather than pretend, the honest workaround is
+`await asyncio.to_thread(m.search, q)`.
 
 ## Running it as a service
 

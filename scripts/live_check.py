@@ -87,16 +87,19 @@ def main() -> int:
 
         section("1. Write: add() then end_session()")
         t0 = time.monotonic()
-        result = m.add(CONVERSATION, user_id=user, session_id=session)
+        receipt = m.add(CONVERSATION, user_id=user, session_id=session)
         add_s = time.monotonic() - t0
-        check("add() accepted the batch", result.evidence_ids,
-              f"{len(result.evidence_ids)} evidence records in {add_s:.1f}s")
-        check("no unexpected warnings", not result.warnings, str(result.warnings))
+        check("add() accepted the batch and returned immediately",
+              receipt.accepted and receipt.kind == "ingest" and add_s < 5,
+              f"receipt seq={receipt.seq} in {add_s:.2f}s (queueing must not block)")
+        check("no unexpected warnings", not receipt.warnings, str(receipt.warnings))
 
         t0 = time.monotonic()
-        cells = m.end_session(user_id=user, session_id=session)
+        m.end_session(user_id=user, session_id=session, sync=True, timeout_s=600)
         end_s = time.monotonic() - t0
-        check("end_session() built memories", cells, f"{len(cells)} cells in {end_s:.1f}s")
+        print(f"  end_session(sync=True) drained the queue in {end_s:.1f}s")
+        cells = m.for_user(user).cells.iter_all()
+        check("end_session() built memories", cells, f"{len(cells)} cells")
 
         # Inspect what was actually built, not just that something was.
         ctx = m.for_user(user)

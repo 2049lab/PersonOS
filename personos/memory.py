@@ -4,8 +4,13 @@
 
     m = Memory()
     m.add("I moved to Shanghai in June", user_id="alice", session_id="chat-1")
-    m.end_session(user_id="alice", session_id="chat-1")
+    m.end_session(user_id="alice", session_id="chat-1", sync=True)
     print(m.search("where do I live?", user_id="alice").ans.answer)
+
+``add``/``end_session`` are asynchronous by default: the batch goes into the
+session's ordered queue and the call returns a receipt immediately, while a
+background dispatcher consumes it — the caller's business logic never blocks
+on memory building. ``sync=True`` waits for the queue to drain instead.
 
 ``add`` and ``search`` are thin wrappers. They normalise arguments, check that
 the capabilities the call needs are actually configured, and hand off to the
@@ -24,6 +29,7 @@ otherwise. The write state machine holds no instance state.
 
 from __future__ import annotations
 
+import base64
 import os
 import threading
 import time
@@ -52,7 +58,7 @@ from .storage.chain_store import ChainStore
 from .storage.db import Database
 from .storage.evidence_store import EvidenceStore
 from .storage.media import media_store_from_settings
-from .storage.msg_queue import MemoryMsgQueue, MsgQueue, RedisMsgQueue
+from .storage.msg_queue import EnqueueBusy, MemoryMsgQueue, MsgQueue, RedisMsgQueue
 from .storage.redis_client import get_redis
 from .storage.seg_store import MemorySegStore, RedisSegStore, SegStore
 from .storage.session_lock import LOCK_TTL_S, MemorySessionLock, RedisSessionLock, SessionLock
@@ -74,6 +80,26 @@ class UserContext:
         self.atoms = AtomStore(db, user_id=user_id)
         self.cells = CellStore(db, user_id=user_id)
         self.chains = ChainStore(db, user_id=user_id)
+
+
+class AddReceipt:
+    """What add()/end_session() return: proof the batch is queued, not that it
+    is consumed. ``seq`` is the batch's position in the session's ordered
+    queue; ``queue_depth`` is the backlog right after it landed. Read your own
+    writes with flush() or sync=True."""
+
+    def __init__(self, *, accepted: bool, msg_id: str, seq: int, kind: str,
+                 queue_depth: int, warnings: list[str] | None = None):
+        self.accepted = accepted
+        self.msg_id = msg_id
+        self.seq = seq
+        self.kind = kind                # "ingest" | "video" | "session_end"
+        self.queue_depth = queue_depth
+        self.warnings = warnings or []
+
+    def __repr__(self) -> str:          # what someone sees when they print it
+        return (f"AddReceipt(accepted={self.accepted}, kind={self.kind!r}, "
+                f"seq={self.seq}, queue_depth={self.queue_depth})")
 
 
 class Memory:
@@ -412,15 +438,28 @@ class Memory:
         return self._get_consumer().drain_session(user_id, session_id)
 
     def start_dispatcher(self) -> None:
-        """Start the background dispatcher (called from the FastAPI startup hook; tests
-        and scripts don't call it and drive things manually with drain_once)."""
-        if self._dispatcher is None:
-            self._dispatcher = Dispatcher(
-                self.msg_queue(), self._get_consumer(), self.ingest_exec,
-                settings.ingest_pool_size,
-                tick_s=settings.dispatcher_tick_s, idle_tick_s=settings.dispatcher_idle_tick_s,
-                video_pool=self.video_exec, video_cap=settings.video_pool_size)
-        self._dispatcher.start()
+        """Start the background dispatcher (called from the FastAPI startup hook; the
+        library also calls this lazily on the first queued write, and tests/scripts
+        may skip it entirely and drive consumption manually with drain_once)."""
+        self._ensure_dispatcher()
+
+    def _ensure_dispatcher(self) -> None:
+        if self._dispatcher is not None:
+            return
+        # Build the dependencies before taking the guard: msg_queue() and
+        # _get_consumer() each take _state_guard themselves, and calling them
+        # while holding it would deadlock the non-reentrant lock.
+        mq = self.msg_queue()
+        consumer = self._get_consumer()
+        with self._state_guard:
+            if self._dispatcher is None:
+                dispatcher = Dispatcher(
+                    mq, consumer, self.ingest_exec, settings.ingest_pool_size,
+                    tick_s=settings.dispatcher_tick_s,
+                    idle_tick_s=settings.dispatcher_idle_tick_s,
+                    video_pool=self.video_exec, video_cap=settings.video_pool_size)
+                dispatcher.start()
+                self._dispatcher = dispatcher
 
     def stop_dispatcher(self) -> None:
         if self._dispatcher is not None:
@@ -501,7 +540,8 @@ class Memory:
 
     def add(self, messages, *, user_id: str = "default", session_id: str,
             now_dt=None, source_extra: dict | None = None,
-            task_type: list[str] | None = None, scenario: str = ""):
+            task_type: list[str] | None = None, scenario: str = "",
+            sync: bool = False, timeout_s: float = 600.0) -> "AddReceipt":
         """Record a turn, or a batch of turns, into memory.
 
         ``messages`` is a string, one dict, or a list of dicts::
@@ -510,16 +550,30 @@ class Memory:
             m.add([{"role": "user", "content": "..."},
                    {"role": "assistant", "content": "..."}], ...)
 
-        A dict may carry ``image`` (bytes or a path) alongside its text.
+        A dict may carry ``image`` (bytes or a path) alongside its text, or
+        ``video`` (a path, file object, or URL) instead of text.
+
+        **Non-blocking, same contract as the HTTP ``/ingest``.** The batch goes
+        into the session's durable ordered queue and this call returns an
+        ``AddReceipt`` immediately; the background dispatcher consumes it FIFO.
+        Ordering is guaranteed per session — batches are consumed exactly once,
+        in the order they were added — but the memories exist only once the
+        queue has been drained. Call ``flush()`` (or pass ``sync=True``) when
+        you need to read your own writes, e.g. before ``search()`` in a script.
 
         The batch is atomic with respect to segmentation: it either joins the
         current segment or starts a new one, and is never split down the
-        middle. Returns a ``BatchStepResult`` whose ``warnings`` lists anything
-        that partially succeeded.
+        middle. Entry validation (capabilities, malformed input, backpressure)
+        is still synchronous — a batch that cannot work never enters the queue.
+
+        ``now_dt`` switches to a synchronous write and is meant for
+        deterministic tooling only (benchmarks replays); production code
+        should leave it unset.
         """
         from .errors import image_not_understood
 
         self._require_core()
+        self._check_ids(user_id, session_id)
         msgs, videos = _normalise_messages(messages)
 
         # Video takes a different path: a clip is not a turn to be appended to a
@@ -530,108 +584,168 @@ class Memory:
                 "a single add() carries either conversation turns or video clips, "
                 "not both — send them as separate calls")
         if videos:
-            return self._add_videos(videos, user_id=user_id, session_id=session_id)
+            return self._enqueue_videos(videos, user_id=user_id, session_id=session_id,
+                                        scenario=scenario, sync=sync,
+                                        timeout_s=timeout_s)
 
+        if now_dt is not None:
+            # Deterministic tooling (cassette record/replay): a fabricated clock
+            # cannot travel the queue — the consumer stamps its own time.
+            return self._add_sync(msgs, user_id=user_id, session_id=session_id,
+                                  now_dt=now_dt, source_extra=source_extra,
+                                  task_type=task_type, scenario=scenario)
+
+        for i, m in enumerate(msgs):
+            if not (m.text or "").strip() and not m.image:
+                raise ValueError(
+                    f"messages[{i}] must have at least one of text / image / video")
         warn = []
         if any(m.image for m in msgs) and not getattr(self.mllm, "available", False):
             warn = [image_not_understood()]
 
-        # The same session lock the server takes around a write. Segment state
-        # is shared, so two threads adding to one session would interleave it;
-        # different sessions stay fully parallel.
+        payload = {"messages": [
+            {"speaker": m.speaker, "text": m.text,
+             "image_b64": base64.b64encode(m.image).decode("ascii") if m.image else None,
+             "image_content_type": m.image_content_type}
+            for m in msgs],
+            "task_type": task_type, "scenario": scenario,
+            "source_extra": source_extra, "trace_id": uuid.uuid4().hex}
+        receipt = self._enqueue(user_id, session_id, payload, kind="ingest",
+                                warnings=warn)
+        if sync:
+            self.flush(user_id=user_id, session_id=session_id, timeout_s=timeout_s)
+        return receipt
+
+    def _add_sync(self, msgs, *, user_id: str, session_id: str, now_dt,
+                  source_extra, task_type, scenario):
+        """Synchronous write for deterministic tooling (now_dt fabrication).
+
+        Not the public path: it bypasses the queue, so the caller is responsible
+        for not racing it against queued writes to the same session.
+        """
+        from .errors import image_not_understood
+
+        warn = []
+        if any(m.image for m in msgs) and not getattr(self.mllm, "available", False):
+            warn = [image_not_understood()]
         with self._session_scope(user_id, session_id):
             writer = self.writer_for(user_id, session_id)
             out = writer.feed_batch(msgs, now_dt=now_dt, source_extra=source_extra,
                                     task_type=task_type, scenario=scenario)
         out.warnings.extend(warn)
-        # A closed segment is new material for the profile. Checking here rather
-        # than only at end_session is what makes the profile fill in as someone
-        # talks: a long session closes many segments, and waiting for the end
-        # would leave the profile stale for the whole conversation.
         if out.closed_cell is not None:
             self.trigger_profile(user_id, session_id, scenario)
         return out
 
-    def _add_videos(self, videos: list, *, user_id: str, session_id: str):
-        """Consume clips into the session's identity draft.
+    def _enqueue_videos(self, videos: list, *, user_id: str, session_id: str,
+                        scenario: str, sync: bool, timeout_s: float) -> "AddReceipt":
+        """Queue clips for the identity pipeline.
 
-        Nothing is committed here. Faces, body shots and voice samples
-        accumulate across clips, and who-is-who is only decided at
-        end_session() — a person glimpsed in one clip and seen clearly in the
-        next has to be resolvable as one person, which cannot be settled while
-        clips are still arriving.
+        Capability gates stay synchronous — a caller who cannot use video at
+        all finds out now, not in a background thread. Bytes clips are stored
+        here too (the queue carries only a key/URL, never the clip itself);
+        the expensive part (watching the video) is what the queue defers.
         """
         from .errors import no_identity_backend, no_vision
-        from .online.video_ingest import process_clip
 
         if not getattr(self.mllm, "available", False):
             raise no_vision()
         try:
-            deps = self.video_deps(user_id)
+            self.video_deps(user_id)
         except RuntimeError as e:          # backends disabled or not installed
             raise no_identity_backend() from e
 
-        from .online.video_ingest import ClipRejected
-        from .online.write_path import BatchStepResult
-
-        out = BatchStepResult(evidence_ids=[], records=[])
         media = self._media()
-        rejected: list[ClipRejected] = []
-        # The same session lock the server holds while draining clips: the
-        # identity draft and the text segment share per-session state, so a
-        # video add and a text add to one session must not interleave.
-        with self._session_scope(user_id, session_id):
-            for item in videos:
-                try:
-                    if isinstance(item, (str, Path)) or getattr(item, "read", None):
-                        data = (Path(item).read_bytes() if not hasattr(item, "read")
-                                else item.read())
-                        stored = media.save_video(data, owner=user_id)
-                        index = process_clip(deps, session_id=session_id,
-                                             clip_key=stored.key)
-                    else:               # already a URL the model service can fetch
-                        index = process_clip(deps, session_id=session_id,
-                                             clip_url=str(item))
-                except ClipRejected as e:
-                    # Mirror the ingest worker: a bad clip is noted and skipped,
-                    # the rest of the batch still gets consumed.
-                    rejected.append(e)
-                    out.warnings.append(f"clip skipped: {e}")
-                    continue
-                out.evidence_ids.append(f"clip:{index}")
-        if rejected and not out.evidence_ids:
-            raise rejected[0]           # nothing was consumed at all -> raise
-        return out
+        msgs = []
+        for i, item in enumerate(videos):
+            if isinstance(item, (str, Path)) or getattr(item, "read", None):
+                data = (Path(item).read_bytes() if not hasattr(item, "read")
+                        else item.read())
+                stored = media.save_video(data, owner=user_id)
+                msgs.append({"video_oss_key": stored.key, "video_url": None,
+                             "clip_index": i, "duration_sec": None})
+            else:                           # already a URL the model service can fetch
+                msgs.append({"video_oss_key": None, "video_url": str(item),
+                             "clip_index": i, "duration_sec": None})
+        payload = {"messages": msgs, "scenario": scenario,
+                   "trace_id": uuid.uuid4().hex}
+        receipt = self._enqueue(user_id, session_id, payload, kind="video")
+        if sync:
+            self.flush(user_id=user_id, session_id=session_id, timeout_s=timeout_s)
+        return receipt
+
+    def _enqueue(self, user_id: str, session_id: str, payload: dict, *,
+                 kind: str, warnings: list[str] | None = None) -> "AddReceipt":
+        """Backpressure + enqueue + make sure someone is consuming.
+
+        The dispatcher is started lazily on the first write so that a Memory
+        used only for recall never pays for the background threads.
+        """
+        from .errors import QueueBusy
+
+        depth = self.queue_depth(user_id, session_id)
+        if depth >= settings.max_queue_depth:
+            raise QueueBusy(
+                f"session {session_id!r} has {depth} messages backed up "
+                f"(limit {settings.max_queue_depth}); slow down and retry")
+        try:
+            msg_id, seq = self.enqueue_message(user_id, session_id, payload, kind=kind)
+        except EnqueueBusy as e:
+            raise QueueBusy(f"enqueuing on session {session_id!r} is busy, "
+                            f"retry later") from e
+        self._ensure_dispatcher()
+        return AddReceipt(accepted=True, msg_id=msg_id, seq=seq, kind=kind,
+                          queue_depth=self.queue_depth(user_id, session_id),
+                          warnings=list(warnings or []))
+
+    def flush(self, *, user_id: str = "default", session_id: str,
+              timeout_s: float = 600.0, poll_s: float = 0.2) -> None:
+        """Block until this session's queue is fully consumed.
+
+        "Fully" means the pending queue is empty *and* nothing is in flight —
+        after flush() returns, everything added to the session so far is
+        readable through search()/profile()/trace(). Other sessions are
+        unaffected. Raises TimeoutError if the backlog does not drain in time
+        (the messages are not lost; call flush() again or check the logs).
+        """
+        mq = self.msg_queue()
+        deadline = time.monotonic() + timeout_s
+        while not mq.is_empty(user_id, session_id):
+            if time.monotonic() > deadline:
+                raise TimeoutError(
+                    f"session {session_id!r} still has "
+                    f"{self.queue_depth(user_id, session_id)} messages after "
+                    f"{timeout_s:.0f}s; they are not lost — flush again or check "
+                    f"the logs for a consumption error")
+            time.sleep(poll_s)
+
+    def queue_status(self, *, user_id: str = "default", session_id: str) -> dict:
+        """Consumption progress: depth = backlog still to consume, cursor = the
+        largest seq consumed so far."""
+        return {"depth": self.queue_depth(user_id, session_id),
+                "cursor": self.msg_queue().cursor_get(user_id, session_id)}
 
     def end_session(self, *, user_id: str = "default", session_id: str,
                     task_type: list[str] | None = None, scenario: str = "",
-                    update_profile: bool = True):
-        """Close the trailing segment so its memories are built now.
+                    sync: bool = False, timeout_s: float = 600.0) -> "AddReceipt":
+        """Close the session: queue a wrap-up behind everything already added.
 
-        Without this the last segment stays open until enough turns accumulate,
-        which for a conversation that simply ended means its memories are never
-        written. Returns the cells built by the close.
+        Non-blocking, same contract as the HTTP ``/session/end``. Because the
+        wrap-up travels the same ordered queue, it is guaranteed to run after
+        every earlier batch: the trailing text segment is closed into memories,
+        and if clips were fed in, identity is adjudicated and the attributed
+        dialogue becomes memory too. Pass ``sync=True`` (or call ``flush()``)
+        when you need the close to have happened — e.g. before reading the
+        profile in a script.
         """
         self._require_core()
-        with self._session_scope(user_id, session_id):
-            cells = self.writer_for(user_id, session_id).end_session(
-                task_type=task_type, scenario=scenario)
-            # If clips were fed into this session, identity is adjudicated now
-            # and the attributed dialogue becomes memory through the same
-            # build_cell path as text. Inside the lock, as in the server's
-            # drain loop — the draft and the segment share session state.
-            # Sessions with no video simply skip it.
-            video_cell = self._finalize_video(user_id, session_id)
-        if video_cell is not None:
-            cells = [*cells, video_cell]
-        # Closing a session always produces new material, so check again here —
-        # the final segment of a conversation has no later write to catch it.
-        # Threshold-gated and run off the caller's thread, so this does not add
-        # latency to end_session; pass update_profile=False to schedule it
-        # yourself instead.
-        if update_profile:
-            self.trigger_profile(user_id, session_id, scenario)
-        return cells
+        self._check_ids(user_id, session_id)
+        payload = {"task_type": task_type, "scenario": scenario,
+                   "trace_id": uuid.uuid4().hex}
+        receipt = self._enqueue(user_id, session_id, payload, kind="session_end")
+        if sync:
+            self.flush(user_id=user_id, session_id=session_id, timeout_s=timeout_s)
+        return receipt
 
     def consolidate_profile(self, *, user_id: str = "default", scenario: str = "",
                             force: bool = True) -> int | None:
@@ -670,19 +784,6 @@ class Memory:
         except Exception:  # noqa: BLE001  a profile is an enhancement; never fail a write for it
             logger.exception(f"profile consolidation failed user={user_id}")
             return None
-
-    def _finalize_video(self, user_id: str, session_id: str):
-        try:
-            from .online.video_ingest import finalize_video
-        except ImportError:
-            return None
-        try:
-            deps = self.video_deps(user_id)
-        except (RuntimeError, ImportError):
-            return None                     # video was never configured for this process
-        if not deps.draft.pending_chains(session_id):
-            return None                     # this session had no clips
-        return finalize_video(deps, session_id=session_id)
 
     def search(self, query: str, *, user_id: str = "default", session_id: str = "",
                mode: str = "auto", top_k: int = 30, rewrite: bool = True,
@@ -814,6 +915,7 @@ class Memory:
         A library must not leave non-daemon threads behind: an application that
         finishes its work should exit, not hang waiting for a profile job.
         """
+        self.stop_dispatcher()
         for pool in (getattr(self, "profile_exec", None), getattr(self, "ingest_exec", None),
                      getattr(self, "video_exec", None)):
             if pool is not None:

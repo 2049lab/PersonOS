@@ -21,6 +21,14 @@ class PersonOSError(Exception):
     """Base class, so callers can catch everything this library raises."""
 
 
+class QueueBusy(PersonOSError):
+    """Backpressure: the session's backlog is full, or enqueue contention timed out.
+
+    Not a failure — the caller should slow down and retry, the same contract
+    the HTTP API expresses as 503 + Retry-After.
+    """
+
+
 class MissingCapability(PersonOSError):
     """A requested feature needs configuration or dependencies that are absent.
 

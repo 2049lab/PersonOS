@@ -72,23 +72,29 @@ def main() -> int:
         if not video.available:
             raise SystemExit(f"video identity is off — {video.remedy}")
 
-        print(f"Ingesting {len(clips)} consecutive clips...\n")
+        # add() only queues a clip: the bytes are stored, the receipt comes back
+        # immediately, and understanding + identity run on a background
+        # dispatcher. Nothing here blocks the caller's own work.
+        print(f"Queueing {len(clips)} consecutive clips...\n")
+        started = time.monotonic()
         for i, clip in enumerate(clips):
-            started = time.monotonic()
             try:
                 m.add([{"role": "user", "content": "", "video": str(clip)}],
                       user_id=USER, session_id=SESSION)
             except MissingCapability as e:
                 # The most common one here is local media with no public URL.
                 raise SystemExit(str(e)) from e
-            print(f"  clip {i}: {clip.name}  {time.monotonic() - started:.0f}s")
+            print(f"  clip {i}: {clip.name} queued")
+        print(f"  (all {len(clips)} queued in {time.monotonic() - started:.1f}s)")
 
         # Identity is committed here: candidate people seen across clips are
         # adjudicated into characters, and the dialogue is written into memory
-        # with each line attributed to whoever said it.
+        # with each line attributed to whoever said it. sync=True waits for the
+        # queue to drain — clips are understood serially, so allow minutes each.
         print("\nClosing the session (identity is resolved here)...")
         started = time.monotonic()
-        m.end_session(user_id=USER, session_id=SESSION)
+        m.end_session(user_id=USER, session_id=SESSION, sync=True,
+                      timeout_s=600 * len(clips) + 600)
         print(f"  {time.monotonic() - started:.0f}s")
 
         ctx = m.for_user(USER)

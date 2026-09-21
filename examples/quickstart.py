@@ -129,9 +129,14 @@ def main() -> None:
             print(f"══ {day} {'═' * (66 - len(day))}")
             for role, text in turns:
                 print(f"  {role:<10} {text}")
+            # add() returns as soon as the batch is queued — the memories are
+            # built on a background dispatcher. sync=True on end_session waits
+            # for the queue to drain, so the day is fully written before we
+            # look at what it produced.
             m.add([{"role": r, "content": t} for r, t in turns],
                   user_id=USER, session_id=day.lower())
-            m.end_session(user_id=USER, session_id=day.lower())
+            m.end_session(user_id=USER, session_id=day.lower(), sync=True,
+                          timeout_s=600)
             print()
             version = show_profile(m, day, version)
 

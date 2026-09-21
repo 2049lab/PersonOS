@@ -58,16 +58,18 @@ def main() -> None:
         vision = next(c for c in m.capabilities() if c.name == "image understanding")
         print(f"image understanding: {'on' if vision.available else 'OFF — ' + vision.remedy}\n")
 
-        result = m.add(
+        receipt = m.add(
             [{"role": "user", "content": "Photo of the whiteboard from today's standup.",
               "image": image, "image_content_type": "image/png"},
              {"role": "assistant", "content": "Got it. I'll remember what was on the board."},
              {"role": "user", "content": "Priya owns all three items this sprint."}],
             user_id=USER, session_id=SESSION)
-        for w in result.warnings:
+        for w in receipt.warnings:
             print(f"warning: {w}\n")
 
-        m.end_session(user_id=USER, session_id=SESSION)
+        # sync=True: wait until the queued write (and the image's description)
+        # has actually been built into memories before reading them back.
+        m.end_session(user_id=USER, session_id=SESSION, sync=True, timeout_s=600)
 
         ctx = m.for_user(USER)
         print("What the image became:")
