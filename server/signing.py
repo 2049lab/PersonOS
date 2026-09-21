@@ -117,7 +117,7 @@ def _seen_nonce(ak: str, nonce: str, ttl: int) -> bool:
     """Atomically record AK+nonce; if it already exists this is a replay and we return
     True. Redis is used when configured (multi-replica), otherwise we fall back to
     memory."""
-    if settings.redis_cluster:
+    if settings.redis_url:
         try:
             from personos.storage.redis_client import get_redis, key
             ok = get_redis().set(key("nonce", ak, nonce), "1", nx=True, ex=ttl)

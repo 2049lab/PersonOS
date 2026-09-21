@@ -19,7 +19,7 @@ Design (already agreed with the user):
 - A clean standalone entry point: a future session_end consumption path can call it directly (it is
   not tied to any script).
 
-- Bare ids inside line text are rewritten to display names too (matching mneme's
+- Bare ids inside line text are rewritten to display names too (matching the reference implementation's
   _rewrite_label_mentions): clip processing already replaced the local id (P1) with the cast id (S1),
   and here that becomes the display name — otherwise the same person would go by three different
   names in memory.

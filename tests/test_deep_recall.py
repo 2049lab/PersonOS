@@ -466,7 +466,7 @@ def test_remember_guards(db):
 
 # -- MaasChatModel: message mapping + client-side truncation at stop --
 
-def test_maas_chat_model_maps_roles_and_truncates_at_stop():
+def test_chat_model_maps_roles_and_truncates_at_stop():
     captured: list[list[dict]] = []
 
     class SpyLLM:

@@ -1,15 +1,24 @@
-"""链回填(docs/atom-chain-design.md §4.3/§8.2):对存量 atom 只重跑判链,不重抽。
+"""Chain backfill (docs/atom-chain-design.md 4.3/8.2): re-run chain assignment
+over existing atoms without re-extracting them.
 
-场景:开关关闭期写入的 atom 无链,打开开关后跑本脚本补判链;或判链口径升级后重建。
+When it applies: atoms written while the feature flag was off carry no chain,
+so run this after turning the flag on; or run it to rebuild after the chain
+criteria have been revised.
 
-- 幂等:先 chain_store.clear_user()(DELETE 本 user 链行 + atoms 链三列置 NULL,均带
-  WHERE;测试护栏拦 TRUNCATE),再按「格时间序 × 格内 occurrence_time 序」重放 W2.5
-  (与写入路径同款 assign_chains,一格一次批量 LLM)。
-- 评测库(conv-42 等)不走回填走全量重灌:W2 规范收紧改变了抽取本身,旧 atom 没有这条
-  地基(§8.2)。本脚本面向 SIT/生产存量。
-- 安全:必须显式给 --user / --user-prefix / --all 之一,清链动作带 WHERE 不伤他人。
+- Idempotent: first `chain_store.clear_user()` (DELETE this user's chain rows
+  and NULL out the three chain columns on their atoms, both with a WHERE
+  clause; a test guard rejects TRUNCATE), then replay W2.5 in "cell time order
+  x per-cell occurrence_time order" using the same `assign_chains` the write
+  path uses (one batched LLM call per cell).
+- Benchmark datasets (conv-42 and friends) are reloaded from scratch rather
+  than backfilled: the tightened W2 specification changed extraction itself,
+  and old atoms do not rest on that foundation (8.2). This script targets
+  production-style existing data.
+- Safety: exactly one of --user / --user-prefix / --all is required, and the
+  chain-clearing statements always carry a WHERE clause so other users are
+  untouched.
 
-运行:~/miniconda3/envs/personos/bin/python -m scripts.build_chains --user corpus
+Usage: python -m scripts.build_chains --user corpus
 """
 
 from __future__ import annotations
@@ -18,7 +27,7 @@ import argparse
 from collections import defaultdict
 from pathlib import Path
 
-from personos.providers.openai_compat import OpenAIChatLLM, OpenAIEmbedder
+from personos.providers.openai_compat import OpenAIChatLLM
 from personos.logging_setup import setup_logging
 from personos.models import atom_anchor, ensure_aware
 from personos.online.chain_build import assign_chains
@@ -27,11 +36,15 @@ from personos.storage.cell_store import CellStore
 from personos.storage.chain_store import ChainStore
 from personos.storage.db import Database
 
-_SORT_FLOOR = ensure_aware("1970-01-01")   # 无时间格的排序下界(时间不明按最老重放)
+_SORT_FLOOR = ensure_aware("1970-01-01")   # sort floor for undated cells (replay them first)
 
 
 def rebuild_user(db: Database, llm, user_id: str) -> dict:
-    """清链重放一个 user 的判链,返回统计。LLM 失败的格按 W2.5 语义留游离(非阻塞)。"""
+    """Clear and replay chain assignment for one user; return statistics.
+
+    Cells whose LLM call fails are left free-floating, per W2.5 semantics
+    (non-blocking).
+    """
     chains = ChainStore(db, user_id)
     cleared = chains.clear_user()
     atoms = AtomStore(db, user_id)
@@ -45,11 +58,11 @@ def rebuild_user(db: Database, llm, user_id: str) -> dict:
     for mid, items in by_cell.items():
         c = cells.get(mid)
         groups.append(((ensure_aware(c.t_start) if c else None) or _SORT_FLOOR, mid, items))
-    groups.sort(key=lambda g: g[0])                                   # 格间按格时间序重放
+    groups.sort(key=lambda g: g[0])                                   # replay cells in time order
 
     rebuilt = 0
     for _, mid, items in groups:
-        items.sort(key=lambda p: atom_anchor(p[0]) or _SORT_FLOOR)     # 格内按发生时间
+        items.sort(key=lambda p: atom_anchor(p[0]) or _SORT_FLOOR)     # within a cell, by occurrence
         res = assign_chains(llm, chains, items, origin_cell_id=mid)
         rebuilt += res.assigned
     return _stats(db, user_id, cleared_chains=cleared, rebuilt=rebuilt, n_cells=len(groups))
@@ -62,7 +75,7 @@ def _stats(db: Database, user_id: str, *, cleared_chains: int, rebuilt: int, n_c
     rows = atoms.all_with_embeddings()
     chained = sum(1 for a, _ in rows if a.chain_id)
     stats = {
-        "user": user_id or "(默认)",
+        "user": user_id or "(default)",
         "cleared_chains": cleared_chains,
         "rebuilt_assigned": rebuilt,
         "n_cells_replayed": n_cells,
@@ -76,11 +89,12 @@ def _stats(db: Database, user_id: str, *, cleared_chains: int, rebuilt: int, n_c
 
 
 def main():
-    ap = argparse.ArgumentParser(description="链回填:清本 user 链后按时间序重放 W2.5 判链")
+    ap = argparse.ArgumentParser(
+        description="Chain backfill: clear this user's chains, then replay W2.5 in time order")
     g = ap.add_mutually_exclusive_group(required=True)
-    g.add_argument("--user", help="精确 user_id(共享库按命名空间隔离)")
-    g.add_argument("--user-prefix", help="user_id 前缀(批量回填,如 locomo-)")
-    g.add_argument("--all", action="store_true", help="atoms 表里全部 user(慎用)")
+    g.add_argument("--user", help="exact user_id (users are namespaced in a shared database)")
+    g.add_argument("--user-prefix", help="user_id prefix (bulk backfill, e.g. locomo-)")
+    g.add_argument("--all", action="store_true", help="every user in the atoms table (use with care)")
     args = ap.parse_args()
 
     setup_logging(Path("logs"))
@@ -96,11 +110,12 @@ def main():
     llm = OpenAIChatLLM(timeout=120.0)
     for u in users:
         s = rebuild_user(db, llm, u)
-        print(f"[{s['user']}] 清链 {s['cleared_chains']} → 重建分配 {s['rebuilt_assigned']} atoms "
-              f"/ {s['n_cells_replayed']} 格 | atoms={s['n_atoms']} chains={s['n_chains']} "
-              f"chained={s['chained_atoms']} 游离率={s['free_rate']}")
+        print(f"[{s['user']}] cleared {s['cleared_chains']} chains -> reassigned "
+              f"{s['rebuilt_assigned']} atoms across {s['n_cells_replayed']} cells | "
+              f"atoms={s['n_atoms']} chains={s['n_chains']} chained={s['chained_atoms']} "
+              f"free_rate={s['free_rate']}")
         for n, title in s["top_chains"]:
-            print(f"    · «{title}» n={n}")
+            print(f"    - <{title}> n={n}")
 
 
 if __name__ == "__main__":

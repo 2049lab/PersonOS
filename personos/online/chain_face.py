@@ -35,7 +35,7 @@ import os
 
 # Max chains woven in parallel within one recall (one LLM call per chain, IO-bound; latency is about
 # +1 segment).
-# Note: this is the per-REQUEST fan-out width, not a global pool — worst-case MAAS concurrency equals
+# Note: this is the per-REQUEST fan-out width, not a global pool — worst-case provider concurrency equals
 # recall concurrency x this value.
 _WEAVE_WORKERS = int(os.environ.get("PERSONOS_WEAVE_WORKERS", "8"))
 _SPAN_FLOOR = datetime(1, 1, 1, tzinfo=timezone.utc)   # sort floor for a missing t_start (timezone-aware)

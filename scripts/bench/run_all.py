@@ -1,13 +1,20 @@
-"""LoCoMo 批量执行器:逐 conversation 调 run_locomo,每 conv 独立 trace/报告 + 轻量聚合。
+"""Batch runner for LoCoMo: invoke run_locomo per conversation, with a separate
+trace and report for each, plus a lightweight aggregate.
 
-设计:
-- 每 conv 一个子进程跑 run_locomo(共享 MySQL 里独立 user 命名空间,互不污染;内存不累积);
-- 产物按 conv 分目录:<outdir>/<conv>/{trace.json, report.html, report.md}——
-  单个 trace 不至于过大,也便于单独重跑/审阅某个 conv;
-- 断点续跑:该 conv 的 trace.json 已存在即跳过(--force 重跑);
-- 聚合:只读各 conv trace 的 meta/summary/错题归因,产出 aggregate md(不复制大 JSON)。
+Design:
+- one subprocess per conversation running run_locomo, each in its own user
+  namespace so they cannot contaminate one another and memory does not
+  accumulate;
+- artefacts are laid out per conversation as
+  <outdir>/<conv>/{trace.json, report.html, report.md}, which keeps any single
+  trace from growing too large and makes it easy to re-run or review one
+  conversation on its own;
+- resumable: a conversation whose trace.json already exists is skipped (use
+  --force to re-run it);
+- aggregation reads only the meta, summary and error attribution from each
+  trace to produce an aggregate markdown file; the large JSON is never copied.
 
-用法:
+Usage:
   python -m scripts.bench.run_all \
     --data data/locomo10.json --outdir data/bench/runs
 """
@@ -28,16 +35,19 @@ _PY = sys.executable
 
 
 def _run_one(conv: str, args, outdir: Path) -> bool:
-    """跑单个 conv(子进程,失败自动重试:长批跑的网络抖动/DNS 瞬断不至报废整个 conv)。
+    """Run one conversation in a subprocess, retrying on failure so that a
+    network blip or a momentary DNS failure during a long batch does not write
+    off the whole conversation.
 
-    run_locomo 的 --out 是产物前缀:传 <outdir>/<conv>/<conv> 得到
-    <conv>.trace.json / <conv>.report.html / <conv>.report.md;MySQL 侧按
-    locomo-<conv> user 命名空间隔离,重跑自清。
+    run_locomo's --out is an artefact prefix: passing <outdir>/<conv>/<conv>
+    yields <conv>.trace.json / <conv>.report.html / <conv>.report.md. On the
+    database side each conversation is isolated in the locomo-<conv> user
+    namespace, which a re-run clears for itself.
     """
     cdir = outdir / conv
     cdir.mkdir(parents=True, exist_ok=True)
     if (cdir / f"{conv}.trace.json").exists() and not args.force:
-        print(f"[skip] {conv}: trace 已存在(--force 重跑)")
+        print(f"[skip] {conv}: a trace already exists (use --force to re-run)")
         return False
     cmd = [_PY, "-m", "scripts.bench.run_locomo",
            "--conv", conv, "--n-sessions", str(args.n_sessions),
@@ -45,28 +55,29 @@ def _run_one(conv: str, args, outdir: Path) -> bool:
            "--data", args.data,
            "--out", str(cdir / conv)]
     for attempt in (1, 2, 3):
-        print(f"[run ] {conv}: {time.strftime('%H:%M:%S')}" + (f" (第{attempt}次)" if attempt > 1 else ""))
+        print(f"[run ] {conv}: {time.strftime('%H:%M:%S')}" + (f" (attempt {attempt})" if attempt > 1 else ""))
         t0 = time.time()
         r = subprocess.run(cmd)
         if r.returncode == 0:
             print(f"[done] {conv} ({time.time()-t0:.0f}s)")
             return True
-        print(f"[FAIL] {conv} 第{attempt}次失败 ({time.time()-t0:.0f}s)")
+        print(f"[FAIL] {conv} attempt {attempt} failed ({time.time()-t0:.0f}s)")
         if attempt < 3:
-            time.sleep(60)   # 网络抖动类失败:等一分钟再试
-    print(f"[GIVE-UP] {conv}: 三次失败,跳过(可稍后单跑)")
+            time.sleep(60)   # network-blip failures: wait a minute and try again
+    print(f"[GIVE-UP] {conv}: failed three times, skipping (run it on its own later)")
     return False
 
 
 def _aggregate(outdir: Path) -> Path:
-    """汇总所有 conv 的 summary → aggregate md(只读 meta/summary,不复制大 JSON)。"""
+    """Aggregate every conversation's summary into an aggregate markdown file,
+    reading only meta and summary and never copying the large JSON."""
     rows, by_cat, errs, tot_ok, tot_n = [], {}, {}, 0, 0
     for cdir in sorted(outdir.iterdir() if outdir.exists() else []):
         if not cdir.is_dir():
             continue
-        tj = cdir / f"{cdir.name}.trace.json"   # run_locomo 按 --out 前缀写 <conv>.trace.json
+        tj = cdir / f"{cdir.name}.trace.json"   # run_locomo writes <conv>.trace.json from the --out prefix
         if not tj.exists():
-            tj = cdir / "trace.json"            # 兼容历史目录布局
+            tj = cdir / "trace.json"            # compatibility with the older directory layout
         if not tj.exists():
             continue
         t = json.loads(tj.read_text(encoding="utf-8"))
@@ -85,24 +96,26 @@ def _aggregate(outdir: Path) -> Path:
             if not q.get("judge"):
                 k = q.get("break_point") or _error_kind(q)
                 errs[k] = errs.get(k, 0) + 1
-    lines = ["# LoCoMo × personos · 全量聚合报告", ""]
-    lines.append(f"- 生成: {time.strftime('%Y-%m-%d %H:%M')} · 覆盖 {len(rows)} 个 conversation")
-    lines.append(f"- 总分: **{tot_ok}/{tot_n} ({100*tot_ok/max(1,tot_n):.1f}%)**")
+    lines = ["# LoCoMo x personos - aggregate report", ""]
+    lines.append(f"- generated: {time.strftime('%Y-%m-%d %H:%M')} - covering {len(rows)} conversations")
+    lines.append(f"- total: **{tot_ok}/{tot_n} ({100*tot_ok/max(1,tot_n):.1f}%)**")
     lines.append("")
-    lines.append("## 各 conversation")
-    lines.append("| conv | sessions | 得分 | 正确率 | partial+empty | git |")
+    lines.append("## Per conversation")
+    lines.append("| conv | sessions | score | accuracy | partial+empty | git |")
     lines.append("|---|---|---|---|---|---|")
     lines += rows
-    lines += ["", "## 分题型(全量聚合)", "| 题型 | 对/总 | 正确率 |", "|---|---|---|"]
+    lines += ["", "## Per question category (aggregated)",
+              "| category | correct/total | accuracy |", "|---|---|---|"]
     for k, v in sorted(by_cat.items()):
         lines.append(f"| cat{k} {_CAT_NAME.get(int(k), '')} | {v[0]}/{v[1]} | {100*v[0]/max(1,v[1]):.0f}% |")
-    lines += ["", "## 错题断点分布(金标证据链最先断的环节)", ""]
-    lines += [f"- {k} ×{v}" for k, v in sorted(errs.items(), key=lambda x: -x[1])] or ["- 无错题"]
+    lines += ["", "## Break points of wrong answers (first stage where the gold evidence chain broke)", ""]
+    lines += [f"- {k} x{v}" for k, v in sorted(errs.items(), key=lambda x: -x[1])] or ["- no wrong answers"]
     lines.append("")
-    lines.append("> 逐 conv 细节见各目录 report.md / report.html;判定以链路展开为准。")
+    lines.append("> Per-conversation detail is in each directory's report.md / report.html; "
+                 "judge the result by expanding the pipeline, not by the score alone.")
     p = outdir / "aggregate.report.md"
     p.write_text("\n".join(lines), encoding="utf-8")
-    print(f"聚合报告: {p}")
+    print(f"aggregate report: {p}")
     return p
 
 
@@ -110,12 +123,17 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", default="data/locomo10.json")
     ap.add_argument("--outdir", default="data/bench/runs")
-    ap.add_argument("--n-sessions", type=int, default=99, help="每 conv 灌的 session 上限(99=全量)")
-    ap.add_argument("--n-questions", type=int, default=999, help="每 conv 答题上限(999=全部有效题)")
+    ap.add_argument("--n-sessions", type=int, default=99,
+                    help="maximum sessions loaded per conversation (99 = all of them)")
+    ap.add_argument("--n-questions", type=int, default=999,
+                    help="maximum questions answered per conversation (999 = every valid one)")
     ap.add_argument("--mode", default="auto")
-    ap.add_argument("--convs", default="", help="逗号分隔的 conv 名,空=全部 10 个")
-    ap.add_argument("--force", action="store_true", help="忽略已存在的 trace 重跑")
-    ap.add_argument("--aggregate-only", action="store_true", help="只重算聚合报告,不跑评测")
+    ap.add_argument("--convs", default="",
+                    help="comma-separated conversation names; empty means all ten")
+    ap.add_argument("--force", action="store_true",
+                    help="re-run even when a trace already exists")
+    ap.add_argument("--aggregate-only", action="store_true",
+                    help="only recompute the aggregate report, without running the benchmark")
     args = ap.parse_args()
 
     outdir = Path(args.outdir)
@@ -127,7 +145,7 @@ def main():
         for i, conv in enumerate(todo, 1):
             print(f"\n===== [{i}/{len(todo)}] {conv} =====")
             _run_one(conv, args, outdir)
-        print(f"\n全部完成 ({time.time()-t0:.0f}s)")
+        print(f"\nall done ({time.time()-t0:.0f}s)")
     _aggregate(outdir)
 
 

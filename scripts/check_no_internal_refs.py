@@ -1,15 +1,19 @@
-"""开源泄漏闸:仓库里不得残留任何公司内部标识。
+"""Release gate: no internal company identifiers may survive in the repository.
 
-为什么要自动化:内部标识不是只藏在显眼的配置里 —— 它散在 docstring 的"移植自 mneme"、
-注释里的"RedHub 代理"、依赖名 redkms、env 名 XHS_ENV、异常消息的内网域名。人工 review
-必然漏,而开源是**不可逆**的:推上去被爬了就收不回来。
+Why automate it: internal identifiers do not only hide in obvious config. They
+are scattered through docstrings ("ported from <internal project>"), comments
+("behind the <internal> proxy"), dependency names, environment-variable
+prefixes, and the internal hostnames baked into exception messages. A human
+review will miss some, and publishing is **irreversible**: once it is pushed
+and crawled, it cannot be taken back.
 
-用法:
-    python scripts/check_no_internal_refs.py            # 报告命中,有命中则退出码 1
-    python scripts/check_no_internal_refs.py --list     # 按模式分组列清单(当工作清单用)
+Usage:
+    python scripts/check_no_internal_refs.py            # report hits; exit 1 if any
+    python scripts/check_no_internal_refs.py --list     # group by pattern (use as a worklist)
 
-作为 pre-commit 钩子常驻。改造期间它会一直红 —— 这是预期的,红的条目就是待办清单;
-到发布前必须全绿。
+Meant to live as a pre-commit hook. It stays red for the duration of an
+open-sourcing effort — that is expected, and the red entries are the worklist.
+It must be green before release.
 """
 
 from __future__ import annotations
@@ -23,23 +27,29 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# 模式 → 为什么它不能出现。写清楚理由,免得后人以为是洁癖而随手加白名单。
+# pattern -> why it must not appear. Spell out the reason so that nobody later
+# mistakes this for fussiness and adds a casual exemption.
 PATTERNS: dict[str, str] = {
-    r"xiaohongshu": "公司域名",
-    r"\bxhs\b|XHS_": "公司简称/env 前缀",
+    r"xiaohongshu": "company domain",
+    r"\bxhs\b|XHS_": "company abbreviation / env prefix",
     r"redkms|redenv|redmetrics|redinfra|python-infra-framework|\bhyx\b":
-        "内网私有包(公网装不上)",
-    r"RedHub|redhub": "内网数据库代理",
-    r"\bcorvus\b": "内网 Redis 集群实现",
-    r"\bmaas\b|MAAS_": "内网模型网关",
-    r"\bapollo\b|pyapollo": "内网配置中心",
-    r"xray-langfuse|xray": "内网可观测平台",
-    r"mneme|meme-backend|wallace": "内部项目代号",
-    r"DMS 工单|内部系统开发安全规范": "内部流程/规范文档名",
+        "internal private packages (not installable from the public index)",
+    r"RedHub|redhub": "internal database proxy",
+    r"\bcorvus\b": "internal Redis cluster implementation",
+    r"\bmaas\b|MAAS_": "internal model gateway",
+    r"\bapollo\b|pyapollo": "internal configuration service",
+    r"xray-langfuse|xray": "internal observability platform",
+    r"mneme|meme-backend|wallace": "internal project codenames",
+    r"DMS 工单|内部系统开发安全规范": "internal process / policy document names",
 }
 
-# 跳过:二进制、产物、本文件自身(它当然含这些词)
-SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", "baseline", "data", "logs",
+# Skipped: binaries, build artefacts, and this file itself (which of course
+# contains every one of these words).
+# Note "baseline" is NOT skipped by name: that would also skip scripts/baseline,
+# the behaviour-baseline tooling, which does ship and does need scanning. Only
+# the recorded artefacts at the repository root are excluded, and those are
+# gitignored anyway so they never reach the file list.
+SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", "data", "logs",
              ".venv", "venv", "node_modules", ".idea"}
 SKIP_SUFFIX = {".pyc", ".gz", ".png", ".jpg", ".jpeg", ".ico", ".lock", ".json"}
 SKIP_FILES = {"check_no_internal_refs.py"}
@@ -86,26 +96,27 @@ def scan() -> dict[str, list[tuple[Path, int, str]]]:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--list", action="store_true", help="列出全部命中(当工作清单用)")
+    ap.add_argument("--list", action="store_true",
+                    help="list every hit (use it as a worklist)")
     a = ap.parse_args()
 
     hits = scan()
     if not hits:
-        print("✅ 无内部标识残留")
+        print("PASS: no internal identifiers remain")
         return 0
 
     total = sum(len(v) for v in hits.values())
     files = {f for v in hits.values() for f, _, _ in v}
-    print(f"❌ 命中 {total} 处内部标识,分布在 {len(files)} 个文件\n")
+    print(f"FAIL: {total} internal identifiers across {len(files)} files\n")
     for pat, items in sorted(hits.items(), key=lambda kv: -len(kv[1])):
         by_file: dict[Path, int] = defaultdict(int)
         for f, _, _ in items:
             by_file[f] += 1
-        print(f"── {PATTERNS[pat]}  ({len(items)} 处 / {len(by_file)} 文件)  /{pat}/")
+        print(f"-- {PATTERNS[pat]}  ({len(items)} hits / {len(by_file)} files)  /{pat}/")
         for f, n in sorted(by_file.items(), key=lambda kv: -kv[1])[:8 if not a.list else 999]:
             print(f"     {n:>4}  {f}")
         if not a.list and len(by_file) > 8:
-            print(f"          …另有 {len(by_file) - 8} 个文件(--list 看全部)")
+            print(f"          ... and {len(by_file) - 8} more files (--list to see all)")
         if a.list:
             for f, i, line in items[:40]:
                 print(f"          {f}:{i}  {line}")

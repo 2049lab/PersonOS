@@ -49,7 +49,7 @@ def test_single_hit_short_circuits_without_reranker():
     assert len(out) == 1 and out[0].rerank_score is None      # never ran
 
 
-def test_maas_reranker_prefixes_instruction_and_maps_scores():
+def test_scoring_reranker_prefixes_instruction_and_maps_scores():
     calls = []
 
     class FakeScoreApi:
@@ -65,7 +65,7 @@ def test_maas_reranker_prefixes_instruction_and_maps_scores():
     assert r.rerank("q", [], instruction="i") == []       # empty input does not call the API
 
 
-def test_maas_reranker_falls_back_to_order_on_failure():
+def test_scoring_reranker_falls_back_to_order_on_failure():
     class BoomApi:
         def rerank(self, query, documents):
             raise RuntimeError("gateway blip")

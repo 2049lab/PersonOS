@@ -24,7 +24,7 @@ def _iso(monkeypatch):
     and clear the cache afterwards."""
     signing._aksk_cache = {AK: SK}
     signing._mem_nonce.clear()
-    monkeypatch.setattr(signing, "settings", types.SimpleNamespace(redis_cluster=""))
+    monkeypatch.setattr(signing, "settings", types.SimpleNamespace(redis_url=""))
     yield
     signing._reset_cache()
 

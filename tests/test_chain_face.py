@@ -49,7 +49,7 @@ class BoomLLM:
     """chat always raises: asserts that a failed weave degrades only that one chain."""
 
     def chat(self, messages, temperature=0.3, max_tokens=2048) -> str:
-        raise RuntimeError("maas down")
+        raise RuntimeError("provider down")
 
 
 def _pool_of(env, items: list[tuple[str, str]]):

@@ -389,7 +389,7 @@ def ingest(body: IngestBody, ctx: UserContext = Depends(_ctx)):
         return JSONResponse(status_code=503, headers={"Retry-After": "1"},
                             content={"error": "enqueuing on this session is busy, retry later"})
     return {"accepted": True, "msg_id": msg_id, "seq": seq,
-            "queue_depth": rt.queue_depth(ctx.user_id, sid), "xrayTraceId": tid}
+            "queue_depth": rt.queue_depth(ctx.user_id, sid), "trace_id": tid}
 
 
 @router.post("/session/end", status_code=202)
@@ -411,7 +411,7 @@ def session_end(body: SessionEndBody, ctx: UserContext = Depends(_ctx)):
         {"task_type": cc.task_type, "scenario": cc.scenario, "trace_id": tid},
         kind="session_end")
     return {"accepted": True, "msg_id": msg_id, "seq": seq, "session_id": body.session_id,
-            "xrayTraceId": tid}
+            "trace_id": tid}
 
 
 @router.get("/queue/status")
@@ -538,7 +538,7 @@ def recall(body: RecallBody, ctx: UserContext = Depends(_ctx)):
     # drift into describing the same recall differently.
     payload = o.to_public(atoms=ctx.atoms, evidence=ctx.evidence,
                           media_store=rt._media(), max_memories=_PUBLIC_FAST_MEMORIES)
-    payload["xrayTraceId"] = tid
+    payload["trace_id"] = tid
     return payload
 
 

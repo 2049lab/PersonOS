@@ -1,19 +1,16 @@
-"""Redis access through a service-discovery connection pool.
+"""Redis access, used only when several workers share session state.
 
-- Lazy: importing this module touches no network. The pool is built on the first
-  get_redis() call, which is when service discovery resolves the cluster. A
-  service or a test that never really uses Redis therefore needs none of the
-  discovery environment variables.
+Optional: without PERSONOS_REDIS_URL the whole module stays unused and the
+in-memory implementations take over. Requires ``pip install personos[redis]``.
+
+- Lazy: importing this module touches no network. The client is built on the
+  first get_redis() call, so a process that never uses Redis never connects.
 - Every key is built through key(), as "{env}:{app}:{remaining segments}". The
-  environment comes from PERSONOS_ENV, which is unset locally and so defaults to
-  "local", keeping local keys naturally separate from deployed ones. The prefix is
-  what makes keys distinguishable inside a shared cluster and lets them be cleaned
-  up by segment.
-- A constraint: every key must carry a TTL, since a shared cluster must not
-  accumulate permanent keys.
-- A dependency constraint: redis-py must stay pinned to 6.x, because the
-  discovery pool library's handshake protocol is incompatible with 8.x. The pin
-  lives in requirements.
+  environment comes from PERSONOS_ENV and defaults to "local", so two
+  deployments pointed at one Redis cannot collide, and keys stay greppable and
+  removable by segment.
+- Every key must carry a TTL. A shared Redis must not accumulate keys that
+  nothing will ever delete.
 """
 
 from __future__ import annotations
@@ -28,26 +25,33 @@ _client = None   # lazy singleton; one connection pool shared per process, whose
 
 
 def get_redis():
-    """Get the Redis client singleton.
+    """The Redis client singleton, connected on first use.
 
-    The first call builds the pool, resolving the cluster through service
-    discovery. Failures are raised as they are.
+    Raises if PERSONOS_REDIS_URL is unset: reaching this function at all means
+    something asked for shared state, and quietly handing back a single-process
+    stand-in would turn a configuration mistake into silent data divergence
+    between workers.
     """
     global _client
     if _client is None:
         with _lock:
             if _client is None:
-                import redis as _redis
-                from redinfra.redis.pool import DiscoveryBlockingConnectionPool
-                # The pool library calls init_logger() at import time, which calls
-                # logger.remove() and tears out every sink we installed, leaving
-                # only its own stdout sink. So re-attach the file sink immediately
-                # after building the pool, or logs stop reaching disk.
-                from ..logging_setup import reinstall_file_sink
-                reinstall_file_sink(settings.log_dir)
-                _client = _redis.Redis(
-                    connection_pool=DiscoveryBlockingConnectionPool(
-                        cluster_name=settings.redis_cluster))
+                if not settings.redis_url:
+                    from ..errors import MissingCapability
+
+                    raise MissingCapability(
+                        "shared session state",
+                        "no Redis URL is configured",
+                        "set PERSONOS_REDIS_URL (needed only when several workers "
+                        "share one memory store)")
+                try:
+                    import redis as _redis
+                except ImportError as e:  # pragma: no cover - depends on extras
+                    raise ImportError(
+                        "Redis support needs the client: pip install 'personos[redis]'"
+                    ) from e
+                _client = _redis.Redis.from_url(settings.redis_url,
+                                                decode_responses=False)
     return _client
 
 

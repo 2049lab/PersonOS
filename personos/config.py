@@ -107,7 +107,6 @@ class Config:
     # Redis. Empty means single-process: segment state, session locks, the
     # message queue and identity drafts all live in memory.
     redis_url: str = ""
-    redis_cluster: str = ""
     env: str = "local"              # key namespace prefix, so deployments cannot collide
 
     # ── Video identity ───────────────────────────────────────────────────
@@ -223,7 +222,6 @@ def load_config() -> Config:
         oss_prefix=_env("OSS_PREFIX", "personos/"),
         oss_url_expires_seconds=int(_env("OSS_URL_EXPIRES_SECONDS", "3600")),
         redis_url=_env("PERSONOS_REDIS_URL"),
-        redis_cluster=_env("PERSONOS_REDIS_CLUSTER"),
         env=_env("PERSONOS_ENV", "local"),
         video_backend=_env("PERSONOS_VIDEO_BACKEND", "none").strip().lower(),
         deep_write=_flag("PERSONOS_DEEP_WRITE", True),

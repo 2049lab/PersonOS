@@ -259,7 +259,7 @@ class Memory:
             d = self._draft_stores.get(user_id)
             if d is None:
                 from .identity.draft import MemoryDraftStore, RedisDraftStore
-                d = (RedisDraftStore(get_redis(), user_id) if settings.redis_cluster
+                d = (RedisDraftStore(get_redis(), user_id) if settings.redis_url
                      else MemoryDraftStore(user_id))
                 self._draft_stores[user_id] = d
                 if len(self._draft_stores) > _UCTX_CAP:
@@ -303,7 +303,7 @@ class Memory:
     def _make_state(self) -> tuple[SegStore, SessionLock]:
         """Build (seg_store, session_lock) according to configuration. A Redis failure is
         not swallowed: it is raised as-is on first use."""
-        if settings.redis_cluster:
+        if settings.redis_url:
             client = get_redis()
             return RedisSegStore(client), RedisSessionLock(client)
         return MemorySegStore(), MemorySessionLock()
@@ -315,7 +315,7 @@ class Memory:
         if self._msgq is None:
             with self._state_guard:
                 if self._msgq is None:
-                    self._msgq = (RedisMsgQueue(get_redis()) if settings.redis_cluster
+                    self._msgq = (RedisMsgQueue(get_redis()) if settings.redis_url
                                   else MemoryMsgQueue())
         return self._msgq
 
@@ -428,7 +428,7 @@ class Memory:
         several. Saying so once at startup is cheaper than diagnosing it later.
         """
         env = settings.env
-        if not settings.redis_cluster and not settings.redis_url:
+        if not settings.redis_url:
             logger.warning(
                 "Redis is not configured: running single-process. Segment state, "
                 "session locks and the ingest queue are in memory, so multiple "

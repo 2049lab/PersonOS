@@ -16,6 +16,6 @@ logs/
 
 # 行为基线产物:9MB 的向量快照 + 磁带,开发期本地保留,不进版本库也不随发行。
 # 生成方式见 scripts/baseline/record.py
-baseline/
+/baseline/
 # 第三方评测语料
 data/

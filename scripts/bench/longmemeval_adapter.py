@@ -1,15 +1,22 @@
-"""LongMemEval → personos 数据适配器(纯解析,不做任何 LLM/存储调用)。
+"""LongMemEval -> personos data adapter (pure parsing; it makes no LLM or
+storage calls).
 
-与 LoCoMo 适配器的关键差异:
-- LongMemEval 是 user↔assistant 对话(非双真人):user 轮 holder="user"(记忆主人),
-  assistant 轮 holder="assistant"(真名直传对话通道,全量可抽可归属——不走
-  assistant_reply 降权通道;single-session-assistant 题专考助手侧内容,按 LoCoMo
-  speaker_b 的同等口径处理);
-- 每道题自带独立干草堆:一条实例 = 一段"人设历史"(48±个 session,按时间排序),
-  灌库后在 question_date 时刻提问一次;
-- 时间格式 "2023/05/20 (Sat) 02:21" → 带时区 datetime(锚 personos TZ);
-- 证据定位是 session 级(answer_session_ids)+ 轮级(has_answer 轮标注),
-  本适配器保留 turn_idx 级映射供金标证据链追踪。
+The key differences from the LoCoMo adapter:
+- LongMemEval is a user-assistant dialogue rather than two real people: user
+  turns get holder="user" (the owner of the memory) and assistant turns get
+  holder="assistant", passed straight through the dialogue channel so they are
+  fully extractable and attributable. They deliberately avoid the down-weighted
+  assistant_reply channel, since the single-session-assistant question type
+  tests assistant-side content specifically, and it is treated on the same
+  footing as LoCoMo's speaker_b;
+- every question carries its own haystack: one instance is one persona history
+  (roughly 48 sessions in chronological order), loaded into the store and then
+  asked a single question as of question_date;
+- timestamp format "2023/05/20 (Sat) 02:21" -> a timezone-aware datetime
+  (anchored to the personos TZ);
+- evidence is located at session level (answer_session_ids) and at turn level
+  (the has_answer flag); this adapter keeps the turn_idx-level mapping so the
+  gold evidence chain can be traced.
 """
 
 from __future__ import annotations
@@ -25,10 +32,11 @@ _DT_RE = re.compile(r"(\d{4}/\d{2}/\d{2})(?: \([A-Za-z]{3}\))?(?: (\d{2}:\d{2}))
 
 
 def parse_lme_dt(raw: str) -> datetime:
-    """'2023/05/20 (Sat) 02:21' → 带 TZ 的 datetime;缺时间按 00:00。"""
+    """'2023/05/20 (Sat) 02:21' -> a timezone-aware datetime; a missing time
+    defaults to 00:00."""
     m = _DT_RE.match((raw or "").strip())
     if not m:
-        raise ValueError(f"无法解析 LongMemEval 时间: {raw!r}")
+        raise ValueError(f"cannot parse LongMemEval timestamp: {raw!r}")
     d = datetime.strptime(m.group(1), "%Y/%m/%d")
     if m.group(2):
         d = d.replace(hour=int(m.group(2)[:2]), minute=int(m.group(2)[3:5]))
@@ -37,7 +45,8 @@ def parse_lme_dt(raw: str) -> datetime:
 
 @dataclass
 class LmeTurn:
-    """干草堆里的一轮:role→holder(user/assistant),turn_idx 供 has_answer 对齐。"""
+    """One turn in the haystack: role -> holder (user/assistant), with turn_idx
+    used to line up the has_answer flag."""
     holder: str
     text: str
     turn_idx: int
@@ -46,23 +55,23 @@ class LmeTurn:
 
 @dataclass
 class LmeSession:
-    idx: int                      # 在 haystack_session_ids 里的下标(证据定位用)
-    sid: str                      # 原始 session_id
+    idx: int                      # index within haystack_session_ids (used to locate evidence)
+    sid: str                      # the original session_id
     dt: datetime
     turns: list[LmeTurn] = field(default_factory=list)
 
 
 @dataclass
 class LmeQuestion:
-    """一条评测实例:干草堆(独立历史)+ 单题。"""
+    """One benchmark instance: a haystack (its own history) plus a single question."""
     qid: str
-    qtype: str                    # single-session-user / temporal-reasoning / ... (abstention 并入类型后缀判断)
+    qtype: str                    # single-session-user / temporal-reasoning / ... (abstention is inferred from the id suffix)
     abstention: bool
     question: str
-    answer: object                # str 或 int(计数题)
+    answer: object                # str, or int for counting questions
     question_dt: datetime
     sessions: list[LmeSession] = field(default_factory=list)
-    evidence_sidx: list[int] = field(default_factory=list)   # 证据 session 下标
+    evidence_sidx: list[int] = field(default_factory=list)   # indices of the evidence sessions
 
     def n_turns(self) -> int:
         return sum(len(s.turns) for s in self.sessions)

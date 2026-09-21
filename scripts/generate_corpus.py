@@ -1,17 +1,32 @@
-"""用 deepseek-v4-pro 造大规模、真实、覆盖各种记忆现象的第一人称多会话语料。
+"""Generate a large, realistic, first-person multi-session corpus that covers a
+wide range of memory phenomena.
 
-两阶段(既并行又跨段连贯):
-  A. 串行 1 次:造【人设圣经 + 时间线大纲】——稳定事实 + N 个时间段(每段 theme/日期/若干 session),
-     并在大纲里【预埋】各种记忆现象(更新/纠错/偏好演化/目标/时效/跨段埋点/矛盾/一次性/周期性/噪声)
-     + 一批事后 probe 问题。这份大纲是"真值脊柱",锁死跨段一致性。
-  B. 并行 N 次:每段拿【人设 + 全时间线 arc 摘要 + 本段细节】展开成真实人机对话。
-     只依赖不可变大纲(不依赖彼此生成文本)→ 可安全并行,又能正确做"上次说的X其实是Y"这类跨段纠错。
+Two stages (parallel generation, yet coherent across periods):
+  A. One serial call: produce the *persona bible + timeline outline* — stable
+     facts plus N periods (each with a theme, dates and a few sessions) — with
+     memory phenomena deliberately **planted** into the outline (updates,
+     corrections, preference shifts, goals, expiries, cross-period callbacks,
+     contradictions, one-off events, recurring habits, noise), along with a set
+     of after-the-fact probe questions. This outline is the "ground-truth
+     spine" that pins down cross-period consistency.
+  B. N parallel calls: each period is expanded into realistic human-assistant
+     dialogue from the persona, a summary of every period's arc, and that
+     period's own detail. Since each call depends only on the immutable outline
+     and never on text another call generated, they can run in parallel and
+     still get cross-period corrections ("what I told you last time was
+     actually Y") right.
 
-鉴权走 OpenAIChatLLM(读 .env 的 PERSONOS_LLM_API_KEY,默认模型 deepseek-v4-pro),不硬编码 key。
+Authentication goes through OpenAIChatLLM, which reads PERSONOS_LLM_API_KEY
+from .env; no key is hardcoded here.
 
-运行:~/miniconda3/envs/personos/bin/python -m scripts.generate_corpus --periods 10 --months 18
-产物:data/persona_gen/corpus.json(+ raw/ 原始响应,便于排查)
-下一步:用 loader 把 corpus.json 逐会话灌进 PersonOS(见 scripts/load_corpus.py)。
+Run:      python -m scripts.generate_corpus --periods 10 --months 18
+Output:   data/persona_gen/corpus.json (plus raw/ responses for debugging)
+Next:     load corpus.json into PersonOS session by session; see
+          scripts/load_corpus.py.
+
+Note: the prompts below are written in Chinese on purpose — they generate a
+Chinese-language persona corpus. They are model input, so translating them
+would change what this script produces.
 """
 
 from __future__ import annotations
@@ -23,12 +38,13 @@ from pathlib import Path
 
 from loguru import logger
 
-from personos.providers.openai_compat import OpenAIChatLLM, OpenAIEmbedder
+from personos.providers.openai_compat import OpenAIChatLLM
 from personos.logging_setup import setup_logging
 
 OUT_DEFAULT = "data/persona_gen/corpus.json"
 
-# —— 记忆现象清单(既给模型看,也用于统计覆盖度)——
+# Catalogue of memory phenomena: shown to the model, and also used to report
+# how well the generated corpus covers them.
 PHENOMENA = [
     "new(新事实)", "update(属性更新)", "supersede(整体顶替:搬家/换工作/换设备/关系变化)",
     "correction(纠错:之前说错后面更正)", "preference_shift(偏好演化)",
@@ -40,7 +56,7 @@ PHENOMENA = [
 
 _PHEN_TEXT = "\n".join(f"  - {p}" for p in PHENOMENA)
 
-# ============ 阶段 A:人设圣经 + 时间线大纲 ============
+# ============ Stage A: persona bible + timeline outline ============
 _A_SYS = "你在为一个【个人长期记忆系统】造评测语料。你要设定一个真实可信的中国都市普通人,并规划其一段人生时间线。输出必须是严格 JSON,不要任何解释文字。"
 
 def _a_user(periods: int, months: int) -> str:
@@ -69,7 +85,7 @@ def _a_user(periods: int, months: int) -> str:
 }}"""
 
 
-# ============ 阶段 B:把某一段展开成真实对话 ============
+# ============ Stage B: expand one period into realistic dialogue ============
 _B_SYS = "你在把一段人生时间线展开成真实的人机日常对话(用户第一人称跟 AI 助手聊天)。语气像真人随手说话:有具体细节、有情绪、有琐碎,不是填表。输出必须是严格 JSON,不要解释文字。"
 
 def _b_user(persona: dict, arcs_brief: str, period: dict) -> str:
@@ -92,7 +108,8 @@ def _b_user(persona: dict, arcs_brief: str, period: dict) -> str:
 
 
 def _extract_json(s: str) -> dict:
-    """剥 ```fence``` 并截取首个 {...} 到最后一个 },容忍模型偶尔加解释。"""
+    """Strip a ```fence``` and keep from the first { to the last }, tolerating
+    the occasional explanatory sentence the model adds around the JSON."""
     s = s.strip()
     if s.startswith("```"):
         s = s.split("\n", 1)[1] if "\n" in s else s
@@ -107,27 +124,28 @@ def _extract_json(s: str) -> dict:
     return json.loads(s)
 
 
-def _chat_json(maas: OpenAIChatLLM, system: str, user: str, *, max_tokens: int, retries: int = 2) -> dict:
-    """调 LLM 拿 JSON,解析失败重试(追加"只输出合法 JSON"提示)。"""
+def _chat_json(llm: OpenAIChatLLM, system: str, user: str, *, max_tokens: int, retries: int = 2) -> dict:
+    """Call the LLM for JSON, retrying on a parse failure with an appended
+    "emit valid JSON only" instruction."""
     msgs = [{"role": "system", "content": system}, {"role": "user", "content": user}]
     last = ""
     for attempt in range(1, retries + 2):
-        raw = maas.chat(msgs, temperature=0.9, max_tokens=max_tokens)
+        raw = llm.chat(msgs, temperature=0.9, max_tokens=max_tokens)
         last = raw
         try:
             return _extract_json(raw)
         except json.JSONDecodeError as e:
-            logger.warning(f"JSON 解析失败(第{attempt}次): {e};尾部={raw[-120:]!r}")
+            logger.warning(f"JSON parse failed (attempt {attempt}): {e}; tail={raw[-120:]!r}")
             msgs = [{"role": "system", "content": system},
                     {"role": "user", "content": user + "\n\n上次输出不是合法 JSON(可能被截断或多了解释)。请只输出完整合法 JSON。"}]
-    raise ValueError(f"多次仍拿不到合法 JSON,末次原文尾部: {last[-300:]}")
+    raise ValueError(f"still no valid JSON after retries; tail of last response: {last[-300:]}")
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--periods", type=int, default=10, help="时间段数(阶段A大纲)")
-    ap.add_argument("--months", type=int, default=18, help="时间线跨度(月)")
-    ap.add_argument("--workers", type=int, default=6, help="阶段B并行度")
+    ap.add_argument("--periods", type=int, default=10, help="number of periods (stage A outline)")
+    ap.add_argument("--months", type=int, default=18, help="timeline span in months")
+    ap.add_argument("--workers", type=int, default=6, help="stage B parallelism")
     ap.add_argument("--out", default=OUT_DEFAULT)
     args = ap.parse_args()
 
@@ -135,38 +153,39 @@ def main():
     out = Path(args.out)
     raw_dir = out.parent / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
-    maas = OpenAIChatLLM(timeout=180.0)   # 生成较慢,放宽超时
+    llm = OpenAIChatLLM(timeout=180.0)   # generation is slow, so allow a long timeout
 
-    # —— 阶段 A ——
-    print(f"[A] 造人设 + 时间线大纲({args.periods} 段 / {args.months} 月)…")
-    outline = _chat_json(maas, _A_SYS, _a_user(args.periods, args.months), max_tokens=8000)
+    # -- Stage A --
+    print(f"[A] building persona + timeline outline ({args.periods} periods / {args.months} months)...")
+    outline = _chat_json(llm, _A_SYS, _a_user(args.periods, args.months), max_tokens=8000)
     (raw_dir / "outline.json").write_text(json.dumps(outline, ensure_ascii=False, indent=2), encoding="utf-8")
     persona = outline["persona"]
     timeline = outline["timeline"]
-    print(f"    人设:{persona.get('name')} · {persona.get('occupation')} · {persona.get('city')}"
-          f" | 时间段 {len(timeline)} | probes {len(outline.get('probes', []))}")
+    print(f"    persona: {persona.get('name')} - {persona.get('occupation')} - {persona.get('city')}"
+          f" | periods {len(timeline)} | probes {len(outline.get('probes', []))}")
 
-    # 全时间线 arc 摘要(给每个阶段B调用,提供前后文)
+    # Arc summary of the whole timeline, passed to every stage B call as context.
     arcs_brief = "\n".join(
         f"{p['period_id']} [{p.get('date_start','')}~{p.get('date_end','')}] {p.get('theme','')}: {p.get('arc','')}"
         for p in timeline
     )
 
-    # —— 阶段 B:并行展开每段 ——
-    print(f"[B] 并行展开 {len(timeline)} 段(workers={args.workers})…")
+    # -- Stage B: expand every period in parallel --
+    print(f"[B] expanding {len(timeline)} periods in parallel (workers={args.workers})...")
     persona_slim = {k: persona.get(k) for k in ("name", "age", "gender", "city", "occupation", "personality", "social_circle")}
 
     def expand(period: dict) -> dict:
         pid = period.get("period_id", "?")
         try:
-            res = _chat_json(maas, _B_SYS, _b_user(persona_slim, arcs_brief, period), max_tokens=6000)
+            res = _chat_json(llm, _B_SYS, _b_user(persona_slim, arcs_brief, period), max_tokens=6000)
             (raw_dir / f"{pid}.json").write_text(json.dumps(res, ensure_ascii=False, indent=2), encoding="utf-8")
             n_turns = sum(len(s.get("turns", [])) for s in res.get("sessions", []))
-            print(f"    ✓ {pid} {period.get('theme','')} → {len(res.get('sessions',[]))} 会话 / {n_turns} 轮")
+            print(f"    ok  {pid} {period.get('theme','')} -> "
+                  f"{len(res.get('sessions',[]))} sessions / {n_turns} turns")
             return res
         except Exception as e:
-            logger.error(f"{pid} 展开失败: {e}")
-            print(f"    ✗ {pid} 失败: {e}")
+            logger.error(f"{pid} expansion failed: {e}")
+            print(f"    ERR {pid} failed: {e}")
             return {"period_id": pid, "sessions": [], "error": str(e)}
 
     expanded: dict[str, dict] = {}
@@ -176,7 +195,7 @@ def main():
             r = f.result()
             expanded[r["period_id"]] = r
 
-    # —— 组装:保持时间线顺序,合并大纲元信息 + 展开对话 ——
+    # -- Assemble: keep timeline order, merging outline metadata with the dialogue --
     periods_out = []
     total_turns = 0
     phen_count: dict[str, int] = {}
@@ -203,18 +222,19 @@ def main():
         "periods": periods_out,
         "probes": outline.get("probes", []),
         "meta": {"periods": len(periods_out), "turns": total_turns,
-                 "months": args.months, "model": maas.cfg.llm_model},
+                 "months": args.months, "model": llm.cfg.llm_model},
     }
     out.write_text(json.dumps(corpus, ensure_ascii=False, indent=2), encoding="utf-8")
 
     n_sessions = sum(len(p["sessions"]) for p in periods_out)
-    print(f"\n落盘 → {out}")
-    print(f"  人设 {persona.get('name')} | 时间段 {len(periods_out)} | 会话 {n_sessions} | 对话 {total_turns} 轮 | probes {len(corpus['probes'])}")
-    print(f"  现象覆盖: {dict(sorted(phen_count.items(), key=lambda x: -x[1]))}")
+    print(f"\nwritten -> {out}")
+    print(f"  persona {persona.get('name')} | periods {len(periods_out)} | sessions {n_sessions} "
+          f"| turns {total_turns} | probes {len(corpus['probes'])}")
+    print(f"  phenomenon coverage: {dict(sorted(phen_count.items(), key=lambda x: -x[1]))}")
     failed = [p['period_id'] for p in periods_out if not p['sessions']]
     if failed:
-        print(f"  ⚠ 展开失败的段: {failed}(可重跑)")
-    maas.close()
+        print(f"  WARNING: periods that failed to expand: {failed} (re-run to retry)")
+    llm.close()
 
 
 if __name__ == "__main__":

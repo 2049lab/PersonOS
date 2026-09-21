@@ -142,7 +142,7 @@ def root_span(name: str, *, user_id=None, session_id=None, input: Any = None,
 
     @contextmanager
     def _bind(tid: str):
-        """Bind the request trace_id to _req_trace (so _xray_patcher can write it into
+        """Bind the request trace_id to _req_trace (so log lines emitted anywhere in the request can carry it into
         the log tracing id); an empty value binds nothing."""
         tok = None
         try:

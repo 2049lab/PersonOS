@@ -1,16 +1,20 @@
-"""LoCoMo-10 → personos 数据适配器。
+"""LoCoMo-10 -> personos data adapter.
 
-职责(纯解析,不做任何 LLM/存储调用):
-- 解析 locomo10.json 的 10 段对话 → 会话/轮次/题目结构;
-- 图片消息 caption 内联:img_url/blip_caption(数据集 BLIP 离线生成)拼进文本,
-  "[shared an image: …]"——图片语义经文字通道进入证据/抽取/检索全链;
-- 双说话者映射:speaker_a → user,speaker_b → assistant_reply(连续同人回合合并成一个
-  exchange;session 以 speaker_b 开头的孤立回合降级为 user 消息——personos 的 reconcile
-  本就不按主语过滤,两位说话者的事实都会被抽取);
-- 时间解析:"1:56 pm on 8 May, 2023" → 带时区 datetime(锚 personos 的 TZ),作为该
-  session 所有轮的 now_dt 注入基准;
-- 题目的 evidence dia_id("D1:3" = session 1 第 3 轮)→ 所属 session 编号,供按已灌
-  session 过滤可回答的题/反推出题时刻。
+Responsibilities (pure parsing; it makes no LLM or storage calls):
+- parse the ten conversations in locomo10.json into a session / turn / question
+  structure;
+- inline image captions: img_url and blip_caption (generated offline by BLIP as
+  part of the dataset) are folded into the text as "[shared an image: ...]", so
+  that image semantics travel through the text channel into evidence,
+  extraction and retrieval alike;
+- map the two speakers: speaker_a -> user, speaker_b -> its real name
+  (consecutive turns by the same speaker are merged into one exchange);
+- parse timestamps: "1:56 pm on 8 May, 2023" -> a timezone-aware datetime
+  (anchored to the personos TZ), used as the now_dt injected for every turn of
+  that session;
+- map a question's evidence dia_id ("D1:3" = session 1, turn 3) to its session
+  number, so that answerable questions can be filtered by which sessions have
+  been loaded and the question time can be derived.
 """
 
 from __future__ import annotations
@@ -23,19 +27,24 @@ from pathlib import Path
 
 from personos.models import TZ
 
-# LoCoMo 的 session 时间格式,如 "1:56 pm on 8 May, 2023" / "10:33 am on 9 April, 2023"
+# LoCoMo session timestamp formats, e.g. "1:56 pm on 8 May, 2023" / "10:33 am on 9 April, 2023"
 _DT_FORMATS = ["%I:%M %p on %d %B, %Y", "%I:%M %p on %d %B %Y"]
 _DIA_RE = re.compile(r"^D(\d+):(\d+)$")
 
 
 @dataclass
 class Exchange:
-    """一条 utterance(连续同人回合合并):LoCoMo 双方都是人,各自作为独立 message 喂入。
+    """One utterance (consecutive turns by the same speaker merged). Both LoCoMo
+    participants are human, and each is fed in as an independent message.
 
-    holder:speaker_a→"user"(第一主体/记忆主人);speaker_b→其真名(人类参与者,非助手)。
-    不走 assistant_reply 通道——那条通道在框架里是认识论上的"助手上下文"(建议/猜测需
-    用户认可才算事实),而 LoCoMo 的 speaker_b 是真人,其自述事实应全量可抽、可归属
-    (reconcile 的"按说话人归属"规则)、原话应可进证据检索池。
+    holder: speaker_a -> "user" (the first-person subject, the owner of the
+    memory); speaker_b -> their real name (a human participant, not an
+    assistant). Deliberately not routed through the assistant_reply channel:
+    epistemically that channel is "assistant context" (a suggestion or guess
+    only becomes fact once the user endorses it), whereas LoCoMo's speaker_b is
+    a real person whose self-reported facts should be fully extractable,
+    attributable (the "attribute by speaker" rule in reconcile), and whose
+    verbatim words belong in the evidence retrieval pool.
     """
     holder: str
     text: str
@@ -44,8 +53,8 @@ class Exchange:
 
 @dataclass
 class LocomoSession:
-    idx: int                       # 1-based session 编号(dia_id 的 D# 与此一致)
-    dt: datetime                   # 会话发生时间(now_dt 注入基准)
+    idx: int                       # 1-based session number (matches the D# in dia_id)
+    dt: datetime                   # when the session happened (the now_dt baseline)
     exchanges: list[Exchange] = field(default_factory=list)
 
 
@@ -54,7 +63,7 @@ class LocomoQA:
     question: str
     answer: str
     evidence: list[str] = field(default_factory=list)   # ["D1:3", ...]
-    category: int = 0                                    # 1-5;5=adversarial(社区惯例弃)
+    category: int = 0                                    # 1-5; 5 = adversarial (dropped by convention)
 
     def evidence_sessions(self) -> set[int]:
         out = set()
@@ -68,8 +77,8 @@ class LocomoQA:
 @dataclass
 class LocomoConversation:
     sample_id: str
-    speaker_a: str                 # 映射为 user
-    speaker_b: str                 # 映射为 assistant
+    speaker_a: str                 # mapped to user
+    speaker_b: str                 # mapped to their real name
     sessions: list[LocomoSession] = field(default_factory=list)
     qa: list[LocomoQA] = field(default_factory=list)
 
@@ -81,23 +90,32 @@ def _parse_dt(raw: str) -> datetime:
             return datetime.strptime(s, fmt).replace(tzinfo=TZ)
         except ValueError:
             continue
-    raise ValueError(f"无法解析 LoCoMo 会话时间: {raw!r}")
+    raise ValueError(f"cannot parse LoCoMo session timestamp: {raw!r}")
 
 
 def _group_turns(turns: list[dict], speaker_a: str, speaker_b: str) -> list[Exchange]:
-    """连续同人回合合并成一条 utterance;holder 直接用【说话人真名】(如 "Caroline"/"Melanie")。
+    """Merge consecutive turns by the same speaker into one utterance, using the
+    speaker's **real name** as the holder (e.g. "Caroline" / "Melanie").
 
-    EvidenceRecord.holder 是自由字符串,真名直传让 reconcile 的对话行渲染成
-    "Melanie: ..."(模型看得到归属);抽出的原子 holder 也落在真名上。
-    speaker_a(第一视角)固定为 "user"——她/他是记忆的主人;speaker_b 是人类对话参与者,
-    不走 assistant 通道(那条通道是认识论上的"助手上下文",会降权抽取)。
+    EvidenceRecord.holder is a free-form string, so passing the real name
+    straight through makes reconcile render the dialogue line as
+    "Melanie: ..." (the model can see the attribution), and the extracted atoms
+    carry the real name as their holder too.
+    speaker_a, the first-person viewpoint, is always "user" - they own the
+    memory. speaker_b is a human participant and does not go through the
+    assistant channel, which is epistemically "assistant context" and would
+    down-weight extraction.
     """
     out: list[Exchange] = []
     for t in turns or []:
         spk, text, dia = t["speaker"], (t.get("text") or "").strip(), t.get("dia_id", "")
-        # 图片消息:caption 内联进文本(评测口径与 EverMemOS 对标——图片理解在上游
-        # BLIP 已完成,记忆层只消费文本)。归属由渲染层 holder 前缀提供,模板不带
-        # 说话人名;单 turn 单行,不改变行数(run_locomo 按 split("\n") zip dia 对齐 trace)。
+        # Image messages: the caption is inlined into the text. This matches the
+        # EverMemOS evaluation convention - image understanding already happened
+        # upstream in BLIP, and the memory layer only ever consumes text.
+        # Attribution comes from the holder prefix added by the rendering layer,
+        # so the template carries no speaker name. One turn stays one line, which
+        # keeps the line count unchanged (run_locomo zips split("\n") against dia
+        # to align the trace).
         if t.get("img_url"):
             text = (f"[shared an image: {t.get('blip_caption', 'an image')}] {text}").strip()
         holder = "user" if spk == speaker_a else spk
@@ -140,7 +158,8 @@ def load_conversations(path: str | Path) -> list[LocomoConversation]:
 
 
 def pick_answerable(lc: LocomoConversation, session_idxs: set[int], *, exclude_categories=(5,)) -> list[LocomoQA]:
-    """挑出【全部 evidence 都落在已灌 session 内】且非弃用题型的题——保证问的都在库里。"""
+    """Select questions whose evidence lies entirely within the loaded sessions
+    and whose category is not excluded, so that everything asked is in the store."""
     return [
         qa for qa in lc.qa
         if qa.category not in exclude_categories and qa.evidence and qa.evidence_sessions() <= session_idxs

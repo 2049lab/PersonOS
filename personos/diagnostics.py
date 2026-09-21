@@ -96,7 +96,7 @@ def inspect(cfg: Config | None = None) -> list[Capability]:
         c.rerank_model if rerank_ok else "not configured — retrieval keeps its fusion order",
         "" if rerank_ok else "set PERSONOS_RERANK_API_KEY and PERSONOS_RERANK_MODEL"))
 
-    multi = bool(c.redis_url or c.redis_cluster)
+    multi = bool(c.redis_url)
     out.append(Capability(
         "multiple workers", multi,
         "shared state on Redis" if multi else "single process — session state is in memory",

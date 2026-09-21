@@ -1,15 +1,21 @@
-"""冷启动闸:空环境下 import 必须成功,一行配置都不给。
+"""Cold-start gate: importing must succeed in an empty environment, with zero
+configuration supplied.
 
-这是"零配置可用"承诺的唯一硬保障。挡的是**导入期求值** —— 模块在 import 阶段就去读
-密钥/连数据库/建客户端。一旦有,`pip install personos` 后的第一行 `from personos import
-Memory` 就炸,再漂亮的 README 也没用。
+This is the only hard guarantee behind the "works with no configuration"
+promise. What it catches is **evaluation at import time** — a module that reads
+a secret, connects to a database, or builds a client while it is being
+imported. If any module does that, the very first line after
+`pip install personos`, `from personos import Memory`, blows up, and no amount
+of README polish will save it.
 
-为什么不能只测 `import personos`:包的 `__init__.py` 可能几乎是空的,那样这个检查
-永远绿、永远抓不到问题(实测过——空环境下 `import personos` 通过,而
-`import personos.online.write_path` 直接抛"密钥缺失")。所以这里**显式列出代表性模块**,
-覆盖配置、存储、写入、召回四条线。
+Why testing `import personos` alone is not enough: the package `__init__.py`
+may be nearly empty, in which case the check is permanently green and catches
+nothing (observed in practice — `import personos` passed in an empty
+environment while `import personos.online.write_path` raised "missing API
+key"). So representative modules are listed **explicitly**, covering the
+configuration, storage, write and recall paths.
 
-用法:python scripts/check_cold_start.py
+Usage: python scripts/check_cold_start.py
 """
 
 from __future__ import annotations
@@ -21,20 +27,22 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# 代表性模块:每条覆盖一类导入期风险。新增子系统时请一并加进来。
+# Representative modules: each covers one class of import-time risk. Add an
+# entry here whenever a new subsystem appears.
 MODULES = [
-    ("personos", "包入口(Memory 门面最终在这里)"),
-    ("personos.config", "配置层——导入期求值的高发区"),
-    ("personos.models", "纯数据模型,任何时候都该能导"),
-    ("personos.storage.db", "存储层:不得在 import 时连库"),
-    ("personos.online.write_path", "写入链路"),
-    ("personos.online.retrieval", "召回链路"),
+    ("personos", "package entry point (the Memory facade ends up here)"),
+    ("personos.config", "configuration layer - where import-time evaluation usually hides"),
+    ("personos.models", "pure data models; these must import under any conditions"),
+    ("personos.storage.db", "storage layer: must not connect to a database at import time"),
+    ("personos.online.write_path", "write path"),
+    ("personos.online.retrieval", "recall path"),
 ]
 
 
 def main() -> int:
     py = sys.executable
-    # env -i 的等价物:只留解释器能启动所必需的,其余一律清空
+    # The equivalent of `env -i`: keep only what the interpreter needs to start,
+    # and clear everything else.
     clean = {"PATH": os.environ.get("PATH", ""), "HOME": "/tmp/personos-coldstart"}
     if sys.platform == "win32":
         clean["SYSTEMROOT"] = os.environ.get("SYSTEMROOT", "")
@@ -44,19 +52,21 @@ def main() -> int:
         r = subprocess.run([py, "-c", f"import {mod}"], env=clean, cwd=ROOT,
                            capture_output=True, text=True)
         if r.returncode == 0:
-            print(f"✅ {mod}")
+            print(f"ok   {mod}")
         else:
             tail = (r.stderr or "").strip().splitlines()
-            print(f"❌ {mod}  ({why})\n     {tail[-1] if tail else '未知错误'}")
+            print(f"FAIL {mod}  ({why})\n     {tail[-1] if tail else 'unknown error'}")
             failed.append(mod)
 
     if failed:
-        print(f"\nCOLD_START FAIL — {len(failed)}/{len(MODULES)} 个模块在空环境下无法导入。"
-              f"\n零配置承诺不成立:这些模块在 import 阶段就要求配置。"
-              f"\n典型原因:模块级 `settings = load_settings()`、把 settings 当默认参数、"
-              f"模块级客户端单例。")
+        print(f"\nCOLD_START FAIL - {len(failed)}/{len(MODULES)} modules cannot be "
+              f"imported in an empty environment."
+              f"\nThe zero-configuration promise does not hold: these modules demand "
+              f"configuration while being imported."
+              f"\nUsual causes: a module-level `settings = load_settings()`, settings "
+              f"used as a default argument, or a module-level client singleton.")
         return 1
-    print(f"\nCOLD_START PASS — {len(MODULES)} 个模块均可在空环境下导入")
+    print(f"\nCOLD_START PASS - all {len(MODULES)} modules import in an empty environment")
     return 0
 
 

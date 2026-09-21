@@ -86,7 +86,7 @@ def readyz():
     reachable — they are hard dependencies of the write path."""
     try:
         rt.db.fetch_one("SELECT 1")
-        if settings.redis_cluster:
+        if settings.redis_url:
             get_redis().ping()
         return {"status": "ready"}
     except Exception as e:  # noqa: BLE001

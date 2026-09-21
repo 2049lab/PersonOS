@@ -1,15 +1,24 @@
-"""LoCoMo 评测的 answerer 与 judge(模式 A:memories+brief → 统一 answerer → LLM judge)。
+"""The answerer and judge for the LoCoMo benchmark (mode A: memories + brief ->
+a single answerer -> an LLM judge).
 
-协议对齐 Mem0 论文:judge 为二元判定(CORRECT/WRONG,允许语义等价/单位换算),
-judge prompt 沿袭 MemGPT→Mem0 一系;运行时把 judge 模型显式写进报告(评测战争教训:
-judge/answerer 不声明,数字就是营销)。
+The protocol follows the Mem0 paper: the judge makes a binary decision
+(CORRECT/WRONG, allowing semantic equivalence and unit conversion), and the
+judge prompt descends from the MemGPT -> Mem0 lineage. The judge model is
+written explicitly into the report at run time (a lesson from the benchmark
+wars: if the judge and answerer are not declared, the numbers are marketing).
 
-judge v2(2026-08-26):相对时间在 harness 里用 Python 确定性换算成绝对日期/窗口
-(括号内标注后交给 judge),LLM 只做比对不做日历心算——实测 M3 心算星期会错
-(7/18 明明是 7/20 前的周二,判 WRONG);v1 只认字面则把换算对的答案判错。
+judge v2: relative times are converted deterministically into absolute dates
+and windows by Python inside the harness, annotated in parentheses, and only
+then handed to the judge, so the LLM compares rather than doing calendar
+arithmetic in its head. In practice the model gets weekdays wrong when it does
+the arithmetic itself (marking WRONG an answer of 7/18, which really is the
+Tuesday before 7/20), while a v1 judge that only matched literal wording marked
+correctly-converted answers wrong.
 
-双口径(S4 决策 3,2026-09-03):answerer 规则 7 = 简报信任(简报已答且材料支持时
-采用简报);同一题 judge 跑两遍——Mem0 口径判 answerer 产物,产品口径直判 R5 答案。
+Two scoring conventions: answerer rule 7 is "trust the brief" (adopt the brief
+when it already answers the question and the materials support it), and the
+judge runs twice on each question — the Mem0 convention judges the answerer's
+output, and the product convention judges the R5 answer directly.
 """
 
 from __future__ import annotations
@@ -20,17 +29,28 @@ from datetime import date, timedelta
 
 from personos.providers.anthropic_compat import AnthropicChatLLM
 
-# 模式 A answerer:把 personos 的产物(brief + 按 cell 分组的 memories)当材料,生成英文简答。
-# 与 Mem0/MIRIX 的"记忆 → answerer → 答案"协议同构。
-# 作答纪律(对标 EverMemOS ANSWER_PROMPT 的轻量 CoT,覆盖 LoCoMo 题型的作答形态):
-#   ① 清单题先全量收集再自查漏项(一个漏看的组就是一道错题);
-#   ② 日期只用材料标注的绝对日期,不做日历心算(M3 实测心算星期会错,judge v2 同源教训);
-#   ③ 用材料自带的具体名词/数字/活动名,不上位泛化;
-#   ④ 允许一步直接推理与常识连接(cat3 开放域题按定义需要世界知识推断);
-#   ⑤ hedged 材料 hedged 答;程度题按证据强度下结论。
-# answerer:CoT 流程式(对标 EverMemOS 7 步 CoT,替代原规则罗列)。错题归因(2026-09-08,
-# 226 道真错):拒答 54/清单漏项 46/推理错 33/值名词错 28/日期错 12 —— 病根是 M3 面对
-# 规则罗列时挑最省力路径(拒答/只答一项/一步蒙)。改为强制走完思考步骤,并收紧拒答出口。
+# The mode-A answerer: treat what personos produced (the brief plus memories
+# grouped by cell) as materials and produce a short English answer. Structurally
+# identical to the Mem0/MIRIX "memory -> answerer -> answer" protocol.
+# Answering discipline (a lightweight CoT modelled on EverMemOS's ANSWER_PROMPT,
+# covering the answer shapes the LoCoMo question types need):
+#   1. For list questions, gather everything first and then re-check for
+#      omissions (one overlooked group is one wrong answer);
+#   2. Use only the absolute dates annotated in the materials; never do calendar
+#      arithmetic (the model gets weekdays wrong, the same lesson as judge v2);
+#   3. Use the materials' own specific nouns, numbers and activity names; do not
+#      generalize to a hypernym;
+#   4. A single direct inference and a common-sense connection are allowed
+#      (open-domain questions require world knowledge by definition);
+#   5. Hedged materials get a hedged answer; questions of degree are concluded
+#      according to the strength of the evidence.
+# The answerer is written as a CoT procedure (modelled on EverMemOS's 7-step
+# CoT) rather than the earlier list of rules. Error attribution over 226 genuine
+# failures: 54 refusals / 46 list omissions / 33 reasoning errors / 28 wrong
+# values or nouns / 12 wrong dates. The root cause was that, faced with a list
+# of rules, the model takes the cheapest path (refuse, answer only one item, or
+# guess in a single step). Hence the forced walk through every reasoning step
+# and a much narrower exit for refusals.
 _ANSWERER_SYS = (
     "You answer a question about a person using the memory materials below (a memory brief, plus "
     "memory items grouped by dialogue segment, each group headed by its date and topic) together "
@@ -82,7 +102,8 @@ def answer_mode_a(llm: AnthropicChatLLM, *, question: str, brief: str, mem_block
                      {"role": "user", "content": user}], temperature=0.2, max_tokens=512).strip()
 
 
-# —— 相对时间确定性换算(judge v2):LLM 只比对,不做日历心算 ——
+# -- Deterministic relative-time conversion (judge v2): the LLM only compares,
+#    it never does calendar arithmetic --
 
 _MONTHS = ("January|February|March|April|May|June|July|August|September|October|November|December")
 _MONTH_NUM = {m: i + 1 for i, m in enumerate(_MONTHS.split("|"))}
@@ -95,7 +116,8 @@ _DATE = (rf"(?:(?P<d>\d{{1,2}})\s*(?P<mon>{_MONTHS})"                # 25 May 20
 
 
 def _last_weekday_before(d: date, target: int) -> date:
-    """严格早于 d 的最近一个 target 星期几(锚点当天同星期也取前一周)。"""
+    """The most recent `target` weekday strictly before `d` (if the anchor day
+    itself falls on that weekday, go back a full week)."""
     return d - timedelta(days=((d.weekday() - target) % 7) or 7)
 
 
@@ -104,11 +126,15 @@ def _fmt_rng(a: date, b: date) -> str:
 
 
 def normalize_relative_times(text: str) -> str:
-    """把 gold/prediction 里的相对时间表达就地补上确定性换算(括号标注)。
+    """Annotate relative-time expressions in the gold answer or the prediction
+    in place with their deterministic conversion, in parentheses.
 
-    覆盖 LoCoMo 实测句式:"the Sunday before 25 May 2023" / "the week before X" /
-    "the weekend before X" / "two weekends before X" / "the week of X"。
-    换算错不了是关键——实测 M3 自己心算星期会把 7/18(7/20 前的周二)判错。
+    Covers the phrasings actually observed in LoCoMo: "the Sunday before
+    25 May 2023", "the week before X", "the weekend before X", "two weekends
+    before X", "the week of X".
+    Getting the conversion right is the whole point: left to itself, the model
+    works out the weekday incorrectly and marks 7/18 (the Tuesday before 7/20)
+    as wrong.
     """
     if not text:
         return text
@@ -118,20 +144,20 @@ def normalize_relative_times(text: str) -> str:
         day = m.group("d") or m.group("d2")
         return date(int(m.group("y")), _MONTH_NUM[mon], int(day))
 
-    # the Sunday before <D> → 单日
+    # the Sunday before <D> -> a single day
     def _wd_before(m):
         d = _d(m)
         return m.group(0) + f" (= {_last_weekday_before(d, _WEEKDAYS[m.group(1).lower()]):%Y-%m-%d})"
     _WD_ALT = "|".join(_WEEKDAYS)
     text = re.sub(rf"\bthe\s+({_WD_ALT})\s+before\s+{_DATE}", _wd_before, text, flags=re.I)
 
-    # the week before <D> → 7 天窗(含端点,止于前一天)
+    # the week before <D> -> a 7-day window ending the day before
     def _week_before(m):
         d = _d(m)
         return m.group(0) + f" (= {_fmt_rng(d - timedelta(days=7), d - timedelta(days=1))})"
     text = re.sub(rf"\bthe\s+week\s+before\s+{_DATE}", _week_before, text, flags=re.I)
 
-    # (two|three|…) weekends before <D> → 对应周末两天窗
+    # (two|three|...) weekends before <D> -> the two days of that weekend
     def _weekends_before(m):
         d = _d(m)
         n = _NUM_WORDS.get(m.group(1).lower(), 2)
@@ -141,14 +167,14 @@ def normalize_relative_times(text: str) -> str:
     text = re.sub(rf"\b({'|'.join(_NUM_WORDS)})\s+weekends\s+before\s+{_DATE}",
                   _weekends_before, text, flags=re.I)
 
-    # the weekend before <D> → 最近一个周六/周日
+    # the weekend before <D> -> the most recent Saturday/Sunday
     def _weekend_before(m):
         d = _d(m)
         sun = _last_weekday_before(d, 6)
         return m.group(0) + f" (= {_fmt_rng(sun - timedelta(days=1), sun)})"
     text = re.sub(rf"\bthe\s+weekend\s+before\s+{_DATE}", _weekend_before, text, flags=re.I)
 
-    # the week of <D> → 所在日历周(周一至周日)
+    # the week of <D> -> the calendar week it falls in (Monday to Sunday)
     def _week_of(m):
         d = _d(m)
         mon = d - timedelta(days=d.weekday())
@@ -158,9 +184,13 @@ def normalize_relative_times(text: str) -> str:
     return text
 
 
-# Mem0 式二元 judge(沿袭 MemGPT 的 CORRECT/WRONG 判分,允许语义等价;超集判定补清单题公平性)。
-# 误判归因(2026-09-08,48 道):M3 面对长答案/多列/带免责声明时不耐心比对就判 WRONG。
-# 对策:判前先在 ans 里定位对应 gold 的部分,并显式声明"更长/多列/更具体"不是判错理由。
+# The Mem0-style binary judge (CORRECT/WRONG scoring inherited from MemGPT,
+# allowing semantic equivalence; the superset rule keeps list questions fair).
+# Misjudgement attribution over 48 cases: faced with a long answer, several
+# listed items, or an opening disclaimer, the model would mark WRONG without
+# comparing patiently. The remedy is to make it locate the part of the answer
+# corresponding to each gold item before deciding, and to state explicitly that
+# "longer", "lists more" and "more specific" are not reasons to mark it wrong.
 _JUDGE_SYS = (
     "You are an impartial judge evaluating an answer to a question. "
     "Given the question, the ground-truth answer, and the model's answer, decide whether "
@@ -208,7 +238,8 @@ class Verdict:
 
 
 def judge(llm: AnthropicChatLLM, *, question: str, gold: str, prediction: str) -> Verdict:
-    # 相对时间两侧都确定性换算(gold 常见;answerer 偶尔也输出 "the weekend before X")
+    # Convert relative times deterministically on both sides: common in the
+    # gold answers, and the answerer occasionally emits "the weekend before X" too.
     gold = normalize_relative_times(str(gold))
     prediction = normalize_relative_times(str(prediction))
     user = (f"QUESTION\n{question}\n\nGROUND TRUTH\n{gold}\n\n"

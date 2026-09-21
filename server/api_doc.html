@@ -41,7 +41,7 @@
 </style>
 </head>
 <body>
-<div class="banner">📖 personos-mem 记忆服务 · SIT: <code>https://personos.devops.sit.xiaohongshu.com</code> · 本页即最新接口文档,可直接访问阅读</div>
+<div class="banner">📖 personos-mem 记忆服务 · Local: <code>http://localhost:8000</code> · 本页即最新接口文档,可直接访问阅读</div>
 <div class="layout">
 <nav class="toc"><div class="brand">personos-mem 记忆服务接口文档</div><div class="toc">
 <ul>
@@ -76,15 +76,15 @@
 <tbody>
 <tr>
 <td>SIT</td>
-<td><code>https://personos.devops.sit.xiaohongshu.com</code></td>
+<td><code>http://localhost:8000</code></td>
 </tr>
 <tr>
 <td>Staging</td>
-<td><code>https://personos.devops.beta.xiaohongshu.com</code></td>
+<td><code>https://staging.example.com</code></td>
 </tr>
 <tr>
 <td>Prod</td>
-<td><code>https://personos.devops.xiaohongshu.com</code></td>
+<td><code>https://memory.example.com</code></td>
 </tr>
 </tbody>
 </table>
@@ -137,7 +137,7 @@
 </code></pre>
 <p><strong>应签头最小集</strong>:<code>content-type</code>、<code>x-user-token</code> —— 请求带了(非空)就必须纳入签名(否则 401)。</p>
 <h3 id="bash-openssl">可复制的签名示例(bash + openssl)</h3>
-<pre><code class="language-bash">BASE=https://personos.devops.sit.xiaohongshu.com     # 换成对应环境
+<pre><code class="language-bash">BASE=http://localhost:8000     # 换成对应环境
 AK=rokid; SK='&lt;你的SK&gt;'; PATH_=/api/v1/health
 TS=$(date +%s); NONCE=$(openssl rand -hex 16)
 BODY_HASH=$(printf '' | openssl dgst -sha256 -hex | awk '{print $NF}')   # GET 空 body
@@ -267,7 +267,7 @@ curl -s &quot;$BASE$PATH_&quot; -H &quot;X-Access-Key: $AK&quot; -H &quot;X-Time
 <p>⚠️ 下文各 curl <strong>为可读性省略了签名头</strong>。实际所有 <code>/api/v1</code> 请求都要带 <code>X-Access-Key/X-Timestamp/X-Nonce/X-Signature/X-Signed-Headers</code>(见上方「鉴权(两层)」一节),否则返回 401。生产接入建议用 <a href="aksk-signing.md">AK/SK 验签接入</a> 里的签名函数包一层再发。</p>
 </blockquote>
 <p>先注册拿 token 存进环境变量,后续所有命令直接复用:</p>
-<pre><code class="language-bash">export BASE=https://personos.devops.sit.xiaohongshu.com/api/v1
+<pre><code class="language-bash">export BASE=http://localhost:8000/api/v1
 
 # 注册并把 token 存进 $TOKEN
 export TOKEN=$(curl -s $BASE/users/register \
@@ -301,7 +301,7 @@ echo &quot;TOKEN=$TOKEN&quot;
 </tbody>
 </table>
 <p><strong>curl —— 用自定义 user_id 注册</strong></p>
-<pre><code class="language-bash">curl -s https://personos.devops.sit.xiaohongshu.com/api/v1/users/register \
+<pre><code class="language-bash">curl -s http://localhost:8000/api/v1/users/register \
   -H 'Content-Type: application/json' \
   -d '{&quot;user_id&quot;: &quot;my_app_user_001&quot;}'
 </code></pre>
@@ -316,7 +316,7 @@ echo &quot;TOKEN=$TOKEN&quot;
 }
 </code></pre>
 <p><strong>curl —— 不传 user_id,系统自动生成</strong></p>
-<pre><code class="language-bash">curl -s https://personos.devops.sit.xiaohongshu.com/api/v1/users/register \
+<pre><code class="language-bash">curl -s http://localhost:8000/api/v1/users/register \
   -H 'Content-Type: application/json' -d '{}'
 </code></pre>
 <pre><code class="language-json">// 201
@@ -450,13 +450,13 @@ echo &quot;TOKEN=$TOKEN&quot;
     &quot;msg_id&quot;: &quot;815f52aede164c7285b7e2e3b8aee57e&quot;,
     &quot;seq&quot;: 1,
     &quot;queue_depth&quot;: 1,
-    &quot;xrayTraceId&quot;: &quot;7888d8a7f2ee4850a592a249756d30e8&quot;
+    &quot;trace_id&quot;: &quot;7888d8a7f2ee4850a592a249756d30e8&quot;
   },
   &quot;msg&quot;: &quot;ok&quot;
 }
 </code></pre>
 <ul>
-<li><code>seq</code>:该消息在会话队列里的序号;<code>queue_depth</code>:当前积压条数;<code>xrayTraceId</code>:排障用的链路 id(有问题把它给我们即可定位)。</li>
+<li><code>seq</code>:该消息在会话队列里的序号;<code>queue_depth</code>:当前积压条数;<code>trace_id</code>:排障用的链路 id(有问题把它给我们即可定位)。</li>
 </ul>
 <h3 id="clip">视频 clip(多模态写入)</h3>
 <p>把一段录像喂进记忆。服务端会<strong>看懂画面与对话</strong>、<strong>认出里面的人</strong>(跨会话延续同一人),再把它变成和文本同构的记忆——之后用普通的 <code>/recall</code> 就能问"视频里发生了什么""他做了什么"。</p>
@@ -634,7 +634,7 @@ curl -s $BASE/session/end \
     &quot;msg_id&quot;: &quot;8cd1cb7f330e44a29f8e67b9247a79cd&quot;,
     &quot;seq&quot;: 4,
     &quot;session_id&quot;: &quot;demo-session-001&quot;,
-    &quot;xrayTraceId&quot;: &quot;d12a60ca289f49d0ab948d82d9ebb036&quot;
+    &quot;trace_id&quot;: &quot;d12a60ca289f49d0ab948d82d9ebb036&quot;
   },
   &quot;msg&quot;: &quot;ok&quot;
 }
@@ -893,7 +893,7 @@ curl -s $BASE/session/end \
         ]
       }
     ],
-    &quot;xrayTraceId&quot;: &quot;6e6c51c52d744943b14049385be9d49a&quot;
+    &quot;trace_id&quot;: &quot;6e6c51c52d744943b14049385be9d49a&quot;
   },
   &quot;msg&quot;: &quot;ok&quot;
 }
@@ -932,7 +932,7 @@ curl -s $BASE/session/end \
 <td>依据记忆条目;每条:<code>atom_id</code>/<code>cell_id</code>、<code>text</code>(事实文本)、<code>type</code>(事实/说法/经历)、<code>holder</code>(归属人)、<code>domains</code>+<code>kind</code>(内部分类编码,可忽略)、<code>occurred_at</code>(事实发生时间)、<code>evidence</code>(原始对话原话,溯源用)</td>
 </tr>
 <tr>
-<td><code>xrayTraceId</code></td>
+<td><code>trace_id</code></td>
 <td>排障链路 id</td>
 </tr>
 </tbody>

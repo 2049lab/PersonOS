@@ -1,4 +1,4 @@
-"""Public view rendering (pure functions that import no runtime and touch no MAAS, so they are easy
+"""Public view rendering (pure functions that import no runtime and call no model, so they are easy
 to unit-test).
 
 The "memory view" of the public contract: clean and traceable, deliberately free of any internal
