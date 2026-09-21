@@ -160,7 +160,7 @@ class Memory:
         self._uctx: OrderedDict[str, UserContext] = OrderedDict()
         # -- Video identity backends: a process-wide lazily loaded singleton (the heavy
         # InsightFace/ECAPA models are loaded once and shared by every drain thread;
-        # gated by the env var PERSONOS_VIDEO_BACKEND, default real). Session drafts are
+        # gated by the env var PERSONOS_VIDEO_BACKEND, default none). Session drafts are
         # cached per user (the Redis implementation is stateless; the in-memory one must
         # persist within the same instance).
         self._video_backends: dict | None = None
@@ -244,9 +244,11 @@ class Memory:
     def video_backends(self) -> dict:
         """Process-wide lazily loaded singleton of the video identity backends (the heavy
         models are loaded once and shared by every drain thread).
-        The profile comes from the env var PERSONOS_VIDEO_BACKEND (**default real**; mock
-        is for tests only — it fabricates scripts and fake face vectors, so running mock
-        in production means writing forged memories into the real database)."""
+        The profile comes from the env var PERSONOS_VIDEO_BACKEND (**default none** —
+        video identity is off until ``pip install personos[identity]`` and
+        ``PERSONOS_VIDEO_BACKEND=real``; mock is for tests only — it fabricates scripts
+        and fake face vectors, so running mock in production means writing forged
+        memories into the real database)."""
         if self._video_backends is None:
             with self._video_guard:
                 if self._video_backends is None:
@@ -569,18 +571,36 @@ class Memory:
         except RuntimeError as e:          # backends disabled or not installed
             raise no_identity_backend() from e
 
+        from .online.video_ingest import ClipRejected
         from .online.write_path import BatchStepResult
 
         out = BatchStepResult(evidence_ids=[], records=[])
         media = self._media()
-        for item in videos:
-            if isinstance(item, (str, Path)) or getattr(item, "read", None):
-                data = Path(item).read_bytes() if not hasattr(item, "read") else item.read()
-                stored = media.save_video(data, owner=user_id)
-                index = process_clip(deps, session_id=session_id, clip_key=stored.key)
-            else:                           # already a URL the model service can fetch
-                index = process_clip(deps, session_id=session_id, clip_url=str(item))
-            out.evidence_ids.append(f"clip:{index}")
+        rejected: list[ClipRejected] = []
+        # The same session lock the server holds while draining clips: the
+        # identity draft and the text segment share per-session state, so a
+        # video add and a text add to one session must not interleave.
+        with self._session_scope(user_id, session_id):
+            for item in videos:
+                try:
+                    if isinstance(item, (str, Path)) or getattr(item, "read", None):
+                        data = (Path(item).read_bytes() if not hasattr(item, "read")
+                                else item.read())
+                        stored = media.save_video(data, owner=user_id)
+                        index = process_clip(deps, session_id=session_id,
+                                             clip_key=stored.key)
+                    else:               # already a URL the model service can fetch
+                        index = process_clip(deps, session_id=session_id,
+                                             clip_url=str(item))
+                except ClipRejected as e:
+                    # Mirror the ingest worker: a bad clip is noted and skipped,
+                    # the rest of the batch still gets consumed.
+                    rejected.append(e)
+                    out.warnings.append(f"clip skipped: {e}")
+                    continue
+                out.evidence_ids.append(f"clip:{index}")
+        if rejected and not out.evidence_ids:
+            raise rejected[0]           # nothing was consumed at all -> raise
         return out
 
     def end_session(self, *, user_id: str = "default", session_id: str,
@@ -596,10 +616,12 @@ class Memory:
         with self._session_scope(user_id, session_id):
             cells = self.writer_for(user_id, session_id).end_session(
                 task_type=task_type, scenario=scenario)
-        # If clips were fed into this session, identity is adjudicated now and
-        # the attributed dialogue becomes memory through the same build_cell
-        # path as text. Sessions with no video simply skip it.
-        video_cell = self._finalize_video(user_id, session_id)
+            # If clips were fed into this session, identity is adjudicated now
+            # and the attributed dialogue becomes memory through the same
+            # build_cell path as text. Inside the lock, as in the server's
+            # drain loop — the draft and the segment share session state.
+            # Sessions with no video simply skip it.
+            video_cell = self._finalize_video(user_id, session_id)
         if video_cell is not None:
             cells = [*cells, video_cell]
         # Closing a session always produces new material, so check again here —
@@ -616,7 +638,9 @@ class Memory:
         """Refresh the distilled profile from everything written since the last one.
 
         Returns the new version number, or None when nothing was due. With
-        ``force=False`` the threshold decides — which is how end_session calls it.
+        ``force=False`` the annealing threshold decides — the same gate the
+        automatic trigger uses (end_session schedules that one instead of
+        calling this, so it never adds latency to a write).
 
         Idempotent by construction: it reads "the cells since the last published
         version", so a skipped or failed run is healed by the next one rather
@@ -679,6 +703,7 @@ class Memory:
         from .online.recall_flow import run_recall
 
         self._require_core()
+        self._check_ids(user_id, session_id or None)
         warn: list[str] = []
         if mode == "deep" and not _deep_available():
             raise no_deep_track()
@@ -691,13 +716,25 @@ class Memory:
         if with_profile:
             profile_full, profile_traits = self._profile_strings(user_id)
 
+        # Face matching needs the identity backend; the default (unconfigured)
+        # raises when built. A recall must never fail because looking at an
+        # image failed — degrade to answering from text, and say so.
+        visual_deps = None
+        if image is not None:
+            try:
+                visual_deps = self.visual_deps(user_id)
+            except (RuntimeError, ImportError) as e:
+                warn.append(f"image face matching is unavailable ({e}); "
+                            f"answering from text only")
+                image = None
+
         out = run_recall(
             self.llm, self.embedder, ctx.atoms, ctx.cells, ctx.evidence,
             session_id=session_id or "default", query=query, now_dt=now_dt or _now(),
             mode=mode, top_k=top_k, rewrite=rewrite, reranker=self.reranker,
             media_store=self._media(), mllm=self.mllm, image=image,
             image_content_type=image_content_type,
-            visual_deps=self.visual_deps(user_id) if image is not None else None,
+            visual_deps=visual_deps,
             profile_full=profile_full, profile_traits=profile_traits, scenario=scenario)
         out.warnings.extend(warn)
         return out
@@ -712,6 +749,7 @@ class Memory:
         """
         from .online.views import profile_view
 
+        self._check_ids(user_id)
         return profile_view(ProfileStore(self.db, user_id).current())
 
     def trace(self, node_id: str, *, user_id: str = "default") -> dict | None:
@@ -726,6 +764,7 @@ class Memory:
         """
         from .online.trust import build_trust_chain, trace_evidence
 
+        self._check_ids(user_id)
         ctx = self.for_user(user_id)
         media = self._media()
         chain = build_trust_chain([node_id], ctx.atoms, ctx.evidence, media)
@@ -749,6 +788,7 @@ class Memory:
         """
         from .storage.db.ddl import TABLE_NAMES
 
+        self._check_ids(user_id)
         for table in TABLE_NAMES:
             if table == "users":
                 continue
@@ -782,6 +822,19 @@ class Memory:
 
     # —— internals ——
 
+    @staticmethod
+    def _check_ids(user_id: str, session_id: str | None = None) -> None:
+        """The same entry-layer id hygiene the HTTP API enforces.
+
+        These strings are concatenated into Redis keys where ":" is the
+        segment separator, so an unvalidated id can alias another user's
+        session. The library has no caller concept, hence the empty caller.
+        """
+        from .session_scope import scoped_session, valid_user_id
+        valid_user_id(user_id)
+        if session_id is not None:
+            scoped_session("", session_id)
+
     @contextmanager
     def _session_scope(self, user_id: str, session_id: str):
         """Hold the session lock for a write, when one is configured.
@@ -790,6 +843,7 @@ class Memory:
         single-process library. The point is the same either way: one writer
         per session at a time.
         """
+        self._check_ids(user_id, session_id)
         lock = self.session_lock(user_id, session_id)
         if lock is None:
             yield

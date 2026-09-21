@@ -8,7 +8,7 @@
     export PERSONOS_MEDIA_BASE_URL=https://...   # see "A note on hosting" below
 
     python examples/prepare_video_sample.py   # fetches a sample, cuts 3 clips
-    python examples/03_video_memory.py
+    python examples/video.py
 
 This is the part no other open memory framework does. Text and images are
 described and indexed; a person is *resolved*. Faces, body shots and voice

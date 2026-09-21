@@ -412,10 +412,12 @@ def build_cell(
         if not atoms:
             logger.warning(f"W2(2) extracted 0 atoms, re-extracting with a correction note turns={len(records)} topic={topic[:30]!r}")
             atoms, raw = _extract(
-                "你上次返回了空列表。请重新通读这一段:哪怕整段以争执/闲聊为主,其中提到的"
-                "**持久事实**(谁的什么东西、明确的数字、身份/专业/习惯、发生过的具体事件)仍然要抽出来。"
-                "只有当这一段确实通篇只有寒暄与应答、没有任何值得记住的事实时,才允许返回空列表。"
-                "只输出 JSON 本体。")
+                "You returned an empty list last time. Re-read the segment: even when it is "
+                "mostly argument or small talk, any **persistent facts** it mentions "
+                "(someone's belongings, explicit numbers, identity/profession/habits, "
+                "concrete events that happened) must still be extracted. Only return an "
+                "empty list when the segment is truly nothing but greetings and replies "
+                "with no fact worth remembering. Output the JSON body only.")
         gen["call2"] = {"system": sys2, "user": user2, "raw": raw}
     except Exception as e:   # noqa: BLE001  a parse failure or network hiccup -> persist the cell with no atoms (a later re-extraction heals it, see D3/D8)
         logger.warning(f"W2(2) failed, atoms left empty: {e}")

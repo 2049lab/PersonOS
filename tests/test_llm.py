@@ -46,7 +46,7 @@ def test_num_tries_recovers_on_retry():
     assert len(llm.calls) == 2
     retry = llm.calls[1]
     # The self-correction hint.
-    assert retry[-1]["content"].startswith("你上次的输出不是合法 JSON")
+    assert retry[-1]["content"].startswith("Your last output was not valid JSON")
     # The previous raw output is attached.
     assert retry[-2]["role"] == "assistant" and retry[-2]["content"] == "坏了"
 

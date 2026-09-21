@@ -1,27 +1,29 @@
 # Examples
 
-Three, in order of what they need. Each writes something into memory, closes
-the session, and then asks about it in plain language — the same three calls
-every time, with progressively richer input.
+One story, told in three chapters of increasing input richness. The same three
+calls every time — `add`, `end_session`, `search` — with progressively harder
+things being remembered.
 
 | | Input | What it needs |
 |---|---|---|
-| [01_text_memory.py](01_text_memory.py) | conversation | one API key |
-| [02_image_memory.py](02_image_memory.py) | conversation + a photo | a vision model |
-| [03_video_memory.py](03_video_memory.py) | video clips | `personos[identity]`, a video-capable model |
+| [quickstart.py](quickstart.py) | a week of conversation | one API key |
+| [images.py](images.py) | conversation + a photo | a vision model |
+| [video.py](video.py) | video clips | `personos[identity]`, a video-capable model |
 
-## 1. Text
+## 1. A week of Alice's life — text
 
 ```bash
 export PERSONOS_LLM_API_KEY=sk-...
-python examples/01_text_memory.py
+python examples/quickstart.py
 ```
 
-Prints the three layers so the structure is visible rather than implied: the
-raw turns, the episode written from them, and the atoms that index it.
+Alice talks on Monday, Wednesday, Friday. The example prints the story as it
+is written, then — after **each day** — the profile the library distilled of
+her without being asked. Watch it go from "(nothing yet)" to an occupation, a
+diet, a city and a preference for blunt answers.
 
-The conversation contains a correction — 15 fish, then 13, then 11. Watch what
-happens with the two questions:
+The week contains a correction — 15 fish, then 13, then 11. Watch the two
+questions at the end:
 
 ```
 Q: How many neon tetras do I have now?
@@ -34,17 +36,20 @@ A: originally 15 ... two died, reducing it to 13 ... corrected to 11.
 Both are right, and they are right *at the same time*. A store that overwrote
 on update could answer the first but not the second.
 
+The last question — where should the team eat — is never discussed in any
+episode. It is the profile that answers it, injected into recall automatically.
+
 ## 2. Images
 
 ```bash
 export PERSONOS_MLLM_API_KEY=sk-...      # may be the same key
 export PERSONOS_MLLM_MODEL=gpt-4o
-python examples/02_image_memory.py
+python examples/images.py
 ```
 
 An image is described once at write time and then behaves like any other
-evidence — searchable by words, citable, traceable. The original bytes are kept
-too, on the local filesystem unless object storage is configured.
+evidence — searchable by words, citable, traceable. The original bytes are
+kept too, on the local filesystem unless object storage is configured.
 
 Run it **without** `PERSONOS_MLLM_API_KEY` to see the other half: the image is
 still stored, the text path is untouched, and the result carries
@@ -64,7 +69,7 @@ export PERSONOS_VIDEO_BACKEND=real
 export PERSONOS_MLLM_MODEL=...            # a model that accepts video
 
 python examples/prepare_video_sample.py   # downloads a sample, cuts 3 clips
-python examples/03_video_memory.py
+python examples/video.py
 ```
 
 This is the part no other open memory framework does. Text and images get
@@ -86,11 +91,11 @@ A: Bob entered holding a basketball, removed his shoes, and began dribbling
    Person #1, seated at the dining table, told him to stop...
 ```
 
-Two details worth noticing. **Bob is named because the dialogue names him** — no
-one enrolled him. The second person is never named on camera, so she keeps a
-stable handle instead, and questions about her still work. And the **wearer** —
-the camera itself — is its own character, because "who did this" has to be
-answerable about the recorder too.
+Two details worth noticing. **Bob is named because the dialogue names him** —
+no one enrolled him. The second person is never named on camera, so she keeps
+a stable handle instead, and questions about her still work. And the
+**wearer** — the camera itself — is its own character, because "who did this"
+has to be answerable about the recorder too.
 
 ### Where the sample comes from
 

@@ -112,9 +112,10 @@ so** in `result.warnings`. A missing optional capability never fails a write.
 
 ## Examples
 
-Three, each writing something into memory and then asking about it in words:
-[text](examples/01_text_memory.py) · [images](examples/02_image_memory.py) ·
-[video and person identity](examples/03_video_memory.py). See
+One story in three chapters:
+[a week of conversation](examples/quickstart.py) (watch the profile build
+itself between days) · [with a photo](examples/images.py) ·
+[with video and person identity](examples/video.py). See
 [examples/README.md](examples/README.md) for what each needs and real output.
 
 ## API

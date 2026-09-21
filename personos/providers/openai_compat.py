@@ -176,7 +176,7 @@ concrete, verifiable statements over vague description. Quote on-image text lite
 
     def look_image(self, image: bytes, purpose: str, *,
                    content_type: str = "image/jpeg") -> str:
-        if not self.available:
+        if not self.available or not image or not purpose.strip():
             return ""
         cfg = self.cfg
         b64 = base64.b64encode(image).decode("ascii")

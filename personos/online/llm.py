@@ -107,7 +107,8 @@ def chat_json(llm: ChatLLM, messages: list[dict], *, max_tokens: int,
                 raise err from e
             msgs = messages + [
                 {"role": "assistant", "content": raw},
-                {"role": "user", "content": "你上次的输出不是合法 JSON,无法解析。"
-                                            "请重新输出,只输出 JSON 本体,不要解释、不要代码块围栏。"},
+                {"role": "user", "content": "Your last output was not valid JSON and could not "
+                                            "be parsed. Output again: the JSON body only, no "
+                                            "explanation, no code fences."},
             ]
             logger.warning(f"chat_json attempt {attempt} produced non-JSON output, retrying ({num_tries} tries total)")

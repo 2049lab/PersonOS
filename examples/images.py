@@ -3,7 +3,7 @@
     export PERSONOS_LLM_API_KEY=sk-...
     export PERSONOS_MLLM_API_KEY=sk-...     # may be the same key
     export PERSONOS_MLLM_MODEL=gpt-4o
-    python examples/02_image_memory.py
+    python examples/images.py
 
 An image travels through the same pipeline as text. It is described once at
 write time, and from then on it is ordinary evidence: searchable by words,

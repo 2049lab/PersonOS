@@ -191,6 +191,33 @@ def test_an_unreadable_image_says_so():
         _as_image_bytes("this is not base64 !!!")
 
 
+def test_an_image_recall_without_identity_backend_degrades_instead_of_raising(
+        memory, seeded, monkeypatch):
+    """mllm configured but identity backend at its default (none): building the
+    face-matching deps raises. Recall is a read path — it must degrade to text
+    with a warning, never fail the question. It did fail (RuntimeError), which
+    is how this test came to exist."""
+    from types import SimpleNamespace
+
+    import personos.online.recall_flow as rf
+
+    user, *_ = seeded
+    memory.llm = type("L", (), {"available": True})()
+    memory.embedder = type("E", (), {"available": True})()
+    memory.mllm = type("M", (), {"available": True})()
+    memory.reranker = None
+    monkeypatch.setattr(memory, "visual_deps",
+                        lambda *_: (_ for _ in ()).throw(RuntimeError("backend=none")))
+    captured = {}
+    monkeypatch.setattr(rf, "run_recall",
+                        lambda *a, **kw: captured.update(kw) or SimpleNamespace(
+                            warnings=[], image=kw.get("image")))
+
+    out = memory.search("who is this?", user_id=user, image=b"\xff\xd8fake")
+    assert captured["image"] is None, "the image must be dropped, not crash the recall"
+    assert any("face matching" in w for w in out.warnings)
+
+
 def test_video_and_turns_cannot_share_one_call(memory, seeded):
     """A clip is a recording to watch, a turn is text to append to a segment.
     Mixing them in one call would make the batch non-atomic."""
