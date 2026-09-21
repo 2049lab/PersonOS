@@ -1,8 +1,13 @@
-"""Omni 多模态 runner:走 xhs MAAS(OpenAI 兼容,api-key 头),支持 video_url 直取。
+"""Multimodal runner for the screenplay pass over a video clip.
 
-调用格式对齐 mneme backends/mm_qwen_omni.py 的 HTTP 路径:content 放 video_url(签名 URL,
-**不下载字节**——传原始字节反而有大小上限)+ 可选 image_url(人脸 crop 标签,粗格子归属用)
-+ text(prompt)。transport 复用 personos mllm 的 httpx + api-key(clients/mllm.py 同款)。
+OpenAI-compatible chat completions, with ``video_url`` in the content list. The
+clip is passed **by URL, not by bytes**: inlining a clip runs into request size
+limits long before a two-minute video does, and the model service fetches it
+itself. That is also why local media storage needs a publicly reachable base
+URL before video works — see ``storage/media/local.sign_url``.
+
+Content layout: video_url (the clip) + optional image_url (face crops used as
+labels during coarse attribution) + text (the prompt).
 """
 
 from __future__ import annotations
@@ -15,9 +20,9 @@ import httpx
 from loguru import logger
 
 from personos import obs
-from personos.config import Settings, settings
+from personos.config import Config, get_config
 
-# 视频剧本调用**不能**共用文本 LLM 的超时(MAAS_MLLM_TIMEOUT 默认 120s):送进去的是整段 clip,
+# 视频剧本调用**不能**共用文本 LLM 的超时(默认 120s):送进去的是整段 clip,
 # 模型侧还要自己去拉几十~上百 MB 视频再逐帧过,分钟级是常态——实测 60s/120帧 就要 109s,
 # 2min clip 必然顶穿 120s,表现为读超时→重试→判毒消息→**这条 clip 的记忆彻底丢**。
 # 这里给视频路径单独一个宽裕的上限;真正防呆靠 MAX_CLIP_DURATION_S 卡住过长 clip。
@@ -40,15 +45,22 @@ class MediaUnfetchableError(RuntimeError):
 class OmniRunner:
     """mm_runner 真后端:qwen3.5-omni-plus。chat(prompt, video_url=...) → 文本。"""
 
-    def __init__(self, cfg: Settings = settings, max_retries: int = 2) -> None:
-        self.cfg = cfg
+    def __init__(self, cfg: Config | None = None, max_retries: int = 2) -> None:
+        self.cfg = cfg or get_config()
         self.max_retries = max_retries
-        self._client = httpx.Client(trust_env=False)   # 内网网关,禁读系统代理
-        self.model = cfg.mllm_model
+        # trust_env=False: a browsing proxy inherited from the shell would
+        # silently intercept these calls; providers are addressed explicitly.
+        self._client = httpx.Client(trust_env=False)
+        self.model = self.cfg.mllm_model
 
     @property
     def available(self) -> bool:
         return bool(self.cfg.mllm_api_key)
+
+    def _endpoint(self) -> str:
+        """Full URL override if configured, otherwise the standard path."""
+        cfg = self.cfg
+        return cfg.mllm_endpoint or f"{cfg.effective_mllm_base_url}/chat/completions"
 
     def chat(self, prompt: str, *, video_url: str | None = None,
              images_b64: list[str] | None = None, audio_b64_list: list[str] | None = None,
@@ -80,12 +92,13 @@ class OmniRunner:
             return out
 
     def _post(self, payload: dict, *, timeout_s: float | None = None) -> dict:
-        headers = {"Content-Type": "application/json", "api-key": self.cfg.mllm_api_key}
+        headers = {"Content-Type": "application/json",
+                   "Authorization": f"Bearer {self.cfg.mllm_api_key}"}
         attempt = 0
         while True:
             try:
                 resp = self._client.post(
-                    self.cfg.mllm_endpoint, headers=headers, json=payload,
+                    self._endpoint(), headers=headers, json=payload,
                     timeout=httpx.Timeout(timeout_s or self.cfg.mllm_timeout, connect=10.0))
                 if resp.status_code >= 500:
                     raise httpx.HTTPStatusError("5xx", request=resp.request, response=resp)

@@ -378,7 +378,7 @@ def recall(body: RecallBody, ctx: UserContext = Depends(_ctx)):
         # 查询图**额外**做格式校验:它是查询输入,认不出格式则整个视觉理解无从谈起,
         # 与其回 200 + 一个没用上图的答案(调用方无从察觉),不如当场告诉他图有问题。
         # /ingest 的图片不加这道:那是**内容**,看不了就降级成纯文本,消息本身仍有价值。
-        from ..storage.media_store import _detect_image_type
+        from ..storage.media._common import _detect_image_type
         if _detect_image_type(img[:32]) is None:
             raise HTTPException(status_code=400,
                                 detail="image_b64 不是可识别的图片(支持 jpeg/png/webp/gif/heic)")

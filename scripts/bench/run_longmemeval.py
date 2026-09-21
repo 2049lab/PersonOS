@@ -27,9 +27,9 @@ from pathlib import Path
 from loguru import logger
 
 from personos.app.recall_flow import run_recall
-from personos.clients.maas import MaasClient
-from personos.clients.minimax import MinimaxClient
-from personos.online.rerank import MaasReranker
+from personos.providers.openai_compat import OpenAIChatLLM, OpenAIEmbedder
+from personos.providers.anthropic_compat import AnthropicChatLLM
+from personos.online.rerank import ScoringReranker
 from personos.online.write_path import SessionWriter
 from personos.storage.atom_store import AtomStore
 from personos.storage.cell_store import CellStore
@@ -133,7 +133,7 @@ def main():
     for t in ("evidence", "atoms", "atom_chains", "memcells", "session_context"):
         db.execute(f"DELETE FROM {t} WHERE user_id=%s", (uid,))
     ev_store, atoms, cells = EvidenceStore(db, uid), AtomStore(db, uid), CellStore(db, uid)
-    llm, embedder = MinimaxClient(), MaasClient()
+    llm, embedder = AnthropicChatLLM(), OpenAIChatLLM()
     t0 = time.time()
     sessions_summary, turn2ev = ingest(q, llm, embedder, ev_store, cells, atoms)
     n_atoms = len(atoms.list(limit=100000))
@@ -146,7 +146,7 @@ def main():
         try:
             o = run_recall(llm, embedder, atoms, cells, ev_store,
                            session_id=f"{q.qid}-qa", query=q.question,
-                           now_dt=q.question_dt, mode=args.mode, reranker=MaasReranker(embedder))
+                           now_dt=q.question_dt, mode=args.mode, reranker=ScoringReranker(embedder))
             if o.deep and not o.ranked:
                 groups = [(c, atoms.list_by_cell(c.id))
                           for c in (cells.get(cid) for cid in (o.ans.cited_cells if o.ans else [])) if c]

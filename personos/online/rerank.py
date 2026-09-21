@@ -3,8 +3,7 @@
 输入 = (query, cell 材料):元信息头(对话时间+topic)+ episode——与 R3/R5 作答材料同口径;
 atoms 是检索单元(R1 定位用),不进精排材料。episode 的双时间格式让 cross-encoder
 读得出"有效至 2026-07"这类时间语义。instruction 旋钮不用默认"retrieve relevant passages",
-换成记忆问答判据。MaasReranker 已接 qwen3-reranker-0.6b(/v1/score);
-打分挂了自动退保序,R2 永不阻塞主链路。
+换成记忆问答判据。打分挂了自动退保序,R2 永不阻塞主链路。
 """
 
 from __future__ import annotations
@@ -33,11 +32,15 @@ class NoopReranker:
         return [float(len(documents) - i) for i in range(len(documents))]
 
 
-class MaasReranker:
-    """真精排工位:包一个有 .rerank(query, documents) 的打分 API(如 MaasClient)。
+class ScoringReranker:
+    """Real reranking stage: wraps anything with ``.rerank(query, documents)``.
 
-    instruction 按 qwen3-reranker 的 Instruct/Query 模板拼进 text_1(该模型的标准用法)。
-    打分失败 → 退化为 Noop 序(保持 R1 序,R2 永不阻塞主链路)。
+    The instruction is folded into the query using the Instruct/Query template
+    that instruction-tuned rerankers expect.
+
+    A failed scoring call degrades to pass-through order rather than
+    propagating. Reranking improves an answer; it is never the reason there is
+    no answer, so it must not be able to break the main path.
     """
 
     def __init__(self, score_api):
@@ -50,10 +53,11 @@ class MaasReranker:
         try:
             scores = self.api.rerank(text_1, documents)
             if len(scores) != len(documents):
-                raise ValueError(f"返回 {len(scores)} 分,与 {len(documents)} 文档不等长")
+                raise ValueError(
+                    f"reranker returned {len(scores)} scores for {len(documents)} documents")
             return scores
-        except Exception as e:  # noqa: BLE001  精排挂了不阻塞:保序透传,让 R1 序直达下游
-            logger.warning(f"rerank 打分失败,退化为保序(Noop): {e}")
+        except Exception as e:  # noqa: BLE001  never block the main path
+            logger.warning(f"rerank scoring failed, falling back to fusion order: {e}")
             return NoopReranker().rerank(query, documents)
 
 

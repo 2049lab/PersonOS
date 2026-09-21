@@ -1,87 +1,19 @@
-"""原图对象存储(阿里云 OSS)。
+"""Object-store backend (S3-compatible / Alibaba Cloud OSS).
 
-移植裁剪自 meme-backend 的 media_store,只保留 personos 图片输入需要的部分:
-- content-addressed:对象 key 用内容 sha256,相同图片永不重复上传;
-- 每 user 隔离:owner 段进 key 前缀,存储布局层面即隔离(与 Redis/MySQL 的 user 前缀同思路);
-- 内外网域名分离:上传/回源走内网 endpoint(VPC 内更快),签发给客户端的 GET URL 用公网域名。
-
-原图是**真相层**、永久留底;DB(evidence.content_ref)只存 OSS 对象 key。
-凭证未配时构造即抛错——由调用方决定是否降级(纯文本链路不依赖本模块)。
+Optional: `pip install personos[oss]`. Without it the local filesystem backend
+is used instead, and nothing else in the pipeline notices.
 """
 
 from __future__ import annotations
 
 import hashlib
-import os
-from dataclasses import dataclass
-from datetime import datetime, timezone
 
 from loguru import logger
 
-# 内容类型 → 扩展名(与 meme-backend 白名单一致;图片输入先支持这几种常见格式)
-_EXTENSIONS = {
-    "image/jpeg": ".jpg",
-    "image/png": ".png",
-    "image/heic": ".heic",
-    "image/webp": ".webp",
-    "image/gif": ".gif",
-}
-
-_MAX_IMAGE_BYTES = 25 * 1024 * 1024   # 单图上限,与 meme-backend 对齐
-
-# 视频 clip:调用方录制切段(≈2min)上传;Omni 走签名 URL 直取(不下载字节)。
-_VIDEO_EXTENSIONS = {"video/mp4": ".mp4", "video/quicktime": ".mov"}
-_MAX_VIDEO_BYTES = int(os.environ.get("PERSONOS_VIDEO_MAX_BYTES", str(200 * 1024 * 1024)))
-
-
-class MediaStoreError(ValueError):
-    """图片无法被安全存储(类型不支持/超限/内容与声明不符)。"""
-
-
-class MediaNotFoundError(LookupError):
-    """对象 key 取不到字节。"""
-
-
-@dataclass(frozen=True)
-class StoredImage:
-    """一次存图的产物。"""
-    key: str          # OSS 对象 key(即 evidence.content_ref)
-    sha256: str
-    content_type: str
-    byte_size: int
-
-
-@dataclass(frozen=True)
-class StoredVideo:
-    """一次存 clip 的产物(字节在 OSS,库/Omni 只用 key + 签名 URL)。"""
-    key: str
-    sha256: str
-    content_type: str
-    byte_size: int
-
-
-def _detect_video_type(header: bytes) -> str | None:
-    """按魔数识别 mp4/mov(ISO BMFF:偏移 4 起为 'ftyp';qt 品牌 → mov)。"""
-    if len(header) >= 12 and header[4:8] == b"ftyp":
-        brand = header[8:12]
-        return "video/quicktime" if brand[:2] == b"qt" else "video/mp4"
-    return None
-
-
-def _detect_image_type(header: bytes) -> str | None:
-    """按魔数识别图片类型(防「声明 jpg 实为别的」)。"""
-    if header.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg"
-    if header.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if len(header) >= 12 and header[:4] == b"RIFF" and header[8:12] == b"WEBP":
-        return "image/webp"
-    if header.startswith((b"GIF87a", b"GIF89a")):
-        return "image/gif"
-    if len(header) >= 12 and header[4:8] == b"ftyp":
-        if header[8:12] in {b"heic", b"heix", b"hevc", b"hevx", b"mif1", b"msf1"}:
-            return "image/heic"
-    return None
+from ._common import (
+    MediaNotFoundError, MediaStoreError, StoredImage, StoredVideo,
+    content_key, validate_audio, validate_image, validate_video,
+)
 
 
 class OSSMediaStore:
@@ -142,23 +74,11 @@ class OSSMediaStore:
         return self._sign_bucket_client
 
     def _object_key(self, sha256: str, extension: str, owner: str) -> str:
-        """内容寻址 + 每 user 隔离:{prefix}/{owner}/{YYYY}/{MM}/{sha[:2]}/{sha}{ext}。"""
-        root = self.prefix.strip("/")
-        head = f"{root}/" if root else ""
-        now = datetime.now(timezone.utc)
-        return f"{head}{owner}/{now:%Y/%m}/{sha256[:2]}/{sha256}{extension}"
+        return content_key(self.prefix, owner, sha256, extension)
 
     def save_image(self, data: bytes, *, owner: str, content_type: str = "") -> StoredImage:
         """校验 + 存图(内容寻址,相同字节不重传),返回 StoredImage(key 即 content_ref)。"""
-        if not data:
-            raise MediaStoreError("image payload is empty")
-        if len(data) > _MAX_IMAGE_BYTES:
-            raise MediaStoreError(f"image exceeds the {_MAX_IMAGE_BYTES} byte limit")
-        detected = _detect_image_type(data[:32])
-        if detected is None:
-            raise MediaStoreError(f"unrecognised image format (declared: {content_type or 'none'})")
-        # 以魔数探测结果为准(客户端声明可能不准/缺失)
-        extension = _EXTENSIONS[detected]
+        detected, extension = validate_image(data, content_type)
         sha256 = hashlib.sha256(data).hexdigest()
         key = self._object_key(sha256, extension, owner)
         bucket = self._client()
@@ -170,22 +90,11 @@ class OSSMediaStore:
         return StoredImage(key=key, sha256=sha256, content_type=detected, byte_size=len(data))
 
     def _clip_key(self, sha256: str, extension: str, owner: str) -> str:
-        """clip 独立子前缀 clip/,与用户上传图不混:{prefix}/{owner}/clip/{YYYY}/{MM}/{sha[:2]}/{sha}{ext}。"""
-        root = self.prefix.strip("/")
-        head = f"{root}/" if root else ""
-        now = datetime.now(timezone.utc)
-        return f"{head}{owner}/clip/{now:%Y/%m}/{sha256[:2]}/{sha256}{extension}"
+        return content_key(self.prefix, owner, sha256, extension, subdir="clip")
 
     def save_video(self, data: bytes, *, owner: str, content_type: str = "") -> StoredVideo:
         """校验 + 存 clip(内容寻址,相同字节不重传)。返回 StoredVideo(key 供 sign_url 喂 Omni)。"""
-        if not data:
-            raise MediaStoreError("video payload is empty")
-        if len(data) > _MAX_VIDEO_BYTES:
-            raise MediaStoreError(f"video exceeds the {_MAX_VIDEO_BYTES} byte limit")
-        detected = _detect_video_type(data[:32])
-        if detected is None:
-            raise MediaStoreError(f"unrecognised video format (declared: {content_type or 'none'})")
-        extension = _VIDEO_EXTENSIONS[detected]
+        detected, extension = validate_video(data, content_type)
         sha256 = hashlib.sha256(data).hexdigest()
         key = self._clip_key(sha256, extension, owner)
         bucket = self._client()
@@ -198,13 +107,9 @@ class OSSMediaStore:
 
     def save_audio(self, data: bytes, *, owner: str) -> str:
         """存声纹样本 wav(16k 单声道),返回 OSS key(供仲裁听声辨人)。内容寻址,voice/ 子前缀。"""
-        if not data or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
-            raise MediaStoreError("audio is not WAV (expected a RIFF/WAVE header)")
+        validate_audio(data)
         sha256 = hashlib.sha256(data).hexdigest()
-        root = self.prefix.strip("/")
-        head = f"{root}/" if root else ""
-        now = datetime.now(timezone.utc)
-        key = f"{head}{owner}/voice/{now:%Y/%m}/{sha256[:2]}/{sha256}.wav"
+        key = content_key(self.prefix, owner, sha256, ".wav", subdir="voice")
         bucket = self._client()
         if not bucket.object_exists(key):
             bucket.put_object(key, data, headers={"Content-Type": "audio/wav"})
@@ -231,16 +136,3 @@ class OSSMediaStore:
         except Exception:
             logger.warning(f"OSS object_exists 查询失败 key={key}", exc_info=True)
             return False
-
-
-def media_store_from_settings(settings) -> OSSMediaStore:
-    """从 Settings 构造 OSS 存储;凭证缺失时抛错(调用方决定降级)。"""
-    return OSSMediaStore(
-        bucket=settings.oss_bucket,
-        endpoint=settings.oss_endpoint,
-        access_key_id=settings.oss_access_key_id,
-        access_key_secret=settings.oss_access_key_secret,
-        region=settings.oss_region,
-        prefix=settings.oss_prefix,
-        url_expires_seconds=settings.oss_url_expires_seconds,
-    )

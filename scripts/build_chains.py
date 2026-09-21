@@ -18,7 +18,7 @@ import argparse
 from collections import defaultdict
 from pathlib import Path
 
-from personos.clients.maas import MaasClient
+from personos.providers.openai_compat import OpenAIChatLLM, OpenAIEmbedder
 from personos.logging_setup import setup_logging
 from personos.models import atom_anchor, ensure_aware
 from personos.online.chain_build import assign_chains
@@ -93,7 +93,7 @@ def main():
         if args.user_prefix:
             users = [u for u in users if u.startswith(args.user_prefix)]
 
-    llm = MaasClient(timeout=120.0)
+    llm = OpenAIChatLLM(timeout=120.0)
     for u in users:
         s = rebuild_user(db, llm, u)
         print(f"[{s['user']}] 清链 {s['cleared_chains']} → 重建分配 {s['rebuilt_assigned']} atoms "

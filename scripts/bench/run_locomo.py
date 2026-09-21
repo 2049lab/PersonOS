@@ -31,10 +31,10 @@ from pathlib import Path
 from loguru import logger
 
 from personos.app.recall_flow import run_recall
-from personos.clients.maas import MaasClient
-from personos.clients.minimax import MinimaxClient
+from personos.providers.openai_compat import OpenAIChatLLM, OpenAIEmbedder
+from personos.providers.anthropic_compat import AnthropicChatLLM
 from personos.models import stamped_atom_text
-from personos.online.rerank import MaasReranker
+from personos.online.rerank import ScoringReranker
 from personos.online.retrieval import cell_lead
 from personos.online.trust import evidence_entries
 from personos.online.write_path import SessionWriter
@@ -308,8 +308,8 @@ def main():
             db.execute(f"DELETE FROM {t} WHERE user_id=%s", (uid,))
     ev_store, atoms = EvidenceStore(db, uid), AtomStore(db, uid)
     cells = CellStore(db, uid)
-    llm = MinimaxClient()                       # 评测 LLM(MiniMax-M3):W1/W2/R0/R3/R5/answerer/judge
-    embedder = MaasClient()                     # embedding:MAAS qwen3(写入 topic/atom 向量 + 检索查询面)
+    llm = AnthropicChatLLM()                       # 评测 LLM(MiniMax-M3):W1/W2/R0/R3/R5/answerer/judge
+    embedder = OpenAIChatLLM()                     # embedding:MAAS qwen3(写入 topic/atom 向量 + 检索查询面)
 
     trace: dict = {"meta": {"conv": lc.sample_id, "n_sessions": args.n_sessions,
                             "mode": args.mode, "llm": "MiniMax-M3",
@@ -370,7 +370,7 @@ def main():
     print(f"\n可答题 {len(answerable)} 道(evidence 全在前 {args.n_sessions} session、剔 cat5),抽 {len(qas)} 道作答\n")
 
     # —— 逐题:新快链一条龙 → answerer → judge(conv 内 N 题并发)——
-    reranker = MaasReranker(embedder)   # R2 真精排(qwen3-reranker;与产品 /recall 同链路)
+    reranker = ScoringReranker(embedder)   # R2 真精排(qwen3-reranker;与产品 /recall 同链路)
 
     def answer_one(i: int, qa) -> dict:
         """一道题的完整作答+判分,返回 trace 记录。并发安全:

@@ -7,7 +7,7 @@
   B. 并行 N 次:每段拿【人设 + 全时间线 arc 摘要 + 本段细节】展开成真实人机对话。
      只依赖不可变大纲(不依赖彼此生成文本)→ 可安全并行,又能正确做"上次说的X其实是Y"这类跨段纠错。
 
-鉴权走 MaasClient(读 .env 的 MAAS_CHAT_KEY,默认模型 deepseek-v4-pro),不硬编码 key。
+鉴权走 OpenAIChatLLM(读 .env 的 PERSONOS_LLM_API_KEY,默认模型 deepseek-v4-pro),不硬编码 key。
 
 运行:~/miniconda3/envs/personos/bin/python -m scripts.generate_corpus --periods 10 --months 18
 产物:data/persona_gen/corpus.json(+ raw/ 原始响应,便于排查)
@@ -23,7 +23,7 @@ from pathlib import Path
 
 from loguru import logger
 
-from personos.clients.maas import MaasClient
+from personos.providers.openai_compat import OpenAIChatLLM, OpenAIEmbedder
 from personos.logging_setup import setup_logging
 
 OUT_DEFAULT = "data/persona_gen/corpus.json"
@@ -107,7 +107,7 @@ def _extract_json(s: str) -> dict:
     return json.loads(s)
 
 
-def _chat_json(maas: MaasClient, system: str, user: str, *, max_tokens: int, retries: int = 2) -> dict:
+def _chat_json(maas: OpenAIChatLLM, system: str, user: str, *, max_tokens: int, retries: int = 2) -> dict:
     """调 LLM 拿 JSON,解析失败重试(追加"只输出合法 JSON"提示)。"""
     msgs = [{"role": "system", "content": system}, {"role": "user", "content": user}]
     last = ""
@@ -135,7 +135,7 @@ def main():
     out = Path(args.out)
     raw_dir = out.parent / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
-    maas = MaasClient(timeout=180.0)   # 生成较慢,放宽超时
+    maas = OpenAIChatLLM(timeout=180.0)   # 生成较慢,放宽超时
 
     # —— 阶段 A ——
     print(f"[A] 造人设 + 时间线大纲({args.periods} 段 / {args.months} 月)…")

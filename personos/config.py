@@ -138,10 +138,11 @@ class Config:
 
     log_dir: Path = field(default_factory=lambda: ROOT / "logs")
 
-    # ── Secondary LLM provider, used by the evaluation harness only ──────
-    minimax_base_url: str = ""
-    minimax_api_key: str = ""
-    minimax_chat_model: str = "MiniMax-M3"
+    # ── Anthropic-protocol provider (Anthropic itself, or anything that
+    #    speaks the same wire format, e.g. MiniMax, via base_url) ──────────
+    anthropic_base_url: str = ""          # empty = Anthropic's own endpoint
+    anthropic_api_key: str = ""
+    anthropic_model: str = "claude-sonnet-4-20250514"
 
     # ── Derived accessors: "unset means inherit" made explicit ───────────
     @property
@@ -233,9 +234,9 @@ def load_config() -> Config:
         langfuse_environment=_env("LANGFUSE_ENVIRONMENT", _env("PERSONOS_ENV", "local")),
         langfuse_release=_env("LANGFUSE_RELEASE"),
         log_dir=_path(_env("PERSONOS_LOG_DIR"), ROOT / "logs"),
-        minimax_base_url=_env("MINIMAX_BASE_URL"),
-        minimax_api_key=_env("MINIMAX_API_KEY"),
-        minimax_chat_model=_env("MINIMAX_CHAT_MODEL", "MiniMax-M3"),
+        anthropic_base_url=_env("ANTHROPIC_BASE_URL"),
+        anthropic_api_key=_env("ANTHROPIC_API_KEY"),
+        anthropic_model=_env("ANTHROPIC_MODEL", "claude-sonnet-4-20250514"),
     )
 
 

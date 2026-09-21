@@ -18,7 +18,7 @@ import re
 from dataclasses import dataclass
 from datetime import date, timedelta
 
-from personos.clients.minimax import MinimaxClient
+from personos.providers.anthropic_compat import AnthropicChatLLM
 
 # 模式 A answerer:把 personos 的产物(brief + 按 cell 分组的 memories)当材料,生成英文简答。
 # 与 Mem0/MIRIX 的"记忆 → answerer → 答案"协议同构。
@@ -74,7 +74,7 @@ _ANSWERER_SYS = (
 )
 
 
-def answer_mode_a(llm: MinimaxClient, *, question: str, brief: str, mem_block: str) -> str:
+def answer_mode_a(llm: AnthropicChatLLM, *, question: str, brief: str, mem_block: str) -> str:
     user = (f"MEMORY BRIEF\n{brief or '(empty)'}\n\n"
             f"MEMORY MATERIALS\n{mem_block or '(no memory items)'}\n\n"
             f"QUESTION\n{question}")
@@ -207,7 +207,7 @@ class Verdict:
     raw: str
 
 
-def judge(llm: MinimaxClient, *, question: str, gold: str, prediction: str) -> Verdict:
+def judge(llm: AnthropicChatLLM, *, question: str, gold: str, prediction: str) -> Verdict:
     # 相对时间两侧都确定性换算(gold 常见;answerer 偶尔也输出 "the weekend before X")
     gold = normalize_relative_times(str(gold))
     prediction = normalize_relative_times(str(prediction))

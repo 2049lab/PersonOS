@@ -13,7 +13,7 @@ import json
 import sys
 import time
 
-from personos.clients.minimax import MinimaxClient
+from personos.providers.anthropic_compat import AnthropicChatLLM
 
 from .judge import judge
 
@@ -29,7 +29,7 @@ def main() -> None:
         print("trace 里没有 qa 记录")
         sys.exit(1)
 
-    llm = MinimaxClient()
+    llm = AnthropicChatLLM()
     old_ok = sum(1 for q in qas if q.get("judge"))
     flips, new_ok = [], 0
     t0 = time.time()

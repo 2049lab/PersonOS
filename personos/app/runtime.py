@@ -22,15 +22,14 @@ from concurrent.futures import ThreadPoolExecutor
 from loguru import logger
 
 from .. import obs
-from ..clients.maas import MaasClient
-from ..clients.mllm import get_mllm
+from ..providers.registry import build as build_provider
 from ..config import settings
 from .admission import AdmissionGate, TaskOverloaded
 from .ingest_worker import Dispatcher, SessionConsumer
 from ..logging_setup import setup_logging
 from ..models import now
 from ..online.profile_consolidate import run_user_consolidation, should_consolidate
-from ..online.rerank import MaasReranker
+from ..online.rerank import ScoringReranker
 from ..storage.profile_store import ProfileStore
 from ..online.write_path import MAX_SEGMENT_TURNS, SessionWriter
 from ..storage.atom_store import AtomStore
@@ -38,7 +37,7 @@ from ..storage.cell_store import CellStore
 from ..storage.chain_store import ChainStore
 from ..storage.db import Database
 from ..storage.evidence_store import EvidenceStore
-from ..storage.media_store import media_store_from_settings
+from ..storage.media import media_store_from_settings
 from ..storage.msg_queue import MemoryMsgQueue, MsgQueue, RedisMsgQueue
 from ..storage.redis_client import get_redis
 from ..storage.seg_store import MemorySegStore, RedisSegStore, SegStore
@@ -73,12 +72,21 @@ class Runtime:
         self.evidence = EvidenceStore(self.db)
         self.atoms = AtomStore(self.db)
         self.cells = CellStore(self.db)
-        self.maas = MaasClient()
-        self.reranker = MaasReranker(self.maas)   # R2 精排工位(失败自动保序,见 MaasReranker)
+        # Providers are resolved by name, so a fork can register its own gateway
+        # without editing this file. Chat and embedding are separate objects
+        # even though one endpoint usually serves both.
+        self.llm = build_provider("llm", "openai")
+        self.embedder = build_provider("embedder", "openai")
+        self.maas = self.llm            # legacy alias, still referenced below
+        reranker_provider = "openai" if settings.rerank_api_key and settings.rerank_model else "noop"
+        scorer = build_provider("reranker", reranker_provider) if reranker_provider == "openai" else None
+        # R2: wrap the scorer so a failed rerank degrades to pass-through order
+        # instead of blocking the main path (see ScoringReranker).
+        self.reranker = ScoringReranker(scorer) if scorer else build_provider("reranker", "noop")
         self.task_store = TaskStore(self.db)
         # 图片输入:MLLM 看图客户端(未配 key 时 available=False,写入侧自动降级为纯文本);
         # OSS 存储懒建(首次带图 ingest 时装配,凭证缺失则 media_store 保持 None,原图不留底但不阻塞)。
-        self.mllm = get_mllm()
+        self.mllm = build_provider("mllm", "openai" if settings.mllm_api_key else "none")
         self._media_store = None
         self._media_guard = threading.Lock()
         # —— 跨副本会话态(seg/锁):首次使用时才装配(懒建池,import 不触网) ——
@@ -150,7 +158,7 @@ class Runtime:
                    max_turns: int = MAX_SEGMENT_TURNS) -> SessionWriter:
         """构一个写入状态机(无实例态:段状态在 seg_store,跨请求/跨副本共享)。"""
         ctx = self.for_user(user_id)
-        return SessionWriter(self.maas, self.maas, ctx.evidence, ctx.cells, ctx.atoms,
+        return SessionWriter(self.llm, self.embedder, ctx.evidence, ctx.cells, ctx.atoms,
                              session_id=session_id, user_id=user_id, max_turns=max_turns,
                              seg_store=self._seg(), chain_store=ctx.chains,
                              media_store=self._media(), mllm=self.mllm)
@@ -221,7 +229,7 @@ class Runtime:
         store = CharacterStore(self.db, user_id)
         return VideoDeps(
             store=store, cloud=CloudEngine(store), draft=self._draft_for(user_id),
-            backends=self.video_backends(), media_store=self._media(), maas=self.maas,
+            backends=self.video_backends(), media_store=self._media(), maas=self.llm,
             evidence=ctx.evidence, cells=ctx.cells, atoms=ctx.atoms, chains=ctx.chains)
 
     def visual_deps(self, user_id: str):
@@ -311,7 +319,7 @@ class Runtime:
                 return                                   # 另一个整理在跑,交给它(幂等)
             try:
                 ctx = self.for_user(user_id)
-                run_user_consolidation(self.maas, cells_store=ctx.cells, atoms_store=ctx.atoms,
+                run_user_consolidation(self.llm, cells_store=ctx.cells, atoms_store=ctx.atoms,
                                        profile_store=ProfileStore(self.db, user_id),
                                        today=now().date(), scenario=scenario)
             finally:

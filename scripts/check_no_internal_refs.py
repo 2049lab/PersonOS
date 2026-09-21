@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import subprocess
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -45,8 +46,21 @@ SKIP_FILES = {"check_no_internal_refs.py"}
 
 
 def _files() -> list[Path]:
+    """Only files git actually tracks.
+
+    What ships is what is committed. Scanning the working tree instead would
+    flag a developer's local .env — noise that trains people to ignore this
+    check — while *missing* nothing, since anything untracked cannot leak.
+    If git is unavailable, fall back to walking the tree.
+    """
+    try:
+        listing = subprocess.run(["git", "ls-files", "-z"], cwd=ROOT,
+                                 capture_output=True, text=True, check=True)
+        candidates = [ROOT / n for n in listing.stdout.split("\0") if n]
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        candidates = list(ROOT.rglob("*"))
     out = []
-    for p in ROOT.rglob("*"):
+    for p in candidates:
         if not p.is_file() or p.name in SKIP_FILES or p.suffix in SKIP_SUFFIX:
             continue
         if any(part in SKIP_DIRS for part in p.parts):

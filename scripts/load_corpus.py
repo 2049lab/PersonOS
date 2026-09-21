@@ -16,7 +16,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from personos.clients.maas import MaasClient
+from personos.providers.openai_compat import OpenAIChatLLM, OpenAIEmbedder
 from personos.logging_setup import setup_logging
 from personos.models import ensure_aware, now
 from personos.online.write_path import SessionWriter
@@ -56,7 +56,7 @@ def main():
         db.execute(f"DELETE FROM {t} WHERE user_id=%s", (args.user_id,))
     ev, at, cells = EvidenceStore(db, args.user_id), AtomStore(db, args.user_id), \
         CellStore(db, args.user_id)
-    maas = MaasClient(timeout=120.0)
+    maas = OpenAIChatLLM(timeout=120.0)
 
     total_turns = 0
     for sid, dt, turns in sessions:
