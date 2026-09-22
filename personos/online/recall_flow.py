@@ -152,7 +152,9 @@ class RecallOutcome:
             "retried": self.retried,
             "escalated": self.escalated,
             "answer": self.ans.answer if self.ans else "",
-            "cited_cells": self.ans.cited_cells if self.ans else [],
+            # Same gate as memories: a refusal cites nothing. Half-related cells
+            # presented as "cited" would be misread as the answer's basis.
+            "cited_cells": [] if insufficient else (self.ans.cited_cells if self.ans else []),
             "memories": mem,
         }
         if self.warnings:

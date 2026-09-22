@@ -245,3 +245,25 @@ def test_local_video_gate_ignores_remote_urls(cfg_scope, tmp_path, monkeypatch):
     m._enqueue_videos(["https://example.com/clip.mp4"], user_id="u", session_id="s",
                       scenario="", sync=False, timeout_s=1)
     assert sent["messages"][0]["video_url"] == "https://example.com/clip.mp4"
+
+
+def test_insufficient_verdict_cites_nothing():
+    """A refusal must not present anything as its basis: memories were always
+    gated on insufficient_material; cited_cells now follows the same rule, so
+    the honesty contract no longer depends on what the draft happened to cite."""
+    from personos.online.arbitrate import ReviewResult
+    from personos.online.recall_flow import RecallOutcome
+    from personos.online.retrieval import MemoryAnswer
+
+    out = RecallOutcome(query="q", mode="auto")
+    out.ans = MemoryAnswer(answer="The materials say nothing about a cat.",
+                           cited_cells=["cell_a", "cell_b"])
+    out.reviews.append(ReviewResult(verdict="insufficient_material", critique=""))
+    pub = out.to_public()
+    assert pub["cited_cells"] == [] and pub["memories"] == []
+    assert pub["verdict"] == "insufficient_material"
+
+    ok = RecallOutcome(query="q", mode="fast")
+    ok.ans = MemoryAnswer(answer="Jurong West.", cited_cells=["cell_a"])
+    ok.reviews.append(ReviewResult(verdict="ok", critique=""))
+    assert ok.to_public()["cited_cells"] == ["cell_a"]
