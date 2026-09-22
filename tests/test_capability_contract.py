@@ -205,3 +205,43 @@ def test_configuration_variables_are_namespaced():
     generic = {v for v in read
                if not v.startswith(("PERSONOS_", "LANGFUSE_")) and v not in vendor}
     assert not generic, f"un-namespaced configuration variables: {sorted(generic)}"
+
+
+def test_local_video_without_public_url_fails_at_the_entry(cfg_scope, tmp_path, monkeypatch):
+    """A local clip + local storage + no public prefix can never reach the
+    remote model. Knowable synchronously, so it must raise at add() — not
+    poison the queue after five retries in a worker thread."""
+    cfg_scope(llm_api_key="sk-x", data_dir=tmp_path,
+              media_backend="local", media_base_url="")
+    from personos import Memory
+
+    m = Memory.__new__(Memory)          # no pools/providers, like the facade fixture
+    m.mllm = type("M", (), {"available": True})()
+    monkeypatch.setattr(Memory, "video_deps", lambda self, uid: object())
+    from personos.storage.media.local import LocalMediaStore
+    monkeypatch.setattr(Memory, "_media", lambda self: LocalMediaStore(root=tmp_path))
+
+    with pytest.raises(MissingCapability, match="PERSONOS_MEDIA_BASE_URL"):
+        m._enqueue_videos([tmp_path / "clip.mp4"], user_id="u", session_id="s",
+                          scenario="", sync=False, timeout_s=1)
+
+
+def test_local_video_gate_ignores_remote_urls(cfg_scope, tmp_path, monkeypatch):
+    """A clip already at a URL is fetched by the model service itself; local
+    media storage is irrelevant, so the gate must not fire."""
+    cfg_scope(llm_api_key="sk-x", data_dir=tmp_path,
+              media_backend="local", media_base_url="")
+    from personos import Memory
+
+    m = Memory.__new__(Memory)
+    m.mllm = type("M", (), {"available": True})()
+    monkeypatch.setattr(Memory, "video_deps", lambda self, uid: object())
+    monkeypatch.setattr(Memory, "_media", lambda self: None)
+    sent = {}
+    monkeypatch.setattr(Memory, "_enqueue",
+                        lambda self, u, s, payload, kind, warnings=None: sent.update(payload) or
+                        type("R", (), {"accepted": True})())
+
+    m._enqueue_videos(["https://example.com/clip.mp4"], user_id="u", session_id="s",
+                      scenario="", sync=False, timeout_s=1)
+    assert sent["messages"][0]["video_url"] == "https://example.com/clip.mp4"

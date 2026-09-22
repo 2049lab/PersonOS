@@ -44,7 +44,7 @@ from loguru import logger
 from . import obs
 from .providers.registry import build as build_provider
 from .config import settings
-from .admission import AdmissionGate, TaskOverloaded
+from .admission import AdmissionGate, TaskOverloaded, _MAX_PENDING
 from .ingest_worker import Dispatcher, SessionConsumer
 from .logging_setup import setup_logging
 from .models import now
@@ -67,7 +67,6 @@ from .storage.user_store import UserStore
 
 _UCTX_CAP = 1024          # LRU cap on user contexts; rebuilding stores is free, so evict the oldest past the cap
 _SWEEP_INTERVAL_S = 300   # How often the task table sweep runs (reaping zombies, clearing expired rows)
-_MAX_PENDING = 200        # Cap on in-flight background tasks: reject (503) when full, see admission.AdmissionGate
 
 
 class UserContext:
@@ -129,6 +128,17 @@ class _LazyBackends(dict):
 
     def __len__(self):
         return len(self._resolve())
+
+    # keys/values/items must delegate too: inherited from dict they would read
+    # the (always empty) real storage and report nothing.
+    def keys(self):
+        return self._resolve().keys()
+
+    def values(self):
+        return self._resolve().values()
+
+    def items(self):
+        return self._resolve().items()
 
 
 class Memory:
@@ -506,8 +516,13 @@ class Memory:
                 self._dispatcher = dispatcher
 
     def stop_dispatcher(self) -> None:
-        if self._dispatcher is not None:
-            self._dispatcher.stop()
+        with self._state_guard:
+            if self._dispatcher is not None:
+                self._dispatcher.stop()
+                # Clear the reference: otherwise a later _ensure_dispatcher()
+                # early-returns on the stopped instance and queued messages
+                # are never consumed again.
+                self._dispatcher = None
 
     @staticmethod
     def _warn_redis_env_mismatch() -> None:
@@ -690,7 +705,7 @@ class Memory:
         here too (the queue carries only a key/URL, never the clip itself);
         the expensive part (watching the video) is what the queue defers.
         """
-        from .errors import no_identity_backend, no_vision
+        from .errors import no_identity_backend, no_public_media_url, no_vision
 
         if not getattr(self.mllm, "available", False):
             raise no_vision()
@@ -700,9 +715,33 @@ class Memory:
             raise no_identity_backend() from e
 
         media = self._media()
+
+        def _is_url(item) -> bool:
+            return isinstance(item, str) and item.startswith(("http://", "https://"))
+
+        # Local storage + no public prefix means the screenplay pass cannot
+        # hand the clip to the remote model (it fetches by URL). That is
+        # knowable right here — fail now rather than poisoning the queue
+        # after five retries, which is what a mid-pipeline sign_url error
+        # would otherwise look like. Remote URLs are exempt: the model
+        # service fetches those itself.
+        if (media is not None and any((isinstance(v, (str, Path)) or getattr(v, "read", None))
+                                      and not _is_url(v) for v in videos)
+                and settings.media_backend == "local" and not settings.media_base_url):
+            raise no_public_media_url()
         msgs = []
         for i, item in enumerate(videos):
-            if isinstance(item, (str, Path)) or getattr(item, "read", None):
+            if (isinstance(item, (str, Path)) or getattr(item, "read", None)) \
+                    and not _is_url(item):
+                if media is None:
+                    # The queue carries only a key, so a bytes/path clip without
+                    # media storage is undeliverable — say so up front instead of
+                    # blowing up on media.save_video below
+                    from .errors import MissingCapability
+                    raise MissingCapability(
+                        "storing video clips",
+                        "no media storage is configured",
+                        "set PERSONOS_MEDIA_BACKEND=local (default) or oss")
                 data = (Path(item).read_bytes() if not hasattr(item, "read")
                         else item.read())
                 stored = media.save_video(data, owner=user_id)
@@ -961,7 +1000,7 @@ class Memory:
         """
         self.stop_dispatcher()
         for pool in (getattr(self, "profile_exec", None), getattr(self, "ingest_exec", None),
-                     getattr(self, "video_exec", None)):
+                     getattr(self, "video_exec", None), getattr(self, "_executor", None)):
             if pool is not None:
                 pool.shutdown(wait=False, cancel_futures=True)
         self.db.close()
