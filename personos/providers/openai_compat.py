@@ -20,7 +20,24 @@ from loguru import logger
 
 from .. import obs
 from ..config import Config, get_config
+from ..errors import ProviderError
 from ._http import post_json, usage_of
+
+
+def _expect(data: dict, key: str, label: str, url: str) -> None:
+    """Fail loudly when a 200 carries an error body instead of the expected field.
+
+    Several gateways say no inside a successful response (MiniMax's ``base_resp``
+    error block, for one). Without this check the failure surfaces as a bare
+    ``KeyError`` at the parse site, which points at our code instead of at the
+    real cause — almost always a wrong base URL or a model the endpoint does
+    not serve.
+    """
+    if key not in data:
+        raise ProviderError(
+            f"{label}: response from {url} has no {key!r} field — the endpoint is not "
+            f"speaking the OpenAI {label} shape (wrong base URL, or a model it does not "
+            f"serve?). body: {str(data)[:300]}")
 
 
 class _Base:
@@ -70,10 +87,11 @@ class OpenAIChatLLM(_Base):
                              metadata={"stage": obs.current_stage() or "chat",
                                        "temperature": temperature,
                                        "max_tokens": max_tokens}) as gen:
-            data = self._post(f"{cfg.llm_base_url}/chat/completions",
-                              self._auth(cfg.llm_api_key), payload,
+            url = f"{cfg.llm_base_url}/chat/completions"
+            data = self._post(url, self._auth(cfg.llm_api_key), payload,
                               self.timeout if self.timeout is not None else cfg.llm_timeout,
                               "chat")
+            _expect(data, "choices", "chat", url)
             content = data["choices"][0]["message"]["content"]
             obs.update(gen, output=content, usage=usage_of(data))
             logger.debug(f"chat returned {len(content)} characters")
@@ -93,10 +111,11 @@ class OpenAIEmbedder(_Base):
         payload = {"model": cfg.embedding_model, "input": texts, "encoding_format": "float"}
         with obs.observation("llm.embed", as_type="embedding", model=cfg.embedding_model,
                              metadata={"n_texts": len(texts)}) as gen:
-            data = self._post(f"{cfg.effective_embedding_base_url}/embeddings",
-                              self._auth(cfg.effective_embedding_api_key), payload,
+            url = f"{cfg.effective_embedding_base_url}/embeddings"
+            data = self._post(url, self._auth(cfg.effective_embedding_api_key), payload,
                               self.timeout if self.timeout is not None else cfg.io_timeout,
                               "embed")
+            _expect(data, "data", "embed", url)
             vecs = [np.asarray(item["embedding"], dtype=np.float32) for item in data["data"]]
             obs.update(gen, output={"n_vectors": len(vecs)}, usage=usage_of(data))
             logger.debug(f"embed {len(texts)} texts -> dim={vecs[0].shape[0] if vecs else 0}")
@@ -201,6 +220,7 @@ concrete, verifiable statements over vague description. Quote on-image text lite
             try:
                 data = self._post(self._endpoint(), self._auth(cfg.mllm_api_key), payload,
                                   cfg.mllm_timeout, "look_image")
+                _expect(data, "choices", "chat", self._endpoint())
             except Exception as e:  # noqa: BLE001  vision is optional; never block a write
                 logger.warning(f"look_image failed, continuing without it: {e}")
                 return ""

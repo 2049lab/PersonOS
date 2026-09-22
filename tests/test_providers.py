@@ -204,3 +204,37 @@ def test_every_registered_provider_actually_imports():
             if kind == "media" and name == "oss":
                 pytest.importorskip("oss2")
             assert load(kind, name) is not None, f"{kind}/{name}"
+
+
+# ── error bodies in a 200 (the MiniMax shape) ───────────────────────────
+
+def _minimax_error(_request: httpx.Request) -> httpx.Response:
+    """MiniMax reports auth/model failures inside a 200: base_resp, no data field."""
+    return httpx.Response(200, json={"base_resp": {"status_code": 1004,
+                                                   "status_msg": "login fail"}})
+
+
+def test_embed_names_the_real_cause_instead_of_a_bare_keyerror():
+    from personos.errors import ProviderError
+
+    emb = _mount(OpenAIEmbedder(_cfg()), _minimax_error)
+    with pytest.raises(ProviderError) as ei:
+        emb.embed(["hello"])
+    msg = str(ei.value)
+    assert "no 'data' field" in msg and "embed" in msg
+    assert "api.example" in msg and "base_resp" in msg, "quote the body so the cause is visible"
+
+
+def test_chat_names_the_real_cause_instead_of_a_bare_keyerror():
+    from personos.errors import ProviderError
+
+    llm = _mount(OpenAIChatLLM(_cfg()), _minimax_error)
+    with pytest.raises(ProviderError) as ei:
+        llm.chat([{"role": "user", "content": "hi"}])
+    assert "no 'choices' field" in str(ei.value)
+
+
+def test_look_image_logs_the_named_cause_and_still_degrades(caplog):
+    """Vision stays optional: the named error lands in the log, the call returns ''."""
+    mm = _mount(OpenAIMllm(_cfg()), _minimax_error)
+    assert mm.look_image(b"\xff\xd8", "what is shown") == ""

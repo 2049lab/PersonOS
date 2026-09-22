@@ -21,6 +21,17 @@ class PersonOSError(Exception):
     """Base class, so callers can catch everything this library raises."""
 
 
+class ProviderError(PersonOSError):
+    """The model endpoint answered 200, but not in the shape that was asked for.
+
+    Some gateways report failure inside a successful response (a ``base_resp``
+    error block, an HTML error page that JSON-parsed anyway). Surfacing that as
+    a bare ``KeyError`` three frames down tells the caller nothing; this names
+    what was expected and quotes what arrived, which is almost always a wrong
+    base URL or a model id the endpoint does not serve.
+    """
+
+
 class QueueBusy(PersonOSError):
     """Backpressure: the session's backlog is full, or enqueue contention timed out.
 
