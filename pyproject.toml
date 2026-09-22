@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "personos"
 version = "0.1.1"
-description = "Any in, memory out — the multimodal long-term memory layer for agents: conversations, images and video in; layered, traceable memory out"
+description = "Any in, memory out — the multimodal long-term memory layer for agents, robots and smart hardware: conversations, images and video in; layered, traceable memory out"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"

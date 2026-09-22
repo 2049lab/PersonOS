@@ -2,10 +2,12 @@
 
 # PersonOS
 
-**Any in, memory out** — the multimodal long-term memory layer for agents.
+**Any in, memory out** — the multimodal long-term memory layer for agents,
+robots, and smart hardware.
 
-Conversations, images and video in; layered, traceable memory out — and the
-only open one that watches video and remembers *who* was in it.
+Whatever your agent perceives — conversations, images, live video — goes in;
+layered, traceable memory comes out. And it is the only open memory framework
+that watches video and remembers *who* was in it.
 
 [![PyPI](https://img.shields.io/pypi/v/personos)](https://pypi.org/project/personos/)
 [![Python](https://img.shields.io/pypi/pyversions/personos)](https://pypi.org/project/personos/)
@@ -39,9 +41,11 @@ you what works, what is off, and what to set.
 
 ## Why another memory library
 
-Most frameworks store a flat list of facts and search it. PersonOS keeps a
-**layered, append-only record** and refuses to resolve contradictions at write
-time:
+Agents are leaving the chat box. A robot arm, a pair of smart glasses, a
+desktop copilot — they all perceive continuously, in more modalities than
+text, and they need memory that keeps up. Most frameworks store a flat list of
+facts and search it. PersonOS keeps a **layered, append-only record** and
+refuses to resolve contradictions at write time:
 
 ```
 evidence  ──►  memcell (episode)  ──►  atom  ──►  atom_chain
@@ -83,10 +87,10 @@ out.to_public()       # ...or a plain dict, if you just want the answer
 ### Video and person identity
 
 Every other open memory framework is text-only, or turns an image into a
-caption at ingest. PersonOS takes **video clips** and builds stable *character*
-entities from faces, body shots and voiceprints — so someone recognised in clip
-12 is the same person three sessions later, without anyone enrolling them
-first.
+caption at ingest. PersonOS takes **video clips** — the stream a robot or a
+pair of glasses actually lives in — and builds stable *character* entities
+from faces, body shots and voiceprints: someone recognised in clip 12 is the
+same person three sessions later, without anyone enrolling them first.
 
 Optional (`pip install personos[identity]`, ~2 GB of model dependencies). The
 text core imports none of it.

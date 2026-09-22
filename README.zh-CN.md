@@ -2,10 +2,10 @@
 
 # PersonOS
 
-**Any in, memory out** —— 面向智能体的多模态长期记忆层。
+**Any in, memory out** —— 面向智能体、机器人和智能硬件的多模态长期记忆层。
 
-对话、图片、视频进;分层、可追溯的记忆出 —— 也是唯一一个能看视频、
-并且记住「视频里是谁」的开源记忆框架。
+你的智能体感知到的一切 —— 对话、图片、实时视频 —— 进;分层的、可追溯的
+记忆出。它也是唯一一个能看视频、并且记住「视频里是谁」的开源记忆框架。
 
 [![PyPI](https://img.shields.io/pypi/v/personos)](https://pypi.org/project/personos/)
 [![Python](https://img.shields.io/pypi/pyversions/personos)](https://pypi.org/project/personos/)
@@ -39,8 +39,9 @@ print(m.search("我现在住在哪?", user_id="alice").ans.answer)
 
 ## 为什么又造一个记忆库
 
-多数框架把事实存成一个扁平列表再检索。PersonOS 保存的是**分层的、只追加的
-记录**,并且拒绝在写入时消解矛盾:
+智能体正在走出对话框。机械臂、智能眼镜、桌面 copilot —— 它们持续不断地感知
+世界,模态远不止文本,需要的记忆也得跟得上。多数框架把事实存成一个扁平列表
+再检索。PersonOS 保存的是**分层的、只追加的记录**,并且拒绝在写入时消解矛盾:
 
 ```
 evidence  ──►  memcell(情节)──►  atom  ──►  atom_chain
@@ -76,9 +77,9 @@ out.to_public()       # ……或者只想要答案时,拿一个普通 dict
 ### 视频与人物身份
 
 其他开源记忆框架要么只支持文本,要么在写入时把图片变成一段 caption。
-PersonOS 直接接收**视频片段**,从人脸、全身照和声纹构建稳定的 *character*
-实体 —— 第 12 个片段里认出的人,三个会话之后还是同一个人,全程无需任何人
-预先注册。
+PersonOS 直接接收**视频片段** —— 机器人和眼镜真正生活其中的那种数据流 ——
+从人脸、全身照和声纹构建稳定的 *character* 实体:第 12 个片段里认出的人,
+三个会话之后还是同一个人,全程无需任何人预先注册。
 
 可选(`pip install personos[identity]`,约 2 GB 模型依赖)。文本核心不会
 import 其中任何一行。
