@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "personos"
 version = "0.1.0"
-description = "Layered long-term memory for agents: evidence to episodes to retrievable atoms, with video and person identity"
+description = "Any in, memory out — the multimodal long-term memory layer for agents: conversations, images and video in; layered, traceable memory out"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
@@ -71,8 +71,8 @@ dev = ["pytest>=8.0", "pytest-cov", "ruff", "pre-commit", "fastapi>=0.110",
 personos = "personos.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/personos/personos"
-Issues = "https://github.com/personos/personos/issues"
+Homepage = "https://github.com/2049lab/personos"
+Issues = "https://github.com/2049lab/personos/issues"
 
 [tool.hatch.build.targets.wheel]
 # Only the library ships. `server/` is a sibling deployable with its own requirements.
