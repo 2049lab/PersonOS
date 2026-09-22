@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "personos"
-version = "0.1.0.dev0"
+version = "0.1.0"
 description = "Layered long-term memory for agents: evidence to episodes to retrievable atoms, with video and person identity"
 readme = "README.md"
 requires-python = ">=3.10"
