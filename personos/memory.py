@@ -457,7 +457,20 @@ class Memory:
     def enqueue_message(self, user_id: str, session_id: str, payload: dict,
                         *, kind: str = "ingest") -> tuple[str, int]:
         """Enqueue one session message (ingest/session_end) and return (msg_id, seq)
-        immediately. Consumption is driven asynchronously by the dispatcher."""
+        immediately. Consumption is driven asynchronously by the dispatcher.
+
+        Global backpressure lives here (the single funnel both the SDK and the
+        HTTP API enqueue through): when the backlog across ALL sessions exceeds
+        max_global_backlog, reject with QueueBusy — the per-session cap alone
+        cannot stop an aggregate flood (many users, each under their own cap).
+        """
+        pending = self.msg_queue().pending_total()
+        if pending >= settings.max_global_backlog:
+            from .errors import QueueBusy
+            raise QueueBusy(
+                f"{pending} writes are already queued across all sessions "
+                f"(limit {settings.max_global_backlog}); the service is "
+                f"overloaded, retry later")
         return self.msg_queue().enqueue(user_id, session_id, payload, kind=kind)
 
     def queue_depth(self, user_id: str, session_id: str) -> int:

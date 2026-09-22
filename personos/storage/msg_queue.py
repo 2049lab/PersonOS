@@ -131,6 +131,8 @@ class MsgQueue(Protocol):
     def head_kind(self, user_id: str, session_id: str) -> str: ...
     def is_empty(self, user_id: str, session_id: str) -> bool: ...
     def deactivate_if_empty(self, user_id: str, session_id: str) -> bool: ...
+    def pending_total(self) -> int: ...
+    def reconcile_pending(self) -> int: ...
 
 
 def _member(user_id: str, session_id: str) -> str:
@@ -179,6 +181,7 @@ class RedisMsgQueue:
     def _fk(self, u, s, msg_id): return f"{_env()}:personos:mqfail:{_sess_tag(u, s)}:{_esc(msg_id)}"
     def _elk(self, u, s): return f"{_env()}:personos:enqlock:{_sess_tag(u, s)}"
     def _ak(self): return _key("mq", "active")
+    def _tk(self): return f"{_env()}:personos:mq:pending"   # global backlog counter (all sessions, all pods)
 
     def enqueue(self, user_id, session_id, payload, *, kind="ingest"):
         # The enqueue lock is separate from the consumption lock and guards a
@@ -226,6 +229,9 @@ class RedisMsgQueue:
             self._c.expire(mk, self._ttl)
             self._c.expire(self._sk(user_id, session_id), self._ttl)
             self._c.expire(self._ak(), self._ttl)
+            # Inside the enqueue lock, so the counter can never outrun the push.
+            # No TTL on the counter key: it must live as long as the deployment.
+            self._c.incr(self._tk())
         finally:
             self._c.eval(_ENQ_RELEASE_LUA, 1, elk, token)
         return msg_id, seq
@@ -280,7 +286,11 @@ class RedisMsgQueue:
 
     def ack(self, user_id, session_id, env):
         """Acknowledge consumption: remove exactly this envelope from the in-flight list, matching on its raw string, one occurrence."""
-        self._c.lrem(self._pk(user_id, session_id), 1, env.raw)
+        if self._c.lrem(self._pk(user_id, session_id), 1, env.raw):
+            # Decrement only when something was really removed: if the in-flight
+            # list already expired (TTL), the counter keeps its (drifting) value
+            # and reconcile_pending() puts it right.
+            self._c.decr(self._tk())
 
     def cursor_get(self, user_id, session_id):
         v = _s(self._c.get(self._ck(user_id, session_id)))
@@ -312,6 +322,28 @@ class RedisMsgQueue:
     def is_empty(self, user_id, session_id):
         return (int(self._c.llen(self._mk(user_id, session_id)) or 0) == 0
                 and int(self._c.llen(self._pk(user_id, session_id)) or 0) == 0)
+
+    def pending_total(self):
+        return int(_s(self._c.get(self._tk())) or 0)
+
+    def reconcile_pending(self):
+        """Recompute the global backlog counter from the queues themselves.
+
+        The INCR/DECR counter drifts when a pod dies mid-drain or a session's
+        keys expire unconsumed (TTL), and the drift only goes upward, which
+        would eventually reject every write. The dispatcher calls this
+        periodically: sum the real queue lengths and overwrite the counter.
+        """
+        sessions = [_decode_member(m) for m in (self._c.smembers(self._ak()) or set())]
+        total = 0
+        if sessions:
+            pipe = self._c.pipeline()
+            for u, s in sessions:
+                pipe.llen(self._mk(u, s))
+                pipe.llen(self._pk(u, s))
+            total = sum(int(v or 0) for v in pipe.execute())
+        self._c.set(self._tk(), str(total))
+        return total
 
     def deactivate_if_empty(self, user_id, session_id):
         """Once the queue drains, take the session off the noticeboard.
@@ -353,6 +385,7 @@ class MemoryMsgQueue:
         self._cur: dict[tuple[str, str], int] = {}
         self._fail: dict[tuple[str, str, str], int] = {}   # (u,s,msg_id) -> cumulative failure count
         self._active: set[tuple[str, str]] = set()
+        self._pending = 0   # global backlog: queued + in-flight across all sessions
 
     def _gc_locked(self):
         """Call with _guard already held.
@@ -380,6 +413,7 @@ class MemoryMsgQueue:
             raw = Envelope.make(msg_id, seq, kind, payload)
             self._main.setdefault(k, []).insert(0, raw)         # in on the left
             self._active.add(k)
+            self._pending += 1
             return msg_id, seq
 
     def active_sessions(self, limit=256):
@@ -420,6 +454,7 @@ class MemoryMsgQueue:
             proc = self._proc.get(k)
             if proc and env.raw in proc:
                 proc.remove(env.raw)
+                self._pending -= 1
 
     def cursor_get(self, user_id, session_id):
         with self._guard:
@@ -447,6 +482,19 @@ class MemoryMsgQueue:
         k = (user_id, session_id)
         with self._guard:
             return not (self._main.get(k) or self._proc.get(k))
+
+    def pending_total(self):
+        with self._guard:
+            return self._pending
+
+    def reconcile_pending(self):
+        """Same contract as the Redis variant: recompute from the queues. The
+        in-memory counter cannot drift (one process, no TTL), so this only
+        matters for tests and for keeping the two implementations interchangeable."""
+        with self._guard:
+            self._pending = sum(len(self._main.get(k) or []) + len(self._proc.get(k) or [])
+                                for k in self._active)
+            return self._pending
 
     def deactivate_if_empty(self, user_id, session_id):
         k = (user_id, session_id)

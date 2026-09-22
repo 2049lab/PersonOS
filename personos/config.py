@@ -124,7 +124,9 @@ class Config:
     # file held from download until harvesting finishes, across the whole
     # screenplay call. So worst-case disk is video_pool_size x clip size.
     video_pool_size: int = 8
-    recall_pool_size: int = 50
+    # MUST stay below the anyio thread pool size (40): the gate is what keeps a
+    # recall burst from occupying every worker thread and starving the probes.
+    recall_pool_size: int = 30
     profile_pool_size: int = 50
     profile_ep_chars_trigger: int = 15000
     # Fairness valve: a chatty session returns its pool slot after this many
@@ -135,6 +137,11 @@ class Config:
     max_drain_per_cycle: int = 5
     max_ingest_retries: int = 5
     max_queue_depth: int = 15
+    # Global backlog gate: total queued + in-flight writes across ALL sessions.
+    # The per-session cap above stops one flooding session; this one stops the
+    # aggregate — e.g. one pod facing thousands of users who each stay under the
+    # per-session limit. Loaded as 50 x PERSONOS_POD_COUNT.
+    max_global_backlog: int = 50
     dispatcher_tick_s: float = 0.05
     dispatcher_idle_tick_s: float = 0.5
 
@@ -229,12 +236,14 @@ def load_config() -> Config:
         deep_write=_flag("PERSONOS_DEEP_WRITE", True),
         ingest_pool_size=int(_env("PERSONOS_INGEST_POOL", "50")),
         video_pool_size=int(_env("PERSONOS_VIDEO_POOL", "8")),
-        recall_pool_size=int(_env("PERSONOS_RECALL_POOL", "50")),
+        recall_pool_size=int(_env("PERSONOS_RECALL_POOL", "30")),
         profile_pool_size=int(_env("PERSONOS_PROFILE_POOL", "50")),
         profile_ep_chars_trigger=int(_env("PERSONOS_PROFILE_EP_CHARS", "15000")),
         max_drain_per_cycle=int(_env("PERSONOS_MAX_DRAIN", "5")),
         max_ingest_retries=int(_env("PERSONOS_MAX_INGEST_RETRIES", "5")),
         max_queue_depth=int(_env("PERSONOS_MAX_QUEUE_DEPTH", "15")),
+        # 50 per pod: declare the replica count when several pods share one queue.
+        max_global_backlog=50 * int(_env("PERSONOS_POD_COUNT", "1")),
         dispatcher_tick_s=float(_env("PERSONOS_DISPATCH_TICK", "0.05")),
         dispatcher_idle_tick_s=float(_env("PERSONOS_DISPATCH_IDLE_TICK", "0.5")),
         langfuse_public_key=_env("LANGFUSE_PUBLIC_KEY"),

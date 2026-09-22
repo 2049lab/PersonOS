@@ -30,6 +30,7 @@ from personos.logging_setup import trace
 from personos.models import now
 from personos.online.profile_render import render as render_profile
 from personos.online.trust import build_trust_chain, trace_evidence
+from personos.errors import QueueBusy
 from personos.storage.msg_queue import EnqueueBusy
 from personos.storage.profile_store import BANDS, ProfileStore
 from fastapi import Depends as _Depends
@@ -407,6 +408,9 @@ def ingest(body: IngestBody, ctx: UserContext = Depends(_ctx)):
     except EnqueueBusy:   # Severe contention enqueuing on this session timed out: reject and let the caller retry (never force it through and corrupt the order or lose a message)
         return JSONResponse(status_code=503, headers={"Retry-After": "1"},
                             content={"error": "enqueuing on this session is busy, retry later"})
+    except QueueBusy:     # Global backlog over the limit (50 x pod count): the fleet is saturated
+        return JSONResponse(status_code=503, headers={"Retry-After": "5"},
+                            content={"error": "too many requests, retry later"})
     out = {"accepted": True, "msg_id": msg_id, "seq": seq,
            "queue_depth": rt.queue_depth(ctx.user_id, sid), "trace_id": tid}
     if body.sync:
@@ -428,10 +432,14 @@ def session_end(body: SessionEndBody, ctx: UserContext = Depends(_ctx)):
     sid = _sid(body.caller, body.session_id)
     tid = uuid.uuid4().hex
     cc = body.context or CallerContext()
-    msg_id, seq = rt.enqueue_message(
-        ctx.user_id, sid,
-        {"task_type": cc.task_type, "scenario": cc.scenario, "trace_id": tid},
-        kind="session_end")
+    try:
+        msg_id, seq = rt.enqueue_message(
+            ctx.user_id, sid,
+            {"task_type": cc.task_type, "scenario": cc.scenario, "trace_id": tid},
+            kind="session_end")
+    except QueueBusy:     # Global backlog over the limit (50 x pod count): the fleet is saturated
+        return JSONResponse(status_code=503, headers={"Retry-After": "5"},
+                            content={"error": "too many requests, retry later"})
     out = {"accepted": True, "msg_id": msg_id, "seq": seq,
            "session_id": body.session_id, "trace_id": tid}
     if body.sync:

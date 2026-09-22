@@ -429,12 +429,23 @@ class Dispatcher:
 
     def _loop(self) -> None:
         logger.info("ingest dispatcher started")
+        last_reconcile = 0.0
         while not self._stop.is_set():
             try:
                 n = self.run_once()
             except Exception:   # noqa: BLE001  The scheduling loop must never exit because one round raised
                 logger.exception("dispatcher scheduling round failed")
                 n = 0
+            # The global backlog counter (enqueue INCR / ack DECR) drifts when a
+            # pod dies mid-drain or session keys expire unconsumed — reconcile it
+            # against the real queue lengths once a minute.
+            now = time.monotonic()
+            if now - last_reconcile >= 60.0:
+                last_reconcile = now
+                try:
+                    self._mq.reconcile_pending()
+                except Exception:   # noqa: BLE001  a failed reconcile must not stop scheduling
+                    logger.exception("backlog counter reconcile failed")
             self._stop.wait(self._tick if n else self._idle_tick)
         logger.info("ingest dispatcher stopped")
 

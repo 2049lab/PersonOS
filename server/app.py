@@ -74,12 +74,17 @@ def api_doc():
 
 # -- Platform probes: outside /api/v1, unauthenticated --
 @app.get("/healthz")
-def healthz():
+async def healthz():
     """Liveness probe: ok as long as the process can respond; touches neither the DB nor
-    any external dependency."""
+    any external dependency. Async on purpose: it runs on the event loop, so it stays
+    responsive even when all 40 anyio worker threads are occupied by slow requests
+    (a liveness timeout would make K8s restart the pod — the worst outcome under load)."""
     return {"status": "ok"}
 
 
+# Stays a sync def: it issues a blocking DB ping, which must not run on the event loop.
+# Queuing behind a saturated thread pool is acceptable here — under overload, readiness
+# flapping (pod leaves rotation) is the desired backpressure, unlike a liveness restart.
 @app.get("/readyz")
 def readyz():
     """Readiness probe: only take traffic once MySQL and (if enabled) Redis are

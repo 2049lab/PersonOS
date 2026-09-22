@@ -158,6 +158,36 @@ def test_backpressure_raises_queue_busy(live, tmp_path, monkeypatch):
     live.add("fine", user_id="u1", session_id="s2")
 
 
+def test_global_backlog_gate_rejects_when_saturated(live, tmp_path, monkeypatch):
+    """The per-session cap cannot stop an aggregate flood (many sessions, each
+    under their own limit) — the global gate (50 x pod count) rejects instead,
+    and draining frees capacity again (the counter tracks acks, not enqueues)."""
+    set_config(Config(data_dir=tmp_path, log_dir=tmp_path / "logs",
+                      max_global_backlog=3))
+    monkeypatch.setattr(Memory, "_ensure_dispatcher", lambda self: None)
+
+    live.add("one", user_id="u1", session_id="s1")
+    live.add("two", user_id="u2", session_id="s2")
+    live.add("three", user_id="u3", session_id="s3")
+    with pytest.raises(QueueBusy, match="overloaded"):
+        live.add("four", user_id="u4", session_id="s4")
+    live.drain_once("u1", "s1")
+    live.add("four", user_id="u4", session_id="s4")
+    assert live.msg_queue().pending_total() == 3
+
+
+def test_reconcile_pending_repairs_counter_drift(live, monkeypatch):
+    """A pod dying mid-drain leaves the counter high; reconcile recomputes it
+    from the real queue lengths (the dispatcher does this once a minute)."""
+    monkeypatch.setattr(Memory, "_ensure_dispatcher", lambda self: None)
+    live.add("one", user_id="u1", session_id="s1")
+    mq = live.msg_queue()
+    assert mq.pending_total() == 1
+    mq._pending = 99            # simulated drift
+    assert mq.reconcile_pending() == 1
+    assert mq.pending_total() == 1
+
+
 def test_a_poison_message_is_skipped_and_recorded(live, tmp_path, monkeypatch):
     """A batch whose write keeps failing is retried, then skipped as poison —
     the queue keeps moving and the loss is queryable in the tasks table."""
