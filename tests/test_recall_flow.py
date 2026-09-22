@@ -340,3 +340,23 @@ def test_no_visual_block_without_image(db, evidence_store):
     o = run_recall(RoutingLLM(), emb, env.atoms, env.cells, evidence_store,
                    session_id="s1", query="画展什么时候", now_dt=_T)
     assert o.vis is None
+
+
+def test_to_public_renders_memories_without_explicit_stores(db, evidence_store):
+    """A library caller does `m.search(...).to_public()` — no stores at hand. run_recall binds
+    the stores it was given onto the outcome, so the no-arg call renders memories; explicit
+    arguments (what the server passes) still take precedence."""
+    env, c1 = _env_with_two_cells(db)
+    emb = TableEmbedder({"画展筹备": _v(1, 0, 0, 0)})
+    o = run_recall(RoutingLLM(), emb, env.atoms, env.cells, evidence_store,
+                   session_id="s1", query="画展什么时候", now_dt=_T)
+
+    pub = o.to_public()                      # the library-style call: no arguments
+    assert pub["memories"], "bound stores should let to_public render memories"
+    assert any(mm["atom_id"] for mm in pub["memories"])
+
+    empty = o.to_public(atoms=None, evidence=None)   # falls back to the bound stores, not to empty
+    assert empty["memories"] == pub["memories"]
+
+    unbound = o.__class__(query="q", mode="auto")    # an outcome nobody ran has nothing bound
+    assert unbound.to_public()["memories"] == []

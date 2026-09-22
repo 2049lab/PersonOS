@@ -115,6 +115,12 @@ class RecallOutcome:
     # could not run. The answer is still returned; the caller decides what to
     # do about the gap.
     warnings: list[str] = field(default_factory=list)
+    # Bound by run_recall so a library caller's `outcome.to_public()` renders
+    # memories without having to pass the stores back in. Explicit arguments
+    # still win (the server passes its own scoped stores).
+    _atoms: object = field(default=None, repr=False, compare=False)
+    _evidence: object = field(default=None, repr=False, compare=False)
+    _media_store: object = field(default=None, repr=False, compare=False)
 
     def to_public(self, *, atoms=None, evidence=None, media_store=None,
                   max_memories: int = 20) -> dict:
@@ -127,6 +133,10 @@ class RecallOutcome:
         track steps. They are internals; publishing them turns implementation
         detail into contract.
         """
+        atoms = atoms if atoms is not None else self._atoms
+        evidence = evidence if evidence is not None else self._evidence
+        media_store = media_store if media_store is not None else self._media_store
+
         verdict = self.reviews[-1].verdict if self.reviews else None
         insufficient = verdict == "insufficient_material"
 
@@ -195,7 +205,8 @@ def run_recall(
     all units) -> R5 draft -> R3' adjudication (draft + the same materials). mode=deep goes straight
     to the deep track; in auto mode an answer defect is re-answered once, and a remaining defect or
     insufficient material escalates to the deep track, which overrides the final answer."""
-    out = RecallOutcome(query=query, mode=mode)
+    out = RecallOutcome(query=query, mode=mode,
+                        _atoms=atoms, _evidence=evidence, _media_store=media_store)
     t0 = time.perf_counter()
 
     def mark(stage: str):
