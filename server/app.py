@@ -46,6 +46,9 @@ async def lifespan(app: FastAPI):
         # per-user single-flight lock until it finishes; queued ones are cancelled (the
         # next trigger heals it).
         rt.profile_exec.shutdown(wait=True, cancel_futures=True)
+        # The video pool likewise: in-flight identity jobs finish, queued ones drop
+        # (their clips stay queued and the next dispatcher round picks them up).
+        rt.video_exec.shutdown(wait=True, cancel_futures=True)
         from personos import obs
         obs.flush()                                    # Flush buffered langfuse traces
         logger.info("PersonOS stopped: ingest dispatcher wound down")
@@ -69,7 +72,7 @@ except OSError:
 def api_doc():
     """API documentation page: callers and agents can read the latest usage by hitting
     the root path of this domain."""
-    return _API_DOC_HTML or "<h1>personos-mem</h1><p>API docs not built, see docs/personos-mem-api.md</p>"
+    return _API_DOC_HTML or "<h1>personos-mem</h1><p>API docs not built (server/api_doc.html missing)</p>"
 
 
 # -- Platform probes: outside /api/v1, unauthenticated --

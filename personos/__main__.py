@@ -1,8 +1,8 @@
 """Container/production entrypoint: `python -m personos`.
 
 Single-process uvicorn (no reload); host/port come from env (default 0.0.0.0:8080,
-matching the deployment platform's convention). For local debugging with
-breakpoints use run_dev.py; for hot reload use `uvicorn server.app:app --reload`.
+matching the deployment platform's convention). For local development with hot
+reload use `uvicorn server.app:app --reload`.
 """
 
 from __future__ import annotations

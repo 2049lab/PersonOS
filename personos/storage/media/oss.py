@@ -68,7 +68,10 @@ class OSSMediaStore:
         """A separate client on the public domain, used only to sign GET URLs a client can reach."""
         if self._sign_bucket_client is not None:
             return self._sign_bucket_client
-        import oss2  # type: ignore
+        try:
+            import oss2  # type: ignore
+        except ImportError as exc:
+            raise ImportError("uploading to OSS requires the 'oss2' package") from exc
         endpoint = self.public_endpoint if self.public_endpoint.startswith(("http://", "https://")) \
             else "https://" + self.public_endpoint
         auth = oss2.AuthV4(self._access_key_id, self._access_key_secret)

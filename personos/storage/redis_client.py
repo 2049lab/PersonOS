@@ -21,7 +21,7 @@ import threading
 from ..config import settings
 
 _lock = threading.Lock()
-_client = None   # lazy singleton; one connection pool shared per process, whose instance list a background thread refreshes
+_client = None   # lazy singleton; one connection pool shared per process
 
 
 def get_redis():

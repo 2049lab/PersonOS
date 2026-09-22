@@ -34,13 +34,17 @@ AGENT, OTHER = f"smoke-agent-{SUFFIX}", f"smoke-other-{SUFFIX}"
 
 
 def cleanup():
-    """Delete this run's user data (the four business tables plus users), so a
+    """Delete this run's user data (every business table plus users), so a
     shared database is left with no residue."""
+    from personos.storage.db.ddl import TABLE_NAMES
     db = rt_mod.rt.db
     for uid in (AGENT, OTHER):
-        # tasks: the task registry. Redis seg/lock keys are cleared when the
-        # session ends, and any leftover key carries a TTL and expires itself.
-        for t in ("evidence", "atoms", "atom_chains", "memcells", "session_context", "tasks"):
+        # Same wipe as Memory.reset: every table that carries user data. Redis
+        # seg/lock keys are cleared when the session ends, and any leftover key
+        # carries a TTL and expires itself.
+        for t in TABLE_NAMES:
+            if t == "users":
+                continue
             db.execute(f"DELETE FROM {t} WHERE user_id=%s", (uid,))
         db.execute("DELETE FROM users WHERE user_id=%s", (uid,))
     print("cleaned up this run's user data (no residue left behind)", flush=True)

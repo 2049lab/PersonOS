@@ -1,4 +1,4 @@
-"""W2.5 chain assignment (docs/atom-chain-design.md §4.2): put each new atom onto an existing chain
+"""W2.5 chain assignment: put each new atom onto an existing chain
 or start a new one.
 
 Runs right after build_cell's upsert_many, one batched LLM call per cell:
@@ -211,14 +211,19 @@ def _exec_new(store: ChainStore, items: list[tuple[MemoryAtom, np.ndarray]],
     first, _ = atoms[0]
     mat = np.stack([v for _, v in atoms])
     info = ChainInfo(title=title or first.text[:40], origin_cell_id=res.origin_cell_id)
+    appended = 0
     try:
         store.create_chain(info, first, centroid=mat.mean(axis=0))
+        appended = 1   # the first member went in with create_chain
         for a, _v in atoms[1:]:
             store.append_atom(info, a, centroid=None)   # the centroid set at creation already covers every member
+            appended += 1
         res.new_chains.append(info)
     except Exception as e:   # noqa: BLE001  failure part-way through: members already appended do no harm, the rest of the group is left free-floating
         logger.warning(f"W2.5 failed to start a new chain, the group's atoms are left unchained: {e}")
-        res.free.extend(a.id for a, _ in atoms)
+        # Only the members not yet appended go back to the free pool — those that made it in must not
+        # be reported free, or a later pass could chain them a second time
+        res.free.extend(a.id for a, _ in atoms[appended:])
 
 
 def _exec_append(store: ChainStore, items: list[tuple[MemoryAtom, np.ndarray]],

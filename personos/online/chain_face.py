@@ -1,4 +1,4 @@
-"""Unit assembly (docs/atom-chain-design.md §5.2/§5.3): the R1 atom pool -> the material-unit station.
+"""Unit assembly: the R1 atom pool -> the material-unit station.
 
 One rule: for each atom in the pool, look up its chain — a chain with >=2 nodes goes to the weaver
 (S4), which weaves it into a memcell' (the LLM sees only query + chain title + atom checklist +
@@ -16,6 +16,7 @@ own cell buckets) and never blocks the main read path.
 
 from __future__ import annotations
 
+import os
 from concurrent.futures import as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -31,7 +32,6 @@ from .llm import ChatLLM
 
 _BOUNDARY_TITLES = 5   # max number of out-of-pool chain titles named in the boundary note (prompt economy)
 _MAX_EPISODES = 15     # max member cells used as weaving input (beyond that, take the most recent 15 and mark the truncation at the top of the input)
-import os
 
 # Max chains woven in parallel within one recall (one LLM call per chain, IO-bound; latency is about
 # +1 segment).

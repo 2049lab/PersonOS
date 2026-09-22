@@ -66,10 +66,12 @@ def append_utterance(
     evidence_store: EvidenceStore, *, session_id: str, speaker: str, text: str,
     now_dt: Optional[datetime] = None,
     modality: str = "text", content_ref: Optional[str] = None, sha256: str = "",
+    source_extra: Optional[dict] = None,
 ) -> str:
     rec = EvidenceRecord(holder=speaker, content_inline=text,
                          modality=modality, content_ref=content_ref, sha256=sha256,
-                         source={"session_id": session_id}, captured_at=now_dt or now())
+                         source={"session_id": session_id, **(source_extra or {})},
+                         captured_at=now_dt or now())
     evidence_id = evidence_store.append(rec)
     logger.debug(f"W0 evidence persisted ev={evidence_id} speaker={speaker} modality={modality} len={len(text)}")
     return evidence_id
@@ -622,9 +624,12 @@ class SessionWriter:
                 # The image understanding text is merged into the utterance: the user's caption first,
                 # the observed facts after (so W1 and W2 read them together)
                 content_inline = (m.text + "\n" if m.text.strip() else "") + f"[image] {img_text}"
+        # The merged source goes into the persisted record too, not just the in-memory one —
+        # otherwise a replay from the store would lose source_extra (e.g. video clip metadata)
         evidence_id = append_utterance(self.evidence_store, session_id=self.session_id,
                                        speaker=m.speaker, text=content_inline, now_dt=now_dt,
-                                       modality=modality, content_ref=content_ref, sha256=sha256)
+                                       modality=modality, content_ref=content_ref, sha256=sha256,
+                                       source_extra=source_extra)
         return EvidenceRecord(id=evidence_id, holder=m.speaker, content_inline=content_inline,
                               modality=modality, content_ref=content_ref, sha256=sha256,
                               source={"session_id": self.session_id, **(source_extra or {})},
@@ -656,9 +661,9 @@ class SessionWriter:
         seg = ctx_seg   # W0 only writes to the evidence store and does not touch the segment, so reuse it
         boundary, forced, closed = None, False, None
         if seg:
-            # Safety valve: the segment is already over the limit, or would be after adding this batch
+            # Safety valve: the segment would be over the limit after adding this batch
             # -> close the old segment first and then take the batch, with no LLM call
-            if len(seg) >= self.max_turns or len(seg) + len(recs) > self.max_turns:
+            if len(seg) + len(recs) > self.max_turns:
                 forced = True
             else:
                 gap = ((now_dt - seg[-1].captured_at).total_seconds() / 60

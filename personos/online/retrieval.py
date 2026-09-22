@@ -559,7 +559,7 @@ def answer_from_cells(
           f"and found: {feedback}\nRe-answer the question, fixing exactly what it points out."
           if feedback else "")
     subj = subject or "(not determined)"
-    tnow = f"\n\nCurrent time: {(now_dt or now()).isoformat()}" if now_dt else ""
+    tnow = f"\n\nCurrent time: {now_dt.isoformat()}" if now_dt else ""
     prof = f"\n\n{profile}" if profile else ""       # only shapes how the answer is organized (detail, language); it never changes which facts are chosen
     user = (f"MEMORY MATERIALS\n{block}{bnd}{tnow}{fb}{prof}"
             f"\n\nQUESTION SUBJECT\n{subj}\n\nUSER QUESTION\n{query}")
@@ -596,6 +596,6 @@ def answer_from_cells(
     return res
 
 
-# Chinese names for the epistemic status, shared by the answering material and the public view (the
+# Labels for the epistemic status, shared by the answering material and the public view (the
 # three object_type categories, which affect how the answer is worded).
 _TYPE_LABELS = {"event": "experience", "fact": "fact", "claim": "claim"}

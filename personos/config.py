@@ -33,7 +33,10 @@ PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 # user keeps it. Resolving it relative to the package would work for an
 # editable install and then quietly stop working once installed from PyPI —
 # the worst kind of difference between development and production.
-load_dotenv(find_dotenv(usecwd=True), override=False)
+# PERSONOS_ENV_FILE points at a different file (tests, side-by-side envs);
+# when set it wins outright instead of merging with ./.env.
+_env_file = os.environ.get("PERSONOS_ENV_FILE")
+load_dotenv(_env_file if _env_file else find_dotenv(usecwd=True), override=False)
 
 
 def _env(name: str, default: str = "") -> str:

@@ -4,12 +4,13 @@ The store layer writes MySQL. Rather than teach every store about two dialects,
 each statement is rewritten on its way to the driver. This is a deliberate
 trade-off, and the reasoning matters more than the code:
 
-There are 234 ``%s`` placeholders across eleven files, and the SQL is *not* all
-in module-level constants — ``identity/store.py`` alone has 78 of them written
-inline in method bodies. Branching per store would mean roughly a hundred edits
-scattered through code that sits right next to the memory algorithms. That is
-the highest-risk way to make a purely mechanical change: every one of those
-edits is a chance to alter behaviour while claiming to be reshaping packaging.
+There are hundreds of ``%s`` placeholders across the store layer, and the SQL
+is *not* all in module-level constants — ``identity/store.py`` alone has 78 of
+them written inline in method bodies. Branching per store would mean roughly a
+hundred edits scattered through code that sits right next to the memory
+algorithms. That is the highest-risk way to make a purely mechanical change:
+every one of those edits is a chance to alter behaviour while claiming to be
+reshaping packaging.
 
 Translating here is ~60 lines, unit-testable in isolation, and leaves every
 store byte-for-byte unchanged. The MySQL path is the identity function, so the

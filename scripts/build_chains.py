@@ -1,4 +1,4 @@
-"""Chain backfill (docs/atom-chain-design.md 4.3/8.2): re-run chain assignment
+"""Chain backfill: re-run chain assignment
 over existing atoms without re-extracting them.
 
 When it applies: atoms written while the feature flag was off carry no chain,

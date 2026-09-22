@@ -169,22 +169,6 @@ class FakeRedis:
         self.data[key] = v
         return v
 
-    def pipeline(self):
-        """Queued execution, used by the backlog reconcile. Only the llen batch."""
-        redis = self
-
-        class _Pipe:
-            def __init__(self):
-                self._ops = []
-
-            def llen(self, key):
-                self._ops.append(key)
-
-            def execute(self):
-                return [redis.llen(k) for k in self._ops]
-
-        return _Pipe()
-
     def expire(self, key, seconds):
         if key in self.data:
             self.ttl[key] = seconds

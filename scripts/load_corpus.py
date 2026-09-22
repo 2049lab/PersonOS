@@ -11,8 +11,8 @@ session in chronological order, through the real write path.
   pasted straight into the console.
 
 Run:  python -m scripts.load_corpus --corpus data/persona_gen/corpus.json [--user-id corpus]
-Then: python run_dev.py, and ask questions as the matching user (users are
-namespaced, so a shared database stays isolated per user).
+Then: start the API server (uvicorn server.app:app --reload) and ask questions as
+the matching user (users are namespaced, so a shared database stays isolated per user).
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--corpus", default="data/persona_gen/corpus.json")
     ap.add_argument("--user-id", default="corpus",
-                    help="user namespace (a re-run clears this user's four tables)")
+                    help="user namespace (a re-run clears this user's rows in the business tables)")
     args = ap.parse_args()
 
     setup_logging(Path("logs"))
@@ -59,7 +59,7 @@ def main():
     sessions.sort(key=lambda x: (x[1], x[0]))
 
     db = Database()
-    # Idempotent: clear this user's four tables only. A table-wide DELETE would
+    # Idempotent: clear this user's rows only. A table-wide DELETE would
     # destroy other users' data and is forbidden.
     for t in ("evidence", "atoms", "atom_chains", "memcells", "session_context"):
         db.execute(f"DELETE FROM {t} WHERE user_id=%s", (args.user_id,))
@@ -99,7 +99,7 @@ def main():
         print(f"  - [{pr.get('kind','?')}] {pr.get('question','')}")
         print(f"        expected: {pr.get('expected','')}")
     print("\nStart the console:")
-    print("  python run_dev.py   ->  http://127.0.0.1:8000/")
+    print("  uvicorn server.app:app --reload   ->  http://127.0.0.1:8000/api-doc")
     db.close()
 
 

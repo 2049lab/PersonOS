@@ -17,7 +17,7 @@ from loguru import logger
 
 # Event names match personos-web's webhook event set (aligned with mem0)
 EVENT_ADD = "memory.add"
-EVENT_UPDATE = "memory.update"
+EVENT_UPDATE = "memory.update"   # reserved for a future revise path; nothing publishes it yet
 
 _subscribers: list[Callable[[str, str, dict[str, Any]], None]] = []
 

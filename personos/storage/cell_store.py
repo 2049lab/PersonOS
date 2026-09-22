@@ -106,6 +106,10 @@ class CellStore:
         share a t_start, so nothing is skipped and nothing repeats. t_start is an
         ISO string, where lexical order equals chronological order.
         """
+        # No/unknown cursor means a full re-read — note that iter_all() caps at
+        # 1000 rows, so beyond that the re-distillation works from a truncated
+        # history (the cursor path below is unbounded). Accepted: 1000 cells is
+        # far past any realistic single user today.
         if not up_to_cell_id:
             return self.iter_all()
         cur = self.get(up_to_cell_id)

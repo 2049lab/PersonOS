@@ -63,9 +63,11 @@ _DDL = [
     # atom chains are a derived view that groups without resolving. This table holds
     # the chain-level information; membership lives in three columns on atoms, and an
     # atom belongs to at most one chain.
-    # Adding a column to an existing database goes through the ALTER statements in
-    # scripts/mysql_schema.sql. This DDL only takes effect on a brand-new database,
-    # because _init_schema checks table existence and nothing more.
+    # Adding a column to an existing database must be applied out of band (an
+    # ALTER run by hand): scripts/mysql_schema.sql is generated from this file
+    # and only ever creates fresh schema. This DDL only takes effect on a
+    # brand-new database, because _init_schema checks table existence and
+    # nothing more.
     """
     CREATE TABLE IF NOT EXISTS atom_chains (
         id           VARCHAR(64) NOT NULL,

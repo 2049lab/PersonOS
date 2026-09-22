@@ -253,7 +253,10 @@ class SessionConsumer:
 
         def _heartbeat():
             while not stop_hb.wait(self._renew_interval):
-                self._lock.renew(user_id, session_id, token)
+                try:
+                    self._lock.renew(user_id, session_id, token)
+                except Exception as e:   # noqa: BLE001  a transient Redis error must not kill the renewal loop — the next tick retries, and the TTL leaves room for a miss
+                    logger.warning(f"lock renewal failed u={user_id} s={session_id} (retrying next tick): {e}")
 
         hb = threading.Thread(target=_heartbeat, name="drain-hb", daemon=True)
         hb.start()
@@ -356,10 +359,10 @@ class Dispatcher:
         """One scheduling round (unit-testable): scan the board and, while permits are
         available, dispatch drain jobs. Returns how many jobs this round dispatched.
 
-        Even if the same session is dispatched several times, the consumer's
-        non-blocking lock guarantees only one of them actually drains while the rest
-        return immediately — so the dispatcher needs no "in progress" state of its own,
-        the lock dedups naturally.
+        Sessions already dispatched by this dispatcher are skipped via ``_inflight``
+        (anti-starvation); the consumer's non-blocking lock is the last line of
+        defence if two dispatchers race across processes — only one of them drains
+        while the rest return immediately.
         """
         sessions = self._mq.active_sessions(self._batch)
         if sessions:

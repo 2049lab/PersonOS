@@ -216,7 +216,7 @@ class MemoryAtom(BaseModel):
     holder: str = "user"                       # Who said it / whose attribute it is
     evidence_refs: list[EvidenceRef] = Field(default_factory=list)  # The original wording it came from
 
-    # Chain membership (docs/atom-chain-design.md): the three chain columns on the atoms
+    # Chain membership: the three chain columns on the atoms
     # table are the single source of truth; these are display copies — ChainStore keeps
     # them in sync with a dual write, and AtomStore overrides them with the column values
     # on read so a stale payload can't mislead anyone. '' = not on a chain.
@@ -249,7 +249,7 @@ class MemoryAtom(BaseModel):
 
 
 # -- atom chain: the timeline of atomic facts about the same "thing"
-# (docs/atom-chain-design.md) --
+# Chain record models --
 # A derived view that only groups and never resolves (D-C3): within a chain we pick no
 # winner between the older and newer statement; conflicts are still consumed at answer
 # time. Chain order = append order = the natural order in which facts were extracted

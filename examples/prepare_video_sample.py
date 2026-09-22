@@ -142,7 +142,7 @@ def main() -> int:
     clips = _cut(source, Path(args.out), n_clips=args.clips, seconds=args.seconds)
 
     print(f"\nReady: {len(clips)} clips in {args.out}")
-    print(f"Next:  python examples/03_video_memory.py --clips-dir {args.out}")
+    print(f"Next:  python examples/video.py --clips-dir {args.out}")
     return 0
 
 

@@ -11,12 +11,9 @@ client can be wrong or say nothing, the bytes cannot.
 
 from __future__ import annotations
 
-import hashlib
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
-
-from loguru import logger
 
 # Content type -> extension. Image input supports these common formats.
 _EXTENSIONS = {
@@ -95,8 +92,6 @@ def _detect_image_type(header: bytes) -> str | None:
         if header[8:12] in {b"heic", b"heix", b"hevc", b"hevx", b"mif1", b"msf1"}:
             return "image/heic"
     return None
-
-
 
 
 def content_key(prefix: str, owner: str, sha256: str, extension: str,

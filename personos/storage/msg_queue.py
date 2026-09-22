@@ -29,15 +29,16 @@ down into one durable queue:
 Constraints: the shared cluster must not accumulate permanent keys, so every key
 carries a TTL of 24h, matching seg_store. An active session renews it, and a
 session silent for over a day is discarded whole, which is consistent with letting
-a trailing segment expire. Everything runs on single-command paths, with no
-pipelines and no Lua, because the Redis proxy can misframe pipelined responses —
-see the seg_store module docstring.
+a trailing segment expire. Everything runs on single-command paths with no
+pipelines, because the Redis proxy can misframe pipelined responses — see the
+seg_store module docstring. The one exception is the enqueue lock's release, a
+small token-checked Lua EVAL shared with session_lock (compare-and-delete
+cannot be done in a single plain command).
 """
 
 from __future__ import annotations
 
 import json
-import os
 import threading
 import time
 import uuid
@@ -330,18 +331,18 @@ class RedisMsgQueue:
         """Recompute the global backlog counter from the queues themselves.
 
         The INCR/DECR counter drifts when a pod dies mid-drain or a session's
-        keys expire unconsumed (TTL), and the drift only goes upward, which
-        would eventually reject every write. The dispatcher calls this
-        periodically: sum the real queue lengths and overwrite the counter.
+        keys expire unconsumed (TTL). The drift is usually upward (an ack lost
+        to a crash is never replayed), which would eventually reject every
+        write; a crash between LPUSH and INCR drifts downward instead. Either
+        way, the dispatcher calls this periodically to sum the real queue
+        lengths and overwrite the counter.
         """
         sessions = [_decode_member(m) for m in (self._c.smembers(self._ak()) or set())]
-        total = 0
-        if sessions:
-            pipe = self._c.pipeline()
-            for u, s in sessions:
-                pipe.llen(self._mk(u, s))
-                pipe.llen(self._pk(u, s))
-            total = sum(int(v or 0) for v in pipe.execute())
+        # Per-key single commands, NOT a pipeline: the module's hard rule (the
+        # proxy can misframe pipelined responses — see the docstring above).
+        # This runs once a minute, so the extra round trips cost nothing.
+        total = sum(int(self._c.llen(self._mk(u, s)) or 0) + int(self._c.llen(self._pk(u, s)) or 0)
+                    for u, s in sessions)
         self._c.set(self._tk(), str(total))
         return total
 

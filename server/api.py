@@ -32,14 +32,13 @@ from personos.online.profile_render import render as render_profile
 from personos.online.trust import build_trust_chain, trace_evidence
 from personos.errors import QueueBusy
 from personos.storage.msg_queue import EnqueueBusy
-from personos.storage.profile_store import BANDS, ProfileStore
-from fastapi import Depends as _Depends
+from personos.storage.profile_store import ProfileStore
 from personos.online.recall_flow import PUBLIC_MODES, run_recall
 from .response import EnvelopeRoute
 from server.runtime import UserContext, rt
 from personos.session_scope import scoped_session, valid_user_id
 from .signing import verify_signature
-from personos.online.views import memory_view as _memory_view, profile_view
+from personos.online.views import profile_view
 
 # route_class: centrally wraps whatever each handler returns into {code, data, msg}, so
 # no endpoint body has to be changed.
@@ -47,7 +46,7 @@ from personos.online.views import memory_view as _memory_view, profile_view
 # endpoint's _ctx; it is a no-op under pytest. Every /api/v1 endpoint (including
 # register) is signed.
 router = APIRouter(prefix="/api/v1", route_class=EnvelopeRoute,
-                   dependencies=[_Depends(verify_signature)])
+                   dependencies=[Depends(verify_signature)])
 
 # How much "supporting memory" we expose: the matched atoms of the top N units after
 # reranking (internally the answer consumes every material unit, externally we return
@@ -437,6 +436,9 @@ def session_end(body: SessionEndBody, ctx: UserContext = Depends(_ctx)):
             ctx.user_id, sid,
             {"task_type": cc.task_type, "scenario": cc.scenario, "trace_id": tid},
             kind="session_end")
+    except EnqueueBusy:   # Same contention case as ingest: reject and let the caller retry
+        return JSONResponse(status_code=503, headers={"Retry-After": "1"},
+                            content={"error": "session busy, retry later"})
     except QueueBusy:     # Global backlog over the limit (50 x pod count): the fleet is saturated
         return JSONResponse(status_code=503, headers={"Retry-After": "5"},
                             content={"error": "too many requests, retry later"})
@@ -565,7 +567,6 @@ def recall(body: RecallBody, ctx: UserContext = Depends(_ctx)):
     # answer (what was searched, the conclusion, the reason) speak. A negative deep-track
     # answer may also cite the cells it "looked at" (after an auto escalation the review
     # is still the fast path's verdict) — the same final-adjudication gate applies.
-    verdict = o.reviews[-1].verdict if o.reviews else None
     # One renderer, shared with the library: Memory.search(...).to_public() and
     # this endpoint produce the same shape by construction, so the two cannot
     # drift into describing the same recall differently.
