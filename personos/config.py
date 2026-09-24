@@ -79,6 +79,13 @@ class Config:
     rerank_api_key: str = ""
     rerank_model: str = ""
 
+    # ── Benchmarks only: a separate judge model for scripts/bench. Empty
+    #    falls back to the service LLM. The library itself never reads these.
+    judge_provider: str = ""
+    judge_base_url: str = ""
+    judge_api_key: str = ""
+    judge_model: str = ""
+
     # ── Optional: multimodal. Unset means text memory is unaffected, images
     #    are stored but not understood, and video is rejected with a clear error.
     mllm_base_url: str = ""         # falls back to llm_base_url
@@ -215,6 +222,10 @@ def load_config() -> Config:
         rerank_base_url=_env("PERSONOS_RERANK_BASE_URL"),
         rerank_api_key=_env("PERSONOS_RERANK_API_KEY"),
         rerank_model=_env("PERSONOS_RERANK_MODEL"),
+        judge_provider=_env("PERSONOS_JUDGE_PROVIDER"),
+        judge_base_url=_env("PERSONOS_JUDGE_BASE_URL"),
+        judge_api_key=_env("PERSONOS_JUDGE_API_KEY"),
+        judge_model=_env("PERSONOS_JUDGE_MODEL"),
         mllm_base_url=_env("PERSONOS_MLLM_BASE_URL"),
         mllm_endpoint=_env("PERSONOS_MLLM_ENDPOINT"),
         mllm_api_key=_env("PERSONOS_MLLM_API_KEY"),

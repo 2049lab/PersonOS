@@ -14,60 +14,28 @@ from __future__ import annotations
 
 import base64
 
-import httpx
 import numpy as np
 from loguru import logger
 
 from .. import obs
-from ..config import Config, get_config
-from ..errors import ProviderError
-from ._http import post_json, usage_of
+from ..online.llm import _THINK_BLOCK
+from ._base import _Base, _expect  # noqa: F401  (_expect re-exported for rerank.py)
+from ._http import usage_of
+from .rerank import CohereReranker  # noqa: F401  (re-exported via OpenAIReranker)
 
 
-def _expect(data: dict, key: str, label: str, url: str) -> None:
-    """Fail loudly when a 200 carries an error body instead of the expected field.
-
-    Several gateways say no inside a successful response (MiniMax's ``base_resp``
-    error block, for one). Without this check the failure surfaces as a bare
-    ``KeyError`` at the parse site, which points at our code instead of at the
-    real cause — almost always a wrong base URL or a model the endpoint does
-    not serve.
-    """
-    if key not in data:
-        raise ProviderError(
-            f"{label}: response from {url} has no {key!r} field — the endpoint is not "
-            f"speaking the OpenAI {label} shape (wrong base URL, or a model it does not "
-            f"serve?). body: {str(data)[:300]}")
-
-
-class _Base:
-    def __init__(self, cfg: Config | None = None, *, timeout: float | None = None,
-                 max_retries: int = 3, rate_limit_attempts: int = 2):
-        self.cfg = cfg or get_config()
-        self.timeout = timeout
-        self.max_retries = max_retries
-        # A shallow 429 budget on purpose: see providers/_http.
-        self.rate_limit_attempts = rate_limit_attempts
-        # trust_env=False: a system proxy configured for browsing (Clash and
-        # friends) gets inherited by the shell and then silently intercepts
-        # calls to a private gateway, which fails as "connection refused" at a
-        # confusing distance from the cause. Providers are addressed explicitly.
-        self._client = httpx.Client(trust_env=False)
-
-    def _post(self, url: str, headers: dict, payload: dict, timeout: float, label: str) -> dict:
-        return post_json(self._client, url, headers, payload, timeout=timeout,
-                         max_retries=self.max_retries,
-                         rate_limit_attempts=self.rate_limit_attempts, label=label)
-
-    def _auth(self, api_key: str) -> dict:
-        headers = {"Content-Type": "application/json",
-                   "Authorization": f"Bearer {api_key}"}
-        if self.cfg.llm_app_id:      # some gateways require an application id
-            headers["x-app-id"] = self.cfg.llm_app_id
-        return headers
-
-    def close(self) -> None:
-        self._client.close()
+def _strip_reasoning(content: str) -> str:
+    """Drop leading ``<think>...`` blocks that reasoning models interleave into
+    content on OpenAI-compatible endpoints (MiniMax-M3 among them; DeepSeek-R1
+    uses a separate field and never needs this). Every consumer of chat() wants
+    the final text — a leaked block once poisoned stored memory narratives and
+    adjudication JSON alike. Stripped here, at the provider boundary, so no
+    call site has to know. Loops because some models emit several blocks."""
+    prev = None
+    while prev != content:
+        prev = content
+        content = _THINK_BLOCK.sub("", content.strip(), count=1).strip()
+    return content
 
 
 class OpenAIChatLLM(_Base):
@@ -92,7 +60,7 @@ class OpenAIChatLLM(_Base):
                               self.timeout if self.timeout is not None else cfg.llm_timeout,
                               "chat")
             _expect(data, "choices", "chat", url)
-            content = data["choices"][0]["message"]["content"]
+            content = _strip_reasoning(data["choices"][0]["message"]["content"] or "")
             obs.update(gen, output=content, usage=usage_of(data))
             logger.debug(f"chat returned {len(content)} characters")
             return content
@@ -122,40 +90,12 @@ class OpenAIEmbedder(_Base):
             return np.vstack(vecs)
 
 
-class OpenAIReranker(_Base):
-    """Cross-encoder reranking over the widely-shared `/rerank` shape.
+class OpenAIReranker(CohereReranker):
+    """Backwards-compatible name for :class:`CohereReranker`.
 
-    Request ``{model, query, documents}`` and response ``{results: [{index,
-    relevance_score}]}`` is what Cohere, Jina, Voyage and text-embeddings-
-    inference all speak, so one implementation covers the realistic options.
-
-    Scores come back keyed by index and are re-expanded in input order, because
-    a reranker is free to return them sorted — silently accepting that order
-    would scramble the mapping between scores and documents.
+    The rerank dialects live in ``providers/rerank.py`` now; this alias keeps
+    the original import path and the default ``openai`` provider working.
     """
-
-    @property
-    def available(self) -> bool:
-        return bool(self.cfg.rerank_api_key and self.cfg.rerank_model)
-
-    def rerank(self, query: str, documents: list[str], *, instruction: str = "") -> list[float]:
-        if not documents:
-            return []
-        cfg = self.cfg
-        text = f"Instruct: {instruction}\nQuery: {query}" if instruction else query
-        payload = {"model": cfg.rerank_model, "query": text, "documents": documents}
-        with obs.observation("llm.rerank", as_type="span", model=cfg.rerank_model,
-                             input=query, metadata={"n_docs": len(documents)}) as gen:
-            data = self._post(f"{cfg.rerank_base_url or cfg.llm_base_url}/rerank",
-                              self._auth(cfg.rerank_api_key), payload,
-                              self.timeout if self.timeout is not None else cfg.io_timeout,
-                              "rerank")
-            results = data.get("results") or data.get("data") or []
-            by_index = {int(r["index"]): float(r.get("relevance_score", r.get("score", 0.0)))
-                        for r in results}
-            scores = [by_index.get(i, 0.0) for i in range(len(documents))]
-            obs.update(gen, output={"top_score": max(scores) if scores else 0.0})
-            return scores
 
 
 class OpenAIMllm(_Base):

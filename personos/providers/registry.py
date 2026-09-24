@@ -27,6 +27,8 @@ PROVIDERS: dict[str, dict[str, str]] = {
     },
     "reranker": {
         "openai": "personos.providers.openai_compat.OpenAIReranker",
+        "cohere": "personos.providers.rerank.CohereReranker",
+        "dashscope": "personos.providers.rerank.DashScopeReranker",
         "noop": "personos.online.rerank.NoopReranker",
     },
     "database": {
@@ -41,14 +43,23 @@ PROVIDERS: dict[str, dict[str, str]] = {
 
 
 def load(kind: str, provider: str) -> type:
-    """Resolve ``(kind, provider)`` to a class, importing it on first use."""
+    """Resolve ``(kind, provider)`` to a class, importing it on first use.
+
+    A provider containing a dot is treated as a dotted class path directly, so
+    an application can bring its own implementation (``my_pkg.MyReranker``)
+    without registering anything here.
+    """
     known = PROVIDERS.get(kind)
     if known is None:
         raise KeyError(f"unknown provider kind {kind!r}; expected one of {sorted(PROVIDERS)}")
-    path = known.get(provider)
-    if path is None:
-        raise KeyError(
-            f"unknown {kind} provider {provider!r}; available: {sorted(known)}")
+    if "." in provider:
+        path = provider
+    else:
+        path = known.get(provider)
+        if path is None:
+            raise KeyError(
+                f"unknown {kind} provider {provider!r}; available: {sorted(known)} "
+                f"— or pass a dotted class path (e.g. 'my_pkg.module.MyReranker')")
     module, _, name = path.rpartition(".")
     return getattr(importlib.import_module(module), name)
 

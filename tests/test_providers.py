@@ -57,6 +57,20 @@ def test_chat_uses_bearer_auth_and_openai_paths():
     assert seen["body"]["stream"] is False
 
 
+def test_chat_strips_reasoning_blocks_at_the_provider_boundary():
+    """Reasoning models interleave <think> blocks into content on OpenAI-compatible
+    endpoints; every consumer wants the final text (a leaked block once poisoned
+    stored memory narratives and adjudication JSON). One or several blocks go,
+    text that merely mentions the tag stays."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"choices": [{"message": {"content":
+            "<think>let me reason</think>\n<think>more reasoning</think>\nhello"}}]})
+
+    llm = _mount(OpenAIChatLLM(_cfg()), handler)
+    assert llm.chat([{"role": "user", "content": "hi"}]) == "hello"
+
+
 def test_app_id_header_only_appears_when_configured():
     """Some gateways want an application id. Most do not, and sending an empty
     one has been rejected outright by stricter endpoints."""
@@ -134,6 +148,73 @@ def test_rerank_folds_the_instruction_into_the_query():
 
     _mount(OpenAIReranker(_cfg()), handler).rerank("who?", ["d"], instruction="judge relevance")
     assert seen["body"]["query"].startswith("Instruct: judge relevance")
+
+
+def test_rerank_names_the_real_cause_instead_of_a_bare_keyerror():
+    from personos.errors import ProviderError
+
+    rr = _mount(OpenAIReranker(_cfg()), _minimax_error)
+    with pytest.raises(ProviderError, match="no 'results' field"):
+        rr.rerank("q", ["d"])
+
+
+# ── rerank dialects: DashScope (Alibaba Bailian) ─────────────────────────
+
+def test_dashscope_rerank_uses_the_full_url_and_nested_shape():
+    """Bailian's native rerank API has no path-suffix convention, so the base
+    URL is the whole endpoint; body nests under input/parameters and the answer
+    under output.results."""
+    from personos.providers.rerank import DashScopeReranker
+
+    seen = {}
+    full_url = "https://ws.cn-beijing.maas.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank"
+
+    def handler(request):
+        seen["url"] = str(request.url)
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"output": {"results": [
+            {"index": 1, "relevance_score": 0.8},
+            {"index": 0, "relevance_score": 0.2},
+        ]}, "usage": {"total_tokens": 9}})
+
+    rr = _mount(DashScopeReranker(_cfg(rerank_base_url=full_url)), handler)
+    assert rr.rerank("什么是文本排序模型", ["d0", "d1"]) == [0.2, 0.8]
+    assert seen["url"] == full_url
+    assert seen["body"] == {"model": "rr-model",
+                            "input": {"query": "什么是文本排序模型", "documents": ["d0", "d1"]},
+                            "parameters": {"top_n": 2, "return_documents": False}}
+
+
+def test_dashscope_rerank_names_the_real_cause_instead_of_a_bare_keyerror():
+    from personos.errors import ProviderError
+    from personos.providers.rerank import DashScopeReranker
+
+    rr = _mount(DashScopeReranker(_cfg(rerank_base_url="https://ds.example/rerank")), _minimax_error)
+    with pytest.raises(ProviderError, match="no 'output' field"):
+        rr.rerank("q", ["d"])
+
+
+def test_dashscope_rerank_explains_the_full_url_rule_when_base_url_is_unset():
+    from personos.errors import ProviderError
+    from personos.providers.rerank import DashScopeReranker
+
+    with pytest.raises(ProviderError, match="verbatim as the full endpoint"):
+        DashScopeReranker(_cfg()).rerank("q", ["d"])
+
+
+# ── bring-your-own reranker via dotted path ───────────────────────────────
+
+def test_registry_resolves_a_dotted_class_path_directly():
+    """The extension point: an application ships its own dialect and points
+    PERSONOS_RERANKER_PROVIDER at it — nothing to register in the framework."""
+    from personos.providers.rerank import DashScopeReranker
+
+    assert load("reranker", "personos.providers.rerank.DashScopeReranker") is DashScopeReranker
+
+
+def test_registry_guides_towards_dotted_paths_on_a_bad_reranker_name():
+    with pytest.raises(KeyError, match="dotted class path"):
+        load("reranker", "not-a-reranker")
 
 
 # ── vision ──────────────────────────────────────────────────────────────

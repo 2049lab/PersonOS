@@ -160,7 +160,7 @@ class Memory:
         self.embedder = build_provider("embedder", settings.embedder_provider)
         reranker_provider = settings.reranker_provider or (
             "openai" if settings.rerank_api_key and settings.rerank_model else "noop")
-        scorer = build_provider("reranker", reranker_provider) if reranker_provider == "openai" else None
+        scorer = None if reranker_provider == "noop" else build_provider("reranker", reranker_provider)
         # R2: wrap the scorer so a failed rerank degrades to pass-through order
         # instead of blocking the main path (see ScoringReranker).
         self.reranker = ScoringReranker(scorer) if scorer else build_provider("reranker", "noop")
