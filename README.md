@@ -6,7 +6,7 @@
 robots, and smart hardware.
 
 Whatever your agent perceives — conversations, images, live video — goes in;
-layered, traceable memory comes out. And it is the only open memory framework
+layered, traceable memory comes out. It is also the only open memory framework
 that watches video and remembers *who* was in it.
 
 [![PyPI](https://img.shields.io/pypi/v/personos)](https://pypi.org/project/personos/)
@@ -14,6 +14,8 @@ that watches video and remembers *who* was in it.
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 English · [简体中文](README.zh-CN.md)
+
+[Quickstart](#quickstart) · [Benchmarks](#benchmarks) · [Design](#why-personos) · [Installation](#installation) · [Configuration](#configuration) · [API](#api) · [Examples](examples/README.md)
 
 </div>
 
@@ -39,19 +41,49 @@ print(m.search("where do I live?", user_id="alice").ans.answer)
 Not sure what your configuration can do? `personos doctor` reads it and tells
 you what works, what is off, and what to set.
 
-## Why another memory library
+## Benchmarks
+
+**[LoCoMo-10](https://github.com/snap-research/locomo)** — long-term
+conversational memory (10 conversations, ~300 turns each, 1,536 answerable
+questions; adversarial questions excluded per community convention):
+
+| Multi-hop | Temporal | Open-domain | Single-hop | **Overall** |
+|---|---|---|---|---|
+| 77.3% | 79.8% | 58.7% | 89.3% | **83.3%** |
+
+**[M3-Bench-robot](https://github.com/bytedance-seed/m3-agent)** — long-video
+memory from a robot's perspective (100 videos, 1,276 QA), against the
+benchmark's reference agent:
+
+| | Overall | Cross-Modal Reasoning | General Knowledge | Multi-Hop | Multi-evidence | Person Understanding |
+|---|---|---|---|---|---|---|
+| **PersonOS** | **61.5%** | 59.0% | 48.0% | 63.5% | 62.8% | 73.5% |
+| m3-agent (baseline) | 37.4% | 37.0% | 28.4% | 42.4% | 37.1% | 50.9% |
+
+**[Video-MME](https://github.com/BradyFU/Video-MME)** (long split, without
+subtitles) — general video understanding:
+
+| Overall | Info. Synopsis | Object Recog. | Spatial Reason. | Object Reason. | Temporal Reason. | Action Recog. | Action Reason. | Temporal Percep. | Attribute Percep. | OCR | Counting | Spatial Percep. |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| **87.0%** | 93.3% | 92.6% | 90.9% | 87.9% | 87.9% | 84.1% | 85.0% | 83.3% | 85.2% | 78.6% | 70.8% | 33.3% |
+
+The LoCoMo run is fully reproducible: dataset download, evaluation script,
+scoring protocol and judge configuration all live in
+[scripts/bench](scripts/bench/README.md).
+
+## Why PersonOS
 
 Agents are leaving the chat box. A robot arm, a pair of smart glasses, a
-desktop copilot — they all perceive continuously, in more modalities than
-text, and they need memory that keeps up. Most frameworks store a flat list of
-facts and search it. PersonOS keeps a **layered, append-only record** and
-refuses to resolve contradictions at write time:
+desktop copilot — they perceive continuously, in more modalities than text,
+and they need memory that keeps up. Most frameworks store a flat list of facts
+and search it. PersonOS keeps a **layered, append-only record** and refuses to
+resolve contradictions at write time:
 
 ```
 evidence  ──►  memcell (episode)  ──►  atom  ──►  atom_chain
-raw turns      the narrative unit     the          the same fact over time,
-never edited   used for answering     retrieval    grouped, never collapsed
-                                      anchor
+raw turns      the narrative unit      the          the same fact over time,
+never edited   used for answering      retrieval    grouped, never collapsed
+                                       anchor
 ```
 
 Two consequences that show up in practice:
@@ -59,8 +91,8 @@ Two consequences that show up in practice:
 **Contradictions survive.** "15 fish" → "actually 13" → "actually 11" stay as
 three linked atoms with their timestamps. The answer layer decides what is
 current; the memory layer never silently overwrites the past. Ask *"how many
-fish do I have"* and you get the current count; ask *"did that change"* and the
-history is still there.
+fish do I have"* and you get the current count; ask *"did that change"* and
+the history is still there.
 
 **Answers cite episodes, not fragments.** Atoms are the retrieval index —
 short, self-contained propositions that embed well. The narrative episode is
@@ -86,7 +118,7 @@ out.to_public()       # ...or a plain dict, if you just want the answer
 
 ### Video and person identity
 
-Every other open memory framework is text-only, or turns an image into a
+Every other open memory framework is text-only, or reduces an image to a
 caption at ingest. PersonOS takes **video clips** — the stream a robot or a
 pair of glasses actually lives in — and builds stable *character* entities
 from faces, body shots and voiceprints: someone recognised in clip 12 is the
@@ -121,14 +153,14 @@ setup:
 | Voiceprints | SpeechBrain `spkrec-ecapa-voxceleb` | HuggingFace cache; override with `PERSONOS_ECAPA_MODEL` / `PERSONOS_ECAPA_DIR` |
 | Multimodal understanding | none — remote API | `PERSONOS_MLLM_*` points at any MLLM endpoint |
 
-Behind the GFW or on an offline box: set `HF_ENDPOINT=https://hf-mirror.com`
+Behind the GFW or on an offline machine: set `HF_ENDPOINT=https://hf-mirror.com`
 for HuggingFace, or pre-download and point the `*_DIR` variables at local
 copies.
 
 ## Configuration
 
 Everything except the model endpoint is optional. Unset means a capability is
-off or degraded, never that the text path breaks.
+off or degraded — never that the text path breaks.
 
 | | Default | Unset means |
 |---|---|---|
@@ -152,16 +184,8 @@ MissingCapability: video understanding is unavailable: no multimodal model is co
   To enable it: set PERSONOS_MLLM_API_KEY and PERSONOS_MLLM_MODEL
 ```
 
-The rule is: **cannot do it at all → raise; did it partially → return and say
+The rule: **cannot do it at all → raise; did it partially → return and say
 so** in `result.warnings`. A missing optional capability never fails a write.
-
-## Examples
-
-One story in three chapters:
-[a week of conversation](examples/quickstart.py) (watch the profile build
-itself between days) · [with a photo](examples/images.py) ·
-[with video and person identity](examples/video.py). See
-[examples/README.md](examples/README.md) for what each needs and real output.
 
 ## API
 
@@ -176,9 +200,9 @@ m.reset(user_id=...)                           # delete one user's data
 ```
 
 **Writes are asynchronous by default.** `add()`/`end_session()` enqueue onto a
-per-session ordered queue (the same machinery the server deployment uses —
+per-session ordered queue — the same machinery the server deployment uses:
 FIFO per session, fair scheduling across sessions, backpressure when a session
-is overloaded) and return an `AddReceipt` immediately, so memory writes never
+is overloaded — and return an `AddReceipt` immediately, so memory writes never
 block your application's own work:
 
 ```python
@@ -195,8 +219,16 @@ cursor. A full queue raises `QueueBusy` — the same contract the HTTP API
 expresses as `503 + Retry-After`.
 
 Reads (`search`, `profile`, `trace`) are synchronous. There is no `AsyncMemory`
-yet, and rather than pretend, the honest workaround is
+yet; rather than pretend, the honest workaround is
 `await asyncio.to_thread(m.search, q)`.
+
+## Examples
+
+One story in three chapters:
+[a week of conversation](examples/quickstart.py) (watch the profile build
+itself between days) · [with a photo](examples/images.py) ·
+[with video and person identity](examples/video.py). See
+[examples/README.md](examples/README.md) for what each needs and real output.
 
 ## Running it as a service
 
@@ -215,8 +247,8 @@ Releases follow [RELEASE.md](RELEASE.md).
 ## Contributing
 
 Issues and PRs are welcome at
-[github.com/2049lab/personos](https://github.com/2049lab/personos). Run the
-suite with `pytest`; it needs no external services.
+[github.com/2049lab/personos](https://github.com/2049lab/personos). The test
+suite runs with `pytest` and needs no external services.
 
 ## License
 
