@@ -19,6 +19,11 @@ Two scoring conventions: answerer rule 7 is "trust the brief" (adopt the brief
 when it already answers the question and the materials support it), and the
 judge runs twice on each question — the Mem0 convention judges the answerer's
 output, and the product convention judges the R5 answer directly.
+
+Both functions take any ``ChatLLM`` — the judge model is a configuration
+choice (``PERSONOS_JUDGE_*``), not a property of the protocol. The prompts and
+the relative-time conversion below ARE the protocol: change them and the
+numbers are no longer comparable across runs.
 """
 
 from __future__ import annotations
@@ -27,7 +32,7 @@ import re
 from dataclasses import dataclass
 from datetime import date, timedelta
 
-from personos.providers.anthropic_compat import AnthropicChatLLM
+from personos.online.llm import ChatLLM
 
 # The mode-A answerer: treat what personos produced (the brief plus memories
 # grouped by cell) as materials and produce a short English answer. Structurally
@@ -94,7 +99,7 @@ _ANSWERER_SYS = (
 )
 
 
-def answer_mode_a(llm: AnthropicChatLLM, *, question: str, brief: str, mem_block: str) -> str:
+def answer_mode_a(llm: ChatLLM, *, question: str, brief: str, mem_block: str) -> str:
     user = (f"MEMORY BRIEF\n{brief or '(empty)'}\n\n"
             f"MEMORY MATERIALS\n{mem_block or '(no memory items)'}\n\n"
             f"QUESTION\n{question}")
@@ -237,7 +242,7 @@ class Verdict:
     raw: str
 
 
-def judge(llm: AnthropicChatLLM, *, question: str, gold: str, prediction: str) -> Verdict:
+def judge(llm: ChatLLM, *, question: str, gold: str, prediction: str) -> Verdict:
     # Convert relative times deterministically on both sides: common in the
     # gold answers, and the answerer occasionally emits "the weekend before X" too.
     gold = normalize_relative_times(str(gold))

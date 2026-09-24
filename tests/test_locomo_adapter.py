@@ -8,7 +8,7 @@ so the line count must not change.
 
 from __future__ import annotations
 
-from scripts.bench.locomo_adapter import _group_turns
+from scripts.bench.locomo import _group_turns
 
 
 def test_image_turn_inlines_caption_as_own_line():
