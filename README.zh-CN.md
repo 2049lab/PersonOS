@@ -48,6 +48,20 @@ print(m.search("我现在住在哪?", user_id="alice").ans.answer)
 |---|---|---|---|---|
 | 77.3% | 79.8% | 58.7% | 89.3% | **83.3%** |
 
+**[LongMemEval-S](https://github.com/xiaowu0162/LongMemEval)** —— 长期记忆
+基准(5 类问题 + abstention,共 500 题,每题 ~40 个 session 的合成用户)。
+评测脚本严格沿用官方判分协议(`get_anscheck_prompt` 六个分支 +
+abstention),可分多天断点续跑,详见
+[scripts/bench/README.md](scripts/bench/README.md#longmemeval-s)。
+
+| 知识更新 | 多会话 | 单会话 Assistant | 单会话 偏好 | 单会话 用户 | 时序推理 | **总分** |
+|---|---|---|---|---|---|---|
+| 91.7% | 76.9% | 98.2% | 43.3% | 89.1% | 76.4% | **80.6%** |
+
+总分 = 全 500 题答对 403 题;细分:**可答题** 381/470 = 81.1%(判官
+问「答对了吗」)、**abstention** 22/30 = 73.3%(判官问「识别为不可答
+了吗」)。
+
 **[M3-Bench-robot](https://github.com/bytedance-seed/m3-agent)** —— 机器人
 视角的长视频记忆基准(100 个视频,1,276 道题),与该基准的参考 agent 对比:
 

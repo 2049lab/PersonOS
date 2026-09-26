@@ -51,6 +51,22 @@ questions; adversarial questions excluded per community convention):
 |---|---|---|---|---|
 | 77.3% | 79.8% | 58.7% | 89.3% | **83.3%** |
 
+**[LongMemEval-S](https://github.com/xiaowu0162/LongMemEval)** — long-term
+memory under five question_types plus abstention; 500 questions, each its
+own ~40-session synthetic user. Official judge protocol
+(`get_anscheck_prompt`, six task branches + abstention) is followed verbatim.
+Run is fully reproducible and resumable across days — see
+[scripts/bench/README.md](scripts/bench/README.md#longmemeval-s).
+
+| Knowledge-update | Multi-session | Single-session Assistant | Single-session Preference | Single-session User | Temporal-reasoning | **Overall** |
+|---|---|---|---|---|---|---|
+| 91.7% | 76.9% | 98.2% | 43.3% | 89.1% | 76.4% | **80.6%** |
+
+Headline = 403/500 across all questions; broken down as
+**answerable** 381/470 = 81.1% (judge: "is the answer correct?") and
+**abstention** 22/30 = 73.3% (judge: "did the model identify it as
+unanswerable?").
+
 **[M3-Bench-robot](https://github.com/bytedance-seed/m3-agent)** — long-video
 memory from a robot's perspective (100 videos, 1,276 QA), against the
 benchmark's reference agent:
