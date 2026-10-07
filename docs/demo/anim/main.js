@@ -15,7 +15,9 @@ async function setup() {
   await document.fonts.ready;
   window.ready = true;
 }
+let PORTRAIT = null;                                      // { s, o }: draw Pebble alone on a cleared canvas (brand/banner renders)
 function draw() {
+  if (PORTRAIT) { clear(); randomSeed(7); noiseSeed(7); push(); translate(-W / 2, -H / 2); pebble(W / 2, H * .95, PORTRAIT.s, PORTRAIT.o); pop(); return; }
   if (!BUILDING && !BG.ready) return;
   OVER.length = 0;
   randomSeed(1000 + Math.floor(T * BOIL) + (BUILDING ? 0 : 0)); noiseSeed(77);
@@ -42,4 +44,5 @@ window.renderAt = async (t) => {
   ctx.globalCompositeOperation = 'multiply'; ctx.drawImage(grainC, 0, 0); ctx.globalCompositeOperation = 'source-over';
   return true;
 };
+window.renderPebble = async (s, o) => { T = 0; PORTRAIT = { s, o }; await redraw(); PORTRAIT = null; return drawingContext.canvas.toDataURL('image/png'); };
 window.gpuInfo = () => { const gl = drawingContext, e = gl.getExtension('WEBGL_debug_renderer_info'); return e ? gl.getParameter(e.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER); };

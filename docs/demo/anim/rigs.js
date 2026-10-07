@@ -216,9 +216,11 @@ function pebble(x, y, s, o = {}) {
   paint(bp, { wash: PEBBLE.palette.shell, fill: '#cfdcf0', fillOp: 70, tex: .5, border: .45, ink: PAL.ink, sw: sw * 1.0 });
   paint(ellPts(.9 * s, -1.3 * s, 1.9 * s, .8 * s, 14, 0, -.25), { wash: PEBBLE.palette.shellShade, washOp: 150, ink: null });
   paint(ellPts(-1.5 * s, -4.6 * s, .55 * s, .25 * s, 10, 0, -.6), { wash: '#ffffff', washOp: 200, ink: null });
+  if (!o.plain) {
   paint(ellPts(1.45 * s, -1.0 * s, .52 * s, .5 * s, 12), { wash: PAL.pumpkin, ink: PAL.ink, sw: sw * .6 });                    // a pumpkin sticker
   paint([[1.25 * s, -1.15 * s], [1.4 * s, -1.15 * s], [1.32 * s, -1.3 * s]], { wash: PAL.ink, ink: null }); paint([[1.5 * s, -1.15 * s], [1.65 * s, -1.15 * s], [1.57 * s, -1.3 * s]], { wash: PAL.ink, ink: null });
   inkLine([[1.2 * s, -.85 * s], [1.45 * s, -.7 * s], [1.7 * s, -.85 * s]], sw * .4, PAL.ink, 'inkfine', .5);
+  }
   arm(1, o.armR ?? o.arm ?? .55, o.handR ?? o.hand);
   // visor with one big lens
   push(); translate(0, -3.15 * s);
@@ -242,12 +244,14 @@ function pebble(x, y, s, o = {}) {
   for (const side of [-1, 1]) paint(ellPts(side * 1.95 * s, -2.1 * s, .38 * s, .22 * s, 10), { wash: PAL.pink, washOp: 140, ink: null });
   arm(-1, -99, null);                                                                          // (no-op placeholder keeps arm order explicit)
   // witch hat, tilted, with a band and a buckle
+  if (!o.plain) {
   push(); translate(-.9 * s, -5.45 * s); rotate(-.28 + Math.sin(T * 2.4) * .04);
   paint(ellPts(0, 0, 1.45 * s, .36 * s, 14), { wash: '#2f2447', ink: PAL.ink, sw: sw * .7 });
   paint([[-.8 * s, -.05 * s], [.8 * s, -.05 * s], [.35 * s, -1.9 * s], [.75 * s, -2.6 * s + Math.sin(T * 3) * .1 * s], [-.1 * s, -2.0 * s]], { wash: '#3a2d59', ink: PAL.ink, sw: sw * .8 });
   paint(rectPts(-.78 * s, -.55 * s, 1.56 * s, .34 * s, 0), { wash: PAL.pumpkin, ink: PAL.ink, sw: sw * .5 });
   paint(rectPts(-.14 * s, -.57 * s, .28 * s, .38 * s, 0), { wash: PAL.gold, ink: PAL.ink, sw: sw * .4 });
   pop();
+  }
   // antenna with a glowing bulb
   const sway = Math.sin(T * 2.6) * .25 + (o.antSway || 0), glowK = o.glow ?? .5, bx = 1.65 * s + sway * s, by = -6.1 * s;
   inkLine([[1.0 * s, -5.2 * s], [1.35 * s, -5.7 * s], [bx, by + .45 * s]], sw * .8, PAL.ink, 'ink', .6);

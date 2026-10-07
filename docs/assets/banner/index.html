@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PersonOS banner</title>
+<style>
+  @font-face { font-family: 'Inter'; src: url('../fonts/Inter-Variable.woff2') format('woff2'); font-weight: 100 900; }
+  @font-face { font-family: 'JetBrains Mono'; src: url('../fonts/JetBrainsMono-Variable.woff2') format('woff2'); font-weight: 100 800; }
+  @font-face { font-family: 'Caveat'; src: url('../../demo/anim/fonts/Caveat-Variable.woff2') format('woff2'); font-weight: 400 700; }
+  html, body { margin: 0; background: transparent; }
+  #banner {
+    position: relative; width: 1600px; height: 640px; overflow: hidden; border-radius: 28px;
+    background: #F3EBDC;
+    background-image:
+      radial-gradient(1200px 520px at 78% 48%, rgba(88, 199, 232, .18), transparent 60%),
+      radial-gradient(700px 400px at 12% 100%, rgba(242, 193, 74, .16), transparent 65%),
+      radial-gradient(rgba(43, 42, 51, .07) 1px, transparent 1.4px);
+    background-size: auto, auto, 26px 26px;
+    font-family: 'Inter', system-ui, sans-serif; color: #15161d; -webkit-font-smoothing: antialiased;
+    border: 1.5px solid rgba(43, 42, 51, .12); box-sizing: border-box;
+  }
+  .grain { position: absolute; inset: 0; mix-blend-mode: multiply; opacity: .55; pointer-events: none;
+           background-image: url('grain.png'); background-size: 320px 320px; }
+  .lockup { position: absolute; left: 76px; top: 64px; height: 64px; display: flex; align-items: center; gap: 18px; }
+  .lockup img { height: 64px; }
+  .lockup .word { font-weight: 600; font-size: 40px; letter-spacing: -.02em; color: #15161d; }
+  h1 { position: absolute; left: 76px; top: 190px; margin: 0; font-weight: 800; font-size: 104px; line-height: .98; letter-spacing: -.035em; width: 760px; }
+  h1 .who { color: #2C8FC0; }
+  .sub { position: absolute; left: 78px; top: 425px; width: 700px; font-size: 27px; line-height: 1.42; color: #4b4a55; font-weight: 450; letter-spacing: -.005em; }
+  .pip { position: absolute; left: 78px; top: 542px; display: inline-flex; align-items: center; gap: 12px;
+         background: #15161d; color: #F3EBDC; border-radius: 12px; padding: 12px 20px;
+         font-family: 'JetBrains Mono', monospace; font-size: 21px; font-weight: 500; }
+  .pip .d { color: #58C7E8; }
+  .pebble { position: absolute; right: 110px; bottom: 40px; height: 560px; filter: drop-shadow(0 18px 24px rgba(43,42,51,.18)); }
+</style>
+</head>
+<body>
+<div id="banner">
+  <div class="lockup"><img src="../brand/mark.svg" alt=""><span class="word">PersonOS</span></div>
+  <h1>Memory that knows <span class="who">who.</span></h1>
+  <div class="sub">Multimodal long-term memory for robots, smart glasses and agents. Video, images and conversations in — memory about people, by name, out.</div>
+  <div class="pip"><span class="d">$</span> pip install personos</div>
+  <img class="pebble" src="pebble.png" alt="">
+  <div class="grain"></div>
+</div>
+</body>
+</html>
