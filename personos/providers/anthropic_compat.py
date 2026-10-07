@@ -10,6 +10,7 @@ Requires ``pip install personos[anthropic]``.
 
 from __future__ import annotations
 
+import inspect
 import time
 
 from loguru import logger
@@ -48,6 +49,11 @@ class AnthropicChatLLM:
             timeout=timeout,
             max_retries=max_retries,
         )
+        # SDK 1.x dropped `temperature` (and top_p/top_k) from messages.create(); 0.x has it. The
+        # wire protocol still accepts the field, so on 1.x it travels via extra_body instead of
+        # raising "unexpected keyword argument" and degrading every LLM stage.
+        self._temperature_is_kwarg = "temperature" in inspect.signature(
+            self._client.messages.create).parameters
 
     @property
     def available(self) -> bool:
@@ -63,9 +69,10 @@ class AnthropicChatLLM:
         resp = self._create_with_rate_limit_retry(
             model=self.cfg.anthropic_model,
             max_tokens=max_tokens,
-            temperature=temperature,
             system=system or self._sdk.NOT_GIVEN,
             messages=rest,
+            **({"temperature": temperature} if self._temperature_is_kwarg
+               else {"extra_body": {"temperature": temperature}}),
         )
         # Text blocks only. A thinking block, if the model emits one, is not part
         # of the answer — and letting it through once turned a rate-limit error

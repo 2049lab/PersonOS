@@ -99,7 +99,10 @@ def chat_json(llm: ChatLLM, messages: list[dict], *, max_tokens: int,
                     f"  -- input(user) --\n{_user_content(msgs)}\n"
                     f"  -- output(raw) --\n{raw}")
         try:
-            return json.loads(strip_fences(raw)), raw
+            # strict=False: models routinely put a literal newline or tab inside a string value
+            # (multi-line episode / answer text). The structure is otherwise valid, and rejecting it
+            # cost a whole stage (unchained atoms, a raw-text answer) even after the retries.
+            return json.loads(strip_fences(raw), strict=False), raw
         except json.JSONDecodeError as e:
             if attempt == num_tries:
                 err = ValueError(f"LLM output is not valid JSON (still failing after {num_tries} tries): {e}")

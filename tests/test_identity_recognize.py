@@ -40,6 +40,21 @@ def test_parse_verdicts_bind_and_new():
     assert verdicts == {"S1": "char_a", "S2": NEW} and not issues
 
 
+def test_parse_verdicts_tolerates_echoed_labels():
+    """The prompt renders 'QUERY S1:' / 'CHARACTER id:'; models echo the label back into the BIND line."""
+    raw = "BIND|QUERY S1|NEW\nBIND|query S2:|char_a\nBIND|S3|CHARACTER char_a:\nEND"
+    verdicts, issues, defaulted = parse_verdicts_detailed(
+        raw, cast_ids=["S1", "S2", "S3"], candidate_ids=["char_a"])
+    assert verdicts == {"S1": NEW, "S2": "char_a", "S3": "char_a"}
+    assert not issues and not defaulted
+
+
+def test_parse_verdicts_unknown_query_still_flagged():
+    verdicts, issues, defaulted = parse_verdicts_detailed(
+        "BIND|QUERY S9|NEW\nEND", cast_ids=["S1"], candidate_ids=[])
+    assert any("unknown query" in i for i in issues) and "S1" in defaulted and verdicts["S1"] == NEW
+
+
 def test_parse_verdicts_unknown_target_defaults_new():
     raw = "BIND|S1|ghost\nEND"                               # target outside the allow list
     verdicts, issues, defaulted = parse_verdicts_detailed(

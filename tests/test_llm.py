@@ -87,3 +87,11 @@ def test_strip_fences_leaves_unrelated_text_alone():
 
     assert strip_fences('{"note": "we use <think> tags"}') == '{"note": "we use <think> tags"}'
     assert strip_fences('{"ok": 1}') == '{"ok": 1}'
+
+
+def test_chat_json_accepts_raw_newlines_inside_strings():
+    """A literal newline inside a JSON string is invalid under strict JSON but is exactly what models emit
+    for multi-line text; it must parse on the first try rather than burn the retries and degrade the stage."""
+    llm = QueueLLM('{"episode": "line one\nline two", "ops": []}')
+    data, _ = chat_json(llm, [{"role": "user", "content": "q"}], max_tokens=10, num_tries=2)
+    assert data["episode"] == "line one\nline two" and len(llm.calls) == 1

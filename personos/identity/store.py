@@ -118,8 +118,8 @@ class CharacterStore:
 
     def mark_wearer(self, character_id: str) -> None:
         """Final adjudication landed the SW chain on this profile, so mark it as
-        having been a wearer. This is not a singleton: hand the device to someone
-        else and there will be several.
+        having been a wearer. commit_session keeps this to one wearer per user (the
+        device itself); older data may still hold several.
         """
         self.db.execute(
             "UPDATE characters SET is_wearer=1, updated_at=%s WHERE user_id=%s AND id=%s",

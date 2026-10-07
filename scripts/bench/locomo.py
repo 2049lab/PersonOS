@@ -58,6 +58,9 @@ from personos.online.recall_flow import run_recall
 from personos.online.rerank import NoopReranker, ScoringReranker
 from personos.online.retrieval import cell_lead
 from personos.online.trust import evidence_entries
+from personos.online.profile_consolidate import run_user_consolidation
+from personos.online.profile_render import render as render_profile
+from personos.storage.profile_store import ProfileStore
 from personos.online.write_path import SessionWriter
 from personos.providers.registry import build as build_provider
 from personos.storage.atom_store import AtomStore
@@ -603,8 +606,13 @@ def run_conv(lc: LocomoConversation, args, run_dir: Path, llm, judge_llm,
     elif have:
         for t in ("evidence", "atoms", "atom_chains", "memcells", "session_context"):
             db.execute(f"DELETE FROM {t} WHERE user_id=%s", (uid,))
+        # The profile is derived from those same tables, so clearing them
+        # without clearing profile_versions would let a stale snapshot leak into
+        # the next run.
+        db.execute("DELETE FROM profile_versions WHERE user_id=%s", (uid,))
     ev_store, atoms = EvidenceStore(db, uid), AtomStore(db, uid)
     cells = CellStore(db, uid)
+    profiles = ProfileStore(db, uid)
 
     trace: dict = {"meta": {**meta, "conv": lc.sample_id, "n_sessions": args.n_sessions}}
 
@@ -625,6 +633,31 @@ def run_conv(lc: LocomoConversation, args, run_dir: Path, llm, judge_llm,
             print(f"  s{s['session']} @{s['dt'][:10]}: {len(s['exchanges'])} exchanges -> "
                   f"{len(s['closed_cells'])} cells / {s['atoms_total']} atoms total ({s['secs']}s)")
 
+    # -- Optionally build the per-user profile once, before answering. Today is
+    #    pinned to the last loaded session so any relative phrasing in the
+    #    profile stays temporally aligned with the question time. --
+    profile_full = profile_traits = ""
+    if args.with_profile:
+        if profiles.current() is None or not args.skip_ingest:
+            t1 = time.time()
+            new_version = run_user_consolidation(
+                llm, cells_store=cells, atoms_store=atoms,
+                profile_store=profiles, today=last_dt.date())
+            print(f"profile consolidated in {time.time()-t1:.0f}s"
+                  + (f" (v{new_version})" if new_version else " (no-op: nothing to consolidate)"))
+        ver = profiles.current()
+        if ver is not None:
+            profile_full = render_profile(ver.profile, mode="full")
+            profile_traits = render_profile(ver.profile, mode="traits")
+            print(f"profile v{ver.version} ready "
+                  f"({len(profile_full)} chars full / {len(profile_traits)} chars traits)")
+        else:
+            print("profile: empty (no cells to summarize)")
+        trace["meta"]["profile"] = (
+            f"on (v{ver.version})" if ver is not None else "on (empty)")
+    else:
+        trace["meta"]["profile"] = "off"
+
     # Load only: write a load trace for inspection and stop before answering, so
     # a batch can fill several conversations first and answer them together.
     if args.ingest_only:
@@ -633,7 +666,8 @@ def run_conv(lc: LocomoConversation, args, run_dir: Path, llm, judge_llm,
         print(f"[ingest-only] {lc.sample_id} loaded: user={uid} atoms={n_atoms} cells={n_cells}")
         out = run_dir / f"{lc.sample_id}.ingest.json"
         out.write_text(json.dumps({"meta": trace["meta"], "ingest": trace["ingest"],
-                                   "atoms": n_atoms, "cells": n_cells},
+                                   "atoms": n_atoms, "cells": n_cells,
+                                   "profile_chars": len(profile_full)},
                                   ensure_ascii=False, indent=1))
         print(f"load trace written to {out}")
         return trace
@@ -670,7 +704,8 @@ def run_conv(lc: LocomoConversation, args, run_dir: Path, llm, judge_llm,
             try:
                 o = run_recall(llm, embedder, atoms, cells, ev_store,
                                session_id=f"{lc.sample_id}-qa-{i}", query=qa.question,
-                               now_dt=last_dt, mode=args.mode, reranker=reranker)
+                               now_dt=last_dt, mode=args.mode, reranker=reranker,
+                               profile_full=profile_full, profile_traits=profile_traits)
                 if o.deep and not o.ranked:
                     groups = [(c, atoms.list_by_cell(c.id))
                               for c in (cells.get(cid) for cid in (o.ans.cited_cells
@@ -810,6 +845,10 @@ def main():
     ap.add_argument("--questions-file", default="",
                     help="a JSON array file of exact question texts; run only those questions, "
                          "bypassing pick_diverse sampling. Useful for small regressions.")
+    ap.add_argument("--with-profile", action="store_true",
+                    help="consolidate the per-user profile before answering and feed it into "
+                         "R0 rewrite + the deep track (profile_full) and R5 drafting (profile_traits). "
+                         "Off by default to match Mem0-protocol comparability.")
     args = ap.parse_args()
 
     if args.download:
@@ -855,6 +894,7 @@ def main():
                         "atoms hit in the top 20 reranked cells, grouped by cell, "
                         "under trust-the-brief; judge_r5 scores R5 directly)",
             "chain": "step 1 write + step 2 fast path",
+            "profile": "on" if args.with_profile else "off (Mem0 protocol default)",
             "run_at": time.strftime("%Y-%m-%d %H:%M"), "data": args.data}
     try:   # the short git hash goes into meta so a report traces back to a code version
         import subprocess

@@ -160,6 +160,36 @@ def test_repair_fixes_violation_and_feeds_contradictions(monkeypatch):
     assert out.lines == s.lines, "lines must be preserved exactly"
 
 
+_ROSTER = [{"cast_id": "S1", "name": "Bob", "desc": "man in a denim jacket", "face_b64": "AAAA", "body_b64": "BBBB"},
+           {"cast_id": "S2", "desc": "woman in a pink sweatshirt"}]
+
+
+def test_repair_prompt_renders_list_roster_without_image_refs():
+    """video_ingest hands over roster cards as dicts; concatenating them as str used to raise TypeError."""
+    p = repair.build_repair_prompt(_script(cont={"P1": "S1", "P2": "S1"}),
+                                   inspect_script(_script(cont={"P1": "S1", "P2": "S1"})), _ROSTER)
+    assert "cast S1: name=Bob appearance=man in a denim jacket" in p
+    assert "cast S2: appearance=woman in a pink sweatshirt" in p
+    assert "image #" not in p, "the repair call carries no images, so the text must not point at any"
+    assert "AAAA" not in p
+
+
+def test_repair_prompt_still_accepts_str_roster():
+    p = repair.build_repair_prompt(_script(), [], "S1 is Bob")
+    assert "S1 is Bob" in p
+
+
+def test_repair_runs_with_list_roster(monkeypatch):
+    """Regression: with a non-empty roster (every clip after the first) the repair call used to crash,
+    be swallowed, and silently fall back to degrade."""
+    monkeypatch.setattr(repair, "MODE", "degrade")
+    omni = _Omni([_FIXED])
+    out, rep = repair.enforce(_script(cont={"P1": "S1", "P2": "S1"}), omni=omni, clip_url="https://x/c.mp4",
+                              roster_cards=_ROSTER, duration_sec=60.0)
+    assert rep["attempts"] >= 1 and rep["degraded"] is False
+    assert out.cont == {"P1": "S1", "P2": "none"} and "cast S1" in omni.prompts[0]
+
+
 def test_repair_batches_all_violations_in_one_call(monkeypatch):
     """Several rules fire at once -> **a single call** hands over all contradictions together,
     rather than fixing them one at a time."""

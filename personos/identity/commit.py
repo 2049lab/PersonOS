@@ -13,9 +13,11 @@ rest degrade to NEW — and then settled per canonical chain. A NEW profile is
 created only at this point, and persisting assets, merging names and learning into
 the cloud all happen in one pass.
 
-The wearer goes through the same adjudication on the SW chain, where the
-voiceprint is the only biometric available. The profile it settles on becomes this
-session's wearer pointer and is marked is_wearer.
+The wearer is decided in code, not by the model: the camera wearer is the device
+itself, so a user has at most one wearer character. The SW chain is therefore kept
+out of the adjudication query list, and settles onto the user's existing wearer if
+there is one (otherwise it creates the first). That profile becomes this session's
+wearer pointer and is marked is_wearer.
 
 If the adjudication call fails, each chain falls back to its most recent
 successful evaluation, that is, its chain hypothesis. A chain that crashes before
@@ -34,6 +36,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+import numpy as np
 from loguru import logger
 
 from personos.identity.chains import ChainBook
@@ -53,6 +56,17 @@ FINAL_CLIP_INDEX = -1
 # Too large a batch degrades the model's attention — we observed it self-binding
 # every query in one — so we split into batches to keep attention intact.
 FINAL_REVIEW_BATCH_SIZE = 12
+
+# The SW chain always binds to the user's one wearer, so if the screenplay model labels a human's
+# off-screen speech as SW, that voice would be learned into the wearer. A staged SW voice sample is
+# therefore enrolled only if it is not clearly a different speaker from the wearer's existing voices.
+# Calibrated on ECAPA embeddings of the M3-Bench demo runs (3 wearers, 20+ human characters): a wearer
+# sample's best cosine to the wearer's other samples was >= 0.14 (n=19), while a human sample's best
+# cosine to a wearer set had median 0.15 and p90 0.33, so the two distributions overlap heavily on 1-4s
+# clips and nothing here can separate speakers reliably. 0.10 keeps 0.04 of margin under every genuine
+# sample we measured and still rejects about a quarter of the human samples (24%, n=327); it is a
+# subtraction-only safety net, not a speaker verifier.
+WEARER_VOICE_MIN_COS = 0.10
 
 # The two general rules (chain ids and same-frame exclusivity) are already in
 # recognize.PROMPT_HEADER. This trailing note adds three things specific to final
@@ -79,12 +93,19 @@ def commit_session(store: CharacterStore, clouds: CloudEngine, registry: AnchorR
     Returns by_chain, registered, verdicts, fallbacks and wearer.
     """
     report: dict[str, Any] = {"by_chain": {}, "registered": [], "verdicts": {}, "fallbacks": {}}
-    chains = book.store.pending_chains(session_id)
-    if not chains:
+    pending = book.store.pending_chains(session_id)
+    if not pending:
         return report
+    # SW is settled below without asking the model. With only a voiceprint to go on, the
+    # model voted NEW for the same device in every new session, minting a second wearer.
+    chains = [c for c in pending if c["cast_id"] != WEARER_CAST_ID]
 
-    verdicts, issues, defaulted = _final_arbitration(
-        store, registry, book, chains, session_id=session_id, omni=omni, media_store=media_store)
+    verdicts: Optional[dict[str, str]] = {}
+    issues: list[str] = []
+    defaulted: set[str] = set()
+    if chains:
+        verdicts, issues, defaulted = _final_arbitration(
+            store, registry, book, chains, session_id=session_id, omni=omni, media_store=media_store)
     if verdicts is None:
         # The call failed, so every chain falls back to its current hypothesis,
         # which is its most recent successful evaluation. NEW stays NEW.
@@ -132,7 +153,10 @@ def commit_session(store: CharacterStore, clouds: CloudEngine, registry: AnchorR
             aliases = book.store.aliases_of(ref)
             refs = [ref, *aliases]
             final = chain["hypothesis"]
-            if final != "NEW" and store.get_character(final) is None:
+            if chain["cast_id"] == WEARER_CAST_ID:
+                final = _existing_wearer(store) or "NEW"
+                report["verdicts"][ref] = final
+            elif final != "NEW" and store.get_character(final) is None:
                 logger.warning(f"chain {ref} hypothesis {final} does not exist -> NEW")
                 final = "NEW"
             if final == "NEW":
@@ -147,7 +171,8 @@ def commit_session(store: CharacterStore, clouds: CloudEngine, registry: AnchorR
             # The winner's staged assets become character_assets rows and are
             # learned into the cloud. We collect across ref plus its aliases in one
             # go, so two chains merging into one profile do not learn it twice.
-            self_enroll_staged(store, clouds, book, refs, final, session_id)
+            self_enroll_staged(store, clouds, book, refs, final, session_id,
+                               guard_wearer_voice=chain["cast_id"] == WEARER_CAST_ID)
             # Merge names: the chain's session-scoped name onto the persistent profile.
             for r in refs:
                 for name in book.store.names_for(r):
@@ -164,13 +189,33 @@ def commit_session(store: CharacterStore, clouds: CloudEngine, registry: AnchorR
     return report
 
 
+def _existing_wearer(store: CharacterStore) -> Optional[str]:
+    """The user's wearer character, if any. Several can only come from legacy data (before the
+    wearer was pinned in code); bind to the oldest — ULIDs sort by creation time — and leave
+    merging the extras to a deliberate clean-up rather than doing it implicitly here."""
+    wearers = sorted(c["id"] for c in store.list_active_characters(include_wearer=True) if c["is_wearer"])
+    if len(wearers) > 1:
+        logger.warning(f"user {store.user_id} has {len(wearers)} wearer characters {wearers}; "
+                       f"binding the SW chain to the oldest {wearers[0]}")
+    return wearers[0] if wearers else None
+
+
+def _cos(a: np.ndarray, b: np.ndarray) -> float:
+    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9))
+
+
 def self_enroll_staged(store: CharacterStore, clouds: CloudEngine, book: ChainBook,
-                       refs: list[str], final: str, session_id: str) -> None:
+                       refs: list[str], final: str, session_id: str,
+                       *, guard_wearer_voice: bool = False) -> None:
     """Turn the staged assets of a chain and its aliases into persistent assets and
     learn them into the cloud.
 
-    The oss_key already points at OSS, so it is reused rather than re-uploaded.
+    The oss_key already points at OSS, so it is reused rather than re-uploaded. With
+    guard_wearer_voice, a voice sample far from every voice the wearer already has is skipped
+    (see WEARER_VOICE_MIN_COS); the first session, with no existing voices, enrols everything.
     """
+    known_voices = ([a["embedding"] for a in store.active_assets(final, "voice") if a["embedding"] is not None]
+                    if guard_wearer_voice else [])
     for r in refs:
         for a in book.store.active_staged(r, "face"):
             emb = a.get("embedding")
@@ -189,6 +234,12 @@ def self_enroll_staged(store: CharacterStore, clouds: CloudEngine, book: ChainBo
             emb = a.get("embedding")
             if emb is None:
                 continue
+            if known_voices:
+                best = max(_cos(emb, k) for k in known_voices)
+                if best < WEARER_VOICE_MIN_COS:
+                    logger.info(f"wearer voice rejected cos={best:.2f} session={session_id} clip={a.get('clip')} "
+                                f"t0={a.get('t0')} (below {WEARER_VOICE_MIN_COS})")
+                    continue
             store.add_asset(final, "voice", quality=float(a["q"]), embedding=emb,
                             payload={"oss_key": a.get("oss_key", ""), "t0": a.get("t0"),
                                      "t1": a.get("t1"), "session": a.get("session", session_id),

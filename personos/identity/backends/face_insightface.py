@@ -132,7 +132,8 @@ class InsightFaceDetector:
             emb = emb / (np.linalg.norm(emb) + 1e-9)
             out.append(FaceDet(bbox=(x1, y1, x2, y2), crop_b64=_encode_crop(crop),
                                det_score=float(f.det_score), blur_score=_laplacian_blur(crop),
-                               embedding=emb))
+                               embedding=emb,
+                               kps=(np.asarray(f.kps, dtype=np.float32) if getattr(f, "kps", None) is not None else None)))
         return out
 
 

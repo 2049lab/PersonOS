@@ -21,3 +21,6 @@ class FaceDet:
     embedding: np.ndarray        # normalized vector (512-d for faces)
     quality: float = -1.0
     norm: float = -1.0
+    # 5 landmarks in frame pixels (left eye, right eye, nose, left mouth, right mouth), when the
+    # detector provides them. harvest uses them to refuse side / back-of-head detections.
+    kps: np.ndarray | None = None

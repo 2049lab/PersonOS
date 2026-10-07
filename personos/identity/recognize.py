@@ -39,6 +39,14 @@ from personos.identity.types import CandidateCard, CastEvidence
 NEW = "NEW"
 
 _BIND_RE = re.compile(r"^BIND\|", re.IGNORECASE)
+# The prompt labels ids as "QUERY S1:" / "CHARACTER char_x:", and models echo the
+# label back (BIND|QUERY S1|NEW). Ids never contain spaces, so the label can be
+# stripped safely; without this every verdict was voided as an unknown query.
+_ID_LABEL_RE = re.compile(r"^(?:QUERY|CHARACTER)\s+", re.IGNORECASE)
+
+
+def _norm_id(raw: str) -> str:
+    return _ID_LABEL_RE.sub("", raw.strip()).rstrip(":").strip()
 
 PROMPT_HEADER = """You are identifying people across separate recordings.
 For each QUERY person (seen in the current recording) decide whether they are one of the
@@ -174,7 +182,7 @@ def parse_verdicts_detailed(raw: str, *, cast_ids: list[str], candidate_ids: lis
         if len(parts) < 3:
             issues.append(f"bad BIND line: {line!r}")
             continue
-        cast_id, target = parts[1], parts[2]
+        cast_id, target = _norm_id(parts[1]), _norm_id(parts[2])
         if cast_id not in cast_ids:
             issues.append(f"BIND for unknown query {cast_id!r}")
             continue

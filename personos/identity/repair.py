@@ -50,7 +50,7 @@ from personos.identity.inspect import (
 )
 from personos.identity.screenplay import (
     ENV_WHO, WEARER_CAST_ID, CastDecl, ClipScript, Nomination, VoiceRange,
-    parse_clip_output,
+    _render_roster, parse_clip_output,
 )
 
 MAX_REPAIR_ATTEMPTS = 2
@@ -107,14 +107,29 @@ def _render_lines_context(script: ClipScript, cap: int = 40) -> str:
                      for l in script.lines[:cap])
 
 
+def _roster_text(roster_cards: "list[dict] | str | None") -> str:
+    """The caller (video_ingest) holds the roster as card dicts; a plain string is still accepted.
+
+    The repair call sends only the video, so the card images are dropped before rendering —
+    otherwise the text would point at "image #N" attachments that do not exist.
+    """
+    if not roster_cards:
+        return ""
+    if isinstance(roster_cards, str):
+        return "ROSTER (people already seen earlier in this recording):\n" + roster_cards
+    text_only = [{k: v for k, v in c.items() if k not in ("face_b64", "body_b64")} for c in roster_cards]
+    return _render_roster(text_only)[0]
+
+
 def build_repair_prompt(script: ClipScript, violations: list[Violation],
-                        roster_cards: str = "") -> str:
+                        roster_cards: "list[dict] | str | None" = "") -> str:
     """Assemble [rule header + roster + previous output + kept lines + contradiction
     list] — every problem handed over at once.
     """
     blocks = [_HEADER]
-    if roster_cards:
-        blocks.append("ROSTER (people already seen earlier in this recording):\n" + roster_cards)
+    roster = _roster_text(roster_cards)
+    if roster:
+        blocks.append(roster)
     blocks.append("YOUR PREVIOUS RECORDS:\n" + _render_cast_records(script))
     blocks.append("KEPT LINE RECORDS (context only — do NOT re-output):\n"
                   + _render_lines_context(script))
@@ -228,7 +243,7 @@ def degrade(script: ClipScript, violations: list[Violation]) -> ClipScript:
 
 
 def enforce(script: ClipScript, *, omni: Any = None, clip_url: str = "",
-            roster_cards: str = "", duration_sec: Optional[float] = None,
+            roster_cards: "list[dict] | str | None" = "", duration_sec: Optional[float] = None,
             session_id: str = "", clip_index: int = 0) -> tuple[ClipScript, dict]:
     """Detect everything, repair in one pass (at most two rounds), then degrade
     conservatively. Returns (screenplay, report).
@@ -252,7 +267,7 @@ def enforce(script: ClipScript, *, omni: Any = None, clip_url: str = "",
 
 
 def _enforce(script: ClipScript, rep: dict, *, omni: Any, clip_url: str,
-             roster_cards: str, duration_sec: Optional[float]) -> tuple[ClipScript, dict]:
+             roster_cards: "list[dict] | str | None", duration_sec: Optional[float]) -> tuple[ClipScript, dict]:
     violations = inspect_script(script)
     rep["found"] = _by_rule(violations)
     if not violations:
