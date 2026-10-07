@@ -1,0 +1,818 @@
+{
+ "says": [
+  {
+   "id": "coming",
+   "speaker": "pebble",
+   "also": [],
+   "label": null,
+   "text": "Coming!",
+   "start": 5.3,
+   "end": 7.9,
+   "offscreen": false
+  },
+  {
+   "id": "trick",
+   "speaker": "mia",
+   "also": [],
+   "label": null,
+   "text": "Trick or treat!",
+   "start": 11.2,
+   "end": 13.799999999999999,
+   "offscreen": false
+  },
+  {
+   "id": "whoa",
+   "speaker": "leo",
+   "also": [],
+   "label": null,
+   "text": "Whoa… Mia, the candy's over there!",
+   "start": 14.4,
+   "end": 17.6,
+   "offscreen": false
+  },
+  {
+   "id": "mine",
+   "speaker": "mia",
+   "also": [],
+   "label": null,
+   "text": "Mine!",
+   "start": 18.2,
+   "end": 20.8,
+   "offscreen": false
+  },
+  {
+   "id": "catch",
+   "speaker": "sam",
+   "also": [],
+   "label": null,
+   "text": "Leo, catch!",
+   "start": 21.4,
+   "end": 24,
+   "offscreen": false
+  },
+  {
+   "id": "oof",
+   "speaker": "leo",
+   "also": [],
+   "label": null,
+   "text": "Oof!",
+   "start": 24.6,
+   "end": 27.200000000000003,
+   "offscreen": false
+  },
+  {
+   "id": "hehe",
+   "speaker": "sam",
+   "also": [],
+   "label": null,
+   "text": "Hehe — I'm Sam, by the way.",
+   "start": 27.8,
+   "end": 30.8,
+   "offscreen": false
+  },
+  {
+   "id": "shh",
+   "speaker": "mia",
+   "also": [],
+   "label": null,
+   "text": "Shh — Biscuit's sleeping.",
+   "start": 31.2,
+   "end": 34,
+   "offscreen": false
+  },
+  {
+   "id": "mumrule",
+   "speaker": "mum",
+   "also": [],
+   "label": null,
+   "text": "One candy each tonight — the rest is for tomorrow!",
+   "start": 37,
+   "end": 40.4,
+   "offscreen": false
+  },
+  {
+   "id": "groan",
+   "speaker": "mia",
+   "also": [
+    "leo",
+    "sam"
+   ],
+   "label": "Mia, Leo, Sam",
+   "text": "Awww…",
+   "start": 41,
+   "end": 43.6,
+   "offscreen": false
+  },
+  {
+   "id": "costume",
+   "speaker": "mia",
+   "also": [],
+   "label": null,
+   "text": "Costume time!",
+   "start": 45.8,
+   "end": 48.4,
+   "offscreen": false
+  },
+  {
+   "id": "boo",
+   "speaker": "sam",
+   "also": [],
+   "label": null,
+   "text": "Boooo!",
+   "start": 52,
+   "end": 54.6,
+   "offscreen": false
+  },
+  {
+   "id": "arf",
+   "speaker": "biscuit",
+   "also": [],
+   "label": null,
+   "text": "Arf!",
+   "start": 55.2,
+   "end": 57.7,
+   "offscreen": false
+  },
+  {
+   "id": "ketchup",
+   "speaker": "leo",
+   "also": [],
+   "label": null,
+   "text": "Aw, ketchup! I can't see a thing in this.",
+   "start": 58,
+   "end": 61.2,
+   "offscreen": false
+  },
+  {
+   "id": "sticky",
+   "speaker": "leo",
+   "also": [],
+   "label": null,
+   "text": "Ew, it's all sticky! I'll put it back on later.",
+   "start": 61.8,
+   "end": 64.6,
+   "offscreen": false
+  },
+  {
+   "id": "eek",
+   "speaker": "sam",
+   "also": [],
+   "label": null,
+   "text": "Eek! It's dark!",
+   "start": 66.2,
+   "end": 68.8,
+   "offscreen": false
+  },
+  {
+   "id": "oj",
+   "speaker": "leo",
+   "also": [],
+   "label": null,
+   "text": "Do we have orange juice?",
+   "start": 76.2,
+   "end": 78.8,
+   "offscreen": true
+  },
+  {
+   "id": "giggle",
+   "speaker": "mia",
+   "also": [],
+   "label": null,
+   "text": "Hehehe…",
+   "start": 79.4,
+   "end": 82,
+   "offscreen": false
+  },
+  {
+   "id": "oneforme",
+   "speaker": "mia",
+   "also": [],
+   "label": "Mia (whisper)",
+   "text": "One for me… one more for me…",
+   "start": 84.2,
+   "end": 87.2,
+   "offscreen": false
+  },
+  {
+   "id": "who1",
+   "speaker": "mum",
+   "also": [],
+   "label": null,
+   "text": "Who ate ALL the candy?!",
+   "start": 113.8,
+   "end": 116.39999999999999,
+   "offscreen": false
+  },
+  {
+   "id": "sheet",
+   "speaker": "mum",
+   "also": [],
+   "label": null,
+   "text": "Candy wrappers stuck all over YOUR ketchup sheet, Leo!",
+   "start": 117,
+   "end": 120.4,
+   "offscreen": false
+  },
+  {
+   "id": "wasnt",
+   "speaker": "leo",
+   "also": [],
+   "label": null,
+   "text": "It wasn't me!",
+   "start": 121,
+   "end": 123.5,
+   "offscreen": false
+  },
+  {
+   "id": "notmeeither",
+   "speaker": "sam",
+   "also": [],
+   "label": null,
+   "text": "Not me either!",
+   "start": 124.5,
+   "end": 127.1,
+   "offscreen": false
+  },
+  {
+   "id": "biscuit?",
+   "speaker": "mia",
+   "also": [],
+   "label": null,
+   "text": "Must've been… Biscuit?",
+   "start": 127.7,
+   "end": 130.5,
+   "offscreen": false
+  },
+  {
+   "id": "woof?",
+   "speaker": "biscuit",
+   "also": [],
+   "label": null,
+   "text": "Woof?!",
+   "start": 131.1,
+   "end": 133.6,
+   "offscreen": false
+  },
+  {
+   "id": "mum2",
+   "speaker": "mum",
+   "also": [],
+   "label": null,
+   "text": "Pebble, you saw everything. Who was it?",
+   "start": 134.2,
+   "end": 137,
+   "offscreen": false
+  },
+  {
+   "id": "answer2",
+   "speaker": "pebble",
+   "also": [],
+   "label": null,
+   "text": "It was Mia. In the blackout she put on Leo's ketchup sheet — but her giggle and pink sneakers gave her away.",
+   "start": 137.6,
+   "end": 144.6,
+   "offscreen": false
+  },
+  {
+   "id": "happy",
+   "speaker": "mia",
+   "also": [],
+   "label": null,
+   "text": "…Hehe. Happy Halloween?",
+   "start": 148.6,
+   "end": 151.4,
+   "offscreen": false
+  },
+  {
+   "id": "woof",
+   "speaker": "biscuit",
+   "also": [],
+   "label": null,
+   "text": "Woof!",
+   "start": 152,
+   "end": 154.5,
+   "offscreen": false
+  }
+ ],
+ "events": [
+  {
+   "t": 2.35,
+   "name": "page_turn_cover"
+  },
+  {
+   "t": 3.9,
+   "name": "card_appear",
+   "card": "mum"
+  },
+  {
+   "t": 3.9,
+   "name": "Mum",
+   "card": "mum"
+  },
+  {
+   "t": 4.1,
+   "name": "script_act",
+   "text": "(doorbell rings)"
+  },
+  {
+   "t": 8.5,
+   "name": "door_burst"
+  },
+  {
+   "t": 9.6,
+   "name": "bell"
+  },
+  {
+   "t": 10,
+   "name": "script_act",
+   "text": "(three kids burst in)"
+  },
+  {
+   "t": 10,
+   "name": "card_appear",
+   "card": "mia"
+  },
+  {
+   "t": 10,
+   "name": "chip_land",
+   "chip": "P1",
+   "card": "mia"
+  },
+  {
+   "t": 10.3,
+   "name": "card_appear",
+   "card": "leo"
+  },
+  {
+   "t": 10.3,
+   "name": "chip_land",
+   "chip": "P2",
+   "card": "leo"
+  },
+  {
+   "t": 10.6,
+   "name": "card_appear",
+   "card": "sam"
+  },
+  {
+   "t": 10.6,
+   "name": "chip_land",
+   "chip": "P3",
+   "card": "sam"
+  },
+  {
+   "t": 17,
+   "name": "Mia?",
+   "card": "mia"
+  },
+  {
+   "t": 18.5,
+   "name": "script_act",
+   "text": "(P1 runs to the candy bowl)"
+  },
+  {
+   "t": 22.1,
+   "name": "script_act",
+   "text": "(P3 tosses a candy to P2)"
+  },
+  {
+   "t": 22.5,
+   "name": "bell"
+  },
+  {
+   "t": 23.4,
+   "name": "Leo?",
+   "card": "leo"
+  },
+  {
+   "t": 24.9,
+   "name": "script_act",
+   "text": "(P2 trips over the rug)"
+  },
+  {
+   "t": 26.9,
+   "name": "Leo",
+   "card": "leo"
+  },
+  {
+   "t": 28,
+   "name": "bell"
+  },
+  {
+   "t": 30,
+   "name": "Sam",
+   "card": "sam"
+  },
+  {
+   "t": 30.5,
+   "name": "snore"
+  },
+  {
+   "t": 33.3,
+   "name": "card_appear",
+   "card": "biscuit"
+  },
+  {
+   "t": 33.3,
+   "name": "Biscuit?",
+   "card": "biscuit"
+  },
+  {
+   "t": 33.3,
+   "name": "chip_land",
+   "chip": "P4",
+   "card": "biscuit"
+  },
+  {
+   "t": 33.6,
+   "name": "script_act",
+   "text": "(a dog sleeps in the basket)"
+  },
+  {
+   "t": 33.6,
+   "name": "Mia",
+   "card": "mia"
+  },
+  {
+   "t": 36.4,
+   "name": "bell"
+  },
+  {
+   "t": 37.2,
+   "name": "chip_fly",
+   "chip": "P5",
+   "to": "mum"
+  },
+  {
+   "t": 37.9,
+   "name": "chip_land",
+   "chip": "P5",
+   "card": "mum"
+  },
+  {
+   "t": 38.6,
+   "name": "script_act",
+   "text": "(P5 puts hot dogs and ketchup on the table)"
+  },
+  {
+   "t": 41,
+   "name": "script_act",
+   "text": "(P1 P2 P3 groan)"
+  },
+  {
+   "t": 42.3,
+   "name": "script_act",
+   "text": "(P5 leaves)"
+  },
+  {
+   "t": 44.4,
+   "name": "script_act",
+   "text": "(P4 leaves the basket)"
+  },
+  {
+   "t": 47.8,
+   "name": "sheets_toss"
+  },
+  {
+   "t": 48.9,
+   "name": "script_act",
+   "text": "(P1 P2 P3 put on white sheets)"
+  },
+  {
+   "t": 49.4,
+   "name": "ghost_poof"
+  },
+  {
+   "t": 51,
+   "name": "script_act",
+   "text": "(P6, a small ghost, appears)"
+  },
+  {
+   "t": 51.1,
+   "name": "card_appear",
+   "card": "p6"
+  },
+  {
+   "t": 51.1,
+   "name": "chip_land",
+   "chip": "P6",
+   "card": "p6"
+  },
+  {
+   "t": 52.2,
+   "name": "bell"
+  },
+  {
+   "t": 56,
+   "name": "chip_fly",
+   "chip": "P6",
+   "to": "biscuit"
+  },
+  {
+   "t": 56,
+   "name": "card_fold"
+  },
+  {
+   "t": 56.8,
+   "name": "chip_land",
+   "chip": "P6",
+   "card": "biscuit"
+  },
+  {
+   "t": 56.9,
+   "name": "Biscuit",
+   "card": "biscuit"
+  },
+  {
+   "t": 59,
+   "name": "ketchup_squirt"
+  },
+  {
+   "t": 59.6,
+   "name": "script_act",
+   "text": "(ketchup splats on P2's sheet)"
+  },
+  {
+   "t": 60.3,
+   "name": "sheet_pull_off"
+  },
+  {
+   "t": 63.7,
+   "name": "script_act",
+   "text": "(P2 hangs the stained sheet on the sofa arm)"
+  },
+  {
+   "t": 63.9,
+   "name": "sheet_hang"
+  },
+  {
+   "t": 64,
+   "name": "idea_spark"
+  },
+  {
+   "t": 64.5,
+   "name": "snore"
+  },
+  {
+   "t": 64.8,
+   "name": "script_act",
+   "text": "(P6 falls asleep in the basket)"
+  },
+  {
+   "t": 65.6,
+   "name": "thunder"
+  },
+  {
+   "t": 65.7,
+   "name": "script_act",
+   "text": "(lights go out)"
+  },
+  {
+   "t": 66.15,
+   "name": "thunder2"
+  },
+  {
+   "t": 69,
+   "name": "night_view_on"
+  },
+  {
+   "t": 69.6,
+   "name": "script_act",
+   "text": "(P8, a small silhouette, drops a plain sheet on the floor)"
+  },
+  {
+   "t": 69.9,
+   "name": "card_appear",
+   "card": "p8"
+  },
+  {
+   "t": 69.9,
+   "name": "chip_land",
+   "chip": "P8",
+   "card": "p8"
+  },
+  {
+   "t": 70,
+   "name": "sheet_drop"
+  },
+  {
+   "t": 70.9,
+   "name": "script_act",
+   "text": "(P8 takes the stained sheet from the sofa arm)"
+  },
+  {
+   "t": 70.9,
+   "name": "sheet_pull_on"
+  },
+  {
+   "t": 72.3,
+   "name": "script_act",
+   "text": "(P7, a tall silhouette, finds a plain sheet on the floor and puts it on)"
+  },
+  {
+   "t": 72.4,
+   "name": "card_appear",
+   "card": "p7"
+  },
+  {
+   "t": 72.4,
+   "name": "chip_land",
+   "chip": "P7",
+   "card": "p7"
+  },
+  {
+   "t": 72.4,
+   "name": "sheet_pull_on2"
+  },
+  {
+   "t": 72.5,
+   "name": "night_view_off"
+  },
+  {
+   "t": 72.6,
+   "name": "lights_back"
+  },
+  {
+   "t": 72.9,
+   "name": "script_act",
+   "text": "(lights come back)"
+  },
+  {
+   "t": 73.6,
+   "name": "script_act",
+   "text": "(P7, plain sheet, walks into the kitchen)"
+  },
+  {
+   "t": 73.9,
+   "name": "script_act",
+   "text": "21:15 (P8, ketchup-stained sheet, goes to the candy bowl)"
+  },
+  {
+   "t": 74,
+   "name": "chip_fly",
+   "chip": "P8",
+   "to": "leo"
+  },
+  {
+   "t": 74.7,
+   "name": "chip_land",
+   "chip": "P8",
+   "card": "leo"
+  },
+  {
+   "t": 76.2,
+   "name": "chip_fly",
+   "chip": "P7",
+   "to": "leo"
+  },
+  {
+   "t": 76.9,
+   "name": "chip_land",
+   "chip": "P7",
+   "card": "leo"
+  },
+  {
+   "t": 76.9,
+   "name": "alert_red"
+  },
+  {
+   "t": 77.2,
+   "name": "bell"
+  },
+  {
+   "t": 80.2,
+   "name": "lens_zoom"
+  },
+  {
+   "t": 81.4,
+   "name": "chip_fly",
+   "chip": "P8",
+   "to": "mia"
+  },
+  {
+   "t": 81.4,
+   "name": "repair_start"
+  },
+  {
+   "t": 82.2,
+   "name": "chip_land",
+   "chip": "P8",
+   "card": "mia"
+  },
+  {
+   "t": 82.2,
+   "name": "repair_land"
+  },
+  {
+   "t": 84.6,
+   "name": "snore"
+  },
+  {
+   "t": 85.2,
+   "name": "script_act",
+   "text": "21:16 (P8 takes a candy)"
+  },
+  {
+   "t": 85.2,
+   "name": "candy_grab"
+  },
+  {
+   "t": 87.9,
+   "name": "script_act",
+   "text": "21:22 (P8 takes a candy)"
+  },
+  {
+   "t": 87.9,
+   "name": "candy_grab"
+  },
+  {
+   "t": 88.6,
+   "name": "snore"
+  },
+  {
+   "t": 90.6,
+   "name": "script_act",
+   "text": "21:29 (P8 takes a candy)"
+  },
+  {
+   "t": 90.6,
+   "name": "candy_grab"
+  },
+  {
+   "t": 92,
+   "name": "snore"
+  },
+  {
+   "t": 92.4,
+   "name": "script_act",
+   "text": "21:31 (the candy bowl is empty)"
+  },
+  {
+   "t": 94.9,
+   "name": "antenna_flash"
+  },
+  {
+   "t": 95.6,
+   "name": "save_stamp"
+  },
+  {
+   "t": 98,
+   "name": "wipe_start"
+  },
+  {
+   "t": 105.2,
+   "name": "wipe_end"
+  },
+  {
+   "t": 110.4,
+   "name": "page_turn_morning"
+  },
+  {
+   "t": 112,
+   "name": "snore"
+  },
+  {
+   "t": 113.4,
+   "name": "bell"
+  },
+  {
+   "t": 117.7,
+   "name": "sheet_lift"
+  },
+  {
+   "t": 119.2,
+   "name": "wrapper_peel"
+  },
+  {
+   "t": 120,
+   "name": "snore"
+  },
+  {
+   "t": 124.8,
+   "name": "bell"
+  },
+  {
+   "t": 127,
+   "name": "snore"
+  },
+  {
+   "t": 146,
+   "name": "wrapper_drop"
+  },
+  {
+   "t": 155,
+   "name": "end_card"
+  }
+ ],
+ "duration": 160.4,
+ "flips": {
+  "cover": [
+   2.35,
+   3.2
+  ],
+  "morning": [
+   110.4,
+   111.3
+  ]
+ }
+}

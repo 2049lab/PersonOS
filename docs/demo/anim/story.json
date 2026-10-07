@@ -1,0 +1,187 @@
+{
+ "subs": [],
+ "title": "Who ate the Halloween candy?",
+ "title_zh": "谁偷吃了万圣节的糖果？",
+ "say": {
+  "leo1": "Mia, the candy's over there!",
+  "leo2": "Leo, catch!",
+  "sam": "I'm Sam!",
+  "lights": "Who turned off the lights?!",
+  "mum": "Pebble, who ate ALL the candy?",
+  "answer": "Mia. At 21:14 she swapped sheets with Leo — but her voice and pink sneakers gave her away."
+ },
+ "notes": {
+  "n1": "21:02  Mia, Leo and Sam arrived.",
+  "ordinary": "Ordinary memory",
+  "ord1": "a ghost.",
+  "ord2": "a ghost.",
+  "ord3": "a ghost.",
+  "ord4": "a dog?",
+  "personos": "PersonOS",
+  "pers": "Mia · Leo · Sam · Biscuit",
+  "n3a": "21:14  Leo at the candy bowl",
+  "n3b": "Mia (corrected: voice + pink sneakers)",
+  "n4a": "21:16  Mia took 3 candies",
+  "n4b": "21:22  Mia took 2 more",
+  "n4c": "21:31  cauldron empty",
+  "alibi": "asleep 21:00–21:30 (alibi)"
+ },
+ "ui": {
+  "banner": "Leo can't be in two places at once.",
+  "faces": "faces visible: 0",
+  "p1": "Person #1",
+  "p2": "Person #2",
+  "p3": "Person #3",
+  "leo?": "Leo?",
+  "cite": "clip 2 · 21:14",
+  "pip": "pip install personos",
+  "gh": "github.com/2049lab/personos",
+  "tag": "Memory that knows who."
+ },
+ "lines": {
+  "coming": {
+   "en": "Coming!",
+   "zh": "来啦！"
+  },
+  "trick": {
+   "en": "Trick or treat!",
+   "zh": "不给糖就捣蛋！"
+  },
+  "whoa": {
+   "en": "Whoa… Mia, the candy's over there!",
+   "zh": "哇……Mia，糖在那边！"
+  },
+  "mine": {
+   "en": "Mine!",
+   "zh": "我的！"
+  },
+  "catch": {
+   "en": "Leo, catch!",
+   "zh": "Leo，接着！"
+  },
+  "oof": {
+   "en": "Oof!",
+   "zh": "哎哟！"
+  },
+  "hehe": {
+   "en": "Hehe — I'm Sam, by the way.",
+   "zh": "嘿嘿——对了，我叫 Sam。"
+  },
+  "shh": {
+   "en": "Shh — Biscuit's sleeping.",
+   "zh": "嘘——Biscuit 在睡觉。"
+  },
+  "costume": {
+   "en": "Costume time!",
+   "zh": "换装时间到！"
+  },
+  "boo": {
+   "en": "Boooo!",
+   "zh": "呜——！"
+  },
+  "cantsee": {
+   "en": "I can't see a thing in this.",
+   "zh": "套上这个啥也看不见。"
+  },
+  "ghosttoo": {
+   "en": "You're a ghost too, Biscuit!",
+   "zh": "Biscuit，你也当幽灵！"
+  },
+  "eek": {
+   "en": "Eek! It's dark!",
+   "zh": "啊！好黑！"
+  },
+  "phew": {
+   "en": "Phew. I'll get us some juice.",
+   "zh": "呼，我去拿点果汁。"
+  },
+  "oj": {
+   "en": "Do we have orange juice?",
+   "zh": "有橙汁吗？"
+  },
+  "giggle": {
+   "en": "Hehehe…",
+   "zh": "嘿嘿嘿……"
+  },
+  "oneforme": {
+   "en": "One for me… one more for me…",
+   "zh": "一颗给我……再一颗给我……"
+  },
+  "whoate": {
+   "en": "Pebble… who ate ALL the candy?",
+   "zh": "Pebble……是谁把糖全吃了？"
+  },
+  "notme": {
+   "en": "Not me!",
+   "zh": "不是我！"
+  },
+  "notmeeither": {
+   "en": "Not me either!",
+   "zh": "我也没有！"
+  },
+  "biscuit?": {
+   "en": "Must've been… Biscuit?",
+   "zh": "肯定是……Biscuit 吧？"
+  },
+  "woof?": {
+   "en": "Woof?!",
+   "zh": "汪？！"
+  },
+  "answer": {
+   "en": "It was Mia. At 21:14 she swapped sheets with Leo — her giggle and pink sneakers gave her away.",
+   "zh": "是 Mia。21:14 她和 Leo 换了床单——但她的笑声和粉色球鞋出卖了她。"
+  },
+  "happy": {
+   "en": "…Hehe. Happy Halloween?",
+   "zh": "……嘿嘿，万圣节快乐？"
+  },
+  "woof": {
+   "en": "Woof!",
+   "zh": "汪！"
+  },
+  "mumrule": {
+   "en": "One candy each tonight — the rest is for tomorrow!",
+   "zh": "今晚每人只能吃一颗，剩下的留到明天！"
+  },
+  "groan": {
+   "en": "Awww…",
+   "zh": "啊——……"
+  },
+  "ketchup": {
+   "en": "Aw, ketchup! I can't see a thing in this.",
+   "zh": "啊，番茄酱！套着这个啥也看不见。"
+  },
+  "arf": {
+   "en": "Arf!",
+   "zh": "汪！"
+  },
+  "ugh": {
+   "en": "Ugh, where's my sheet…",
+   "zh": "呃，我的床单呢……"
+  },
+  "who1": {
+   "en": "Who ate ALL the candy?!",
+   "zh": "是谁把糖全吃了？！"
+  },
+  "sheet": {
+   "en": "Candy wrappers stuck all over YOUR ketchup sheet, Leo!",
+   "zh": "你那张番茄酱床单上粘满了糖纸，Leo！"
+  },
+  "wasnt": {
+   "en": "It wasn't me!",
+   "zh": "不是我！"
+  },
+  "mum2": {
+   "en": "Pebble, you saw everything. Who was it?",
+   "zh": "Pebble，你都看见了。到底是谁？"
+  },
+  "answer2": {
+   "en": "It was Mia. In the blackout she put on Leo's ketchup sheet — but her giggle and pink sneakers gave her away.",
+   "zh": "是 Mia。停电时她换上了 Leo 那张沾番茄酱的床单——\n但她的笑声和粉色球鞋出卖了她。"
+  },
+  "sticky": {
+   "en": "Ew, it's all sticky! I'll put it back on later.",
+   "zh": "咦，黏糊糊的！我待会儿再穿。"
+  }
+ }
+}

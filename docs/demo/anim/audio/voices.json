@@ -1,0 +1,357 @@
+{
+ "model": "eleven_v3",
+ "voice_settings": {
+  "stability": 0.5,
+  "similarity_boost": 0.75,
+  "style": 0.4,
+  "use_speaker_boost": true
+ },
+ "characters": {
+  "pebble": {
+   "semitones": 3.5,
+   "formant": 1.08,
+   "robot": true,
+   "candidates": {
+    "Laura": "FGY2WhTYpPnrIDTdsKH5",
+    "Jessica": "cgSgspJ2msm6clMCkdW9"
+   }
+  },
+  "mia": {
+   "semitones": 4.5,
+   "formant": 1.12,
+   "candidates": {
+    "Jessica": "cgSgspJ2msm6clMCkdW9",
+    "Laura": "FGY2WhTYpPnrIDTdsKH5"
+   }
+  },
+  "leo": {
+   "semitones": 3.5,
+   "formant": 1.08,
+   "candidates": {
+    "Liam": "TX3LPaxmHKxFdv7VOQHJ",
+    "Will": "bIHbv24MWmeRgasZH58o"
+   }
+  },
+  "sam": {
+   "semitones": 5.0,
+   "formant": 1.12,
+   "candidates": {
+    "Charlie": "IKne3meq5aSn9XLyUdCD",
+    "Will": "bIHbv24MWmeRgasZH58o"
+   }
+  },
+  "mum": {
+   "semitones": 0.0,
+   "formant": 1.0,
+   "candidates": {
+    "Sarah": "EXAVITQu4vr4xnSDxMaL",
+    "Matilda": "XrExE9yKIg1WjnnlVkGX"
+   }
+  }
+ },
+ "audition_lines": {
+  "pebble": [
+   "[cheerfully] Coming!",
+   "[proudly] It was Mia. In the blackout she put on Leo's ketchup sheet — but her giggle and pink sneakers gave her away."
+  ],
+  "mia": [
+   "[excited] Trick or treat!",
+   "[giggles] Hehehe…"
+  ],
+  "leo": [
+   "[gasps] Whoa… Mia, the candy's over there!",
+   "[sighs] Ugh, where's my sheet…"
+  ],
+  "sam": [
+   "[giggles] Hehe — I'm Sam, by the way.",
+   "[excited] Boooo!"
+  ],
+  "mum": [
+   "[exasperated] One candy each tonight — the rest is for tomorrow!",
+   "[angry] Who ate ALL the candy?!"
+  ]
+ },
+ "audition_sfx": {
+  "doorbell": [
+   "classic two-tone front door bell, ding-dong, clean, cartoon house",
+   2.0
+  ],
+  "thunder": [
+   "a single loud thunder crack followed by a rolling rumble, stormy night",
+   3.0
+  ],
+  "bell_jingle": [
+   "small brass bell on a shoe jingling twice, bright and cute",
+   1.5
+  ],
+  "stamp_thump": [
+   "a rubber ink stamp thumping hard onto paper, short thud with a papery slap",
+   1.0
+  ]
+ },
+ "cast": {
+  "pebble": [
+   "Laura",
+   "FGY2WhTYpPnrIDTdsKH5"
+  ],
+  "mia": [
+   "Jessica",
+   "cgSgspJ2msm6clMCkdW9"
+  ],
+  "leo": [
+   "Liam",
+   "TX3LPaxmHKxFdv7VOQHJ"
+  ],
+  "sam": [
+   "Charlie",
+   "IKne3meq5aSn9XLyUdCD"
+  ],
+  "mum": [
+   "Sarah",
+   "EXAVITQu4vr4xnSDxMaL"
+  ]
+ },
+ "lines": {
+  "coming": [
+   "pebble",
+   "[cheerfully] Coming!"
+  ],
+  "trick": [
+   "mia",
+   "[excited] Trick or treat!"
+  ],
+  "whoa": [
+   "leo",
+   "[surprised] Whoa… Mia, the candy's over there!"
+  ],
+  "mine": [
+   "mia",
+   "[excited] Mine!"
+  ],
+  "catch": [
+   "sam",
+   "[excited] Leo, catch!"
+  ],
+  "oof": [
+   "leo",
+   "[groans] Oof!"
+  ],
+  "hehe": [
+   "sam",
+   "[giggles] Hehe — I'm Sam, by the way."
+  ],
+  "shh": [
+   "mia",
+   "[whispers] Shh — Biscuit's sleeping."
+  ],
+  "mumrule": [
+   "mum",
+   "[exasperated] One candy each tonight — the rest is for tomorrow!"
+  ],
+  "groan:mia": [
+   "mia",
+   "[disappointed] Awww…"
+  ],
+  "groan:leo": [
+   "leo",
+   "[disappointed] Awww…"
+  ],
+  "groan:sam": [
+   "sam",
+   "[disappointed] Awww…"
+  ],
+  "costume": [
+   "mia",
+   "[mischievously] Costume time!"
+  ],
+  "boo": [
+   "sam",
+   "[excited] Boooo!"
+  ],
+  "ketchup": [
+   "leo",
+   "Aw, ketchup! I can't see a thing in this."
+  ],
+  "sticky": [
+   "leo",
+   "Ew, it's all sticky! I'll put it back on later."
+  ],
+  "eek": [
+   "sam",
+   "[gasps] Eek! It's dark!"
+  ],
+  "oj": [
+   "leo",
+   "[calling from far away] Do we have orange juice?"
+  ],
+  "giggle": [
+   "mia",
+   "[giggles] Hehehe…"
+  ],
+  "oneforme": [
+   "mia",
+   "[quickly whispering] One for me, one more for me!"
+  ],
+  "who1": [
+   "mum",
+   "[angry] Who ate ALL the candy?!"
+  ],
+  "sheet": [
+   "mum",
+   "[angry] Candy wrappers stuck all over YOUR ketchup sheet, Leo!"
+  ],
+  "wasnt": [
+   "leo",
+   "[panicked] It wasn't me!"
+  ],
+  "notmeeither": [
+   "sam",
+   "[giggles] Not me either!"
+  ],
+  "biscuit?": [
+   "mia",
+   "[innocently] Must've been… Biscuit?"
+  ],
+  "mum2": [
+   "mum",
+   "[suspicious] Pebble, you saw everything. Who was it?"
+  ],
+  "answer2": [
+   "pebble",
+   "[proudly] It was Mia. In the blackout she put on Leo's ketchup sheet — but her giggle and pink sneakers gave her away."
+  ],
+  "happy": [
+   "mia",
+   "[nervous] Hehe. Happy Halloween?"
+  ]
+ },
+ "biscuit_sfx": {
+  "arf": "arf",
+  "woof?": "woof_q",
+  "woof": "woof_happy"
+ },
+ "sfx": {
+  "doorbell": [
+   "classic two-tone front door bell, ding-dong, clean, cartoon house",
+   2.0
+  ],
+  "thunder": [
+   "a single loud thunder crack followed by a rolling rumble, stormy night",
+   3.0
+  ],
+  "bell_jingle": [
+   "small brass bell on a shoe jingling twice, bright and cute",
+   1.5
+  ],
+  "stamp_thump": [
+   "a rubber ink stamp thumping hard onto paper, short thud with a papery slap",
+   1.0
+  ],
+  "door_burst": [
+   "wooden front door bursts open with a bang, kids tumbling in",
+   1.5
+  ],
+  "pen_scribble": [
+   "soft pencil scribbling a line of handwriting on paper, gentle",
+   1.2
+  ],
+  "chip_whoosh": [
+   "small soft whoosh of a paper sticker flying through the air",
+   0.8
+  ],
+  "chip_land": [
+   "tiny paper sticker pop landing, cute soft tick",
+   0.5
+  ],
+  "red_alert": [
+   "two quick low warning boops, cartoon alert, short",
+   0.8
+  ],
+  "ink_wipe": [
+   "rhythmic ink brush swishing across paper, continuous long brush strokes",
+   5.0
+  ],
+  "night_hum": [
+   "low electronic camera night vision power-up hum, subtle, rising then steady",
+   2.5
+  ],
+  "page_turn": [
+   "a paper page turning with a soft flutter",
+   1.2
+  ],
+  "sheets_toss": [
+   "cloth bed sheets whooshing and flapping up into the air",
+   1.5
+  ],
+  "poof": [
+   "soft magical poof puff of smoke, cartoon",
+   0.8
+  ],
+  "ketchup": [
+   "ketchup bottle squirting a wet squelch and splat",
+   1.0
+  ],
+  "candy_rustle": [
+   "a hand rustling inside a bowl of wrapped candies, crinkly wrappers",
+   1.0
+  ],
+  "wrapper_stick": [
+   "a candy wrapper crinkling and sticking onto something sticky, small",
+   0.8
+  ],
+  "lens_whir": [
+   "camera lens zooming and focusing, short servo whir",
+   1.2
+  ],
+  "chime_ok": [
+   "happy confirmation chime, two soft bright notes",
+   0.8
+  ],
+  "ping": [
+   "tiny electronic sparkly ping, glowing bulb",
+   0.8
+  ],
+  "wrapper_drop": [
+   "a small candy wrapper falling and crinkling softly on the floor",
+   1.0
+  ],
+  "cloth_pull": [
+   "cloth bed sheet being pulled on, soft rustle of fabric",
+   1.2
+  ],
+  "arf": [
+   "tiny dachshund puppy single small bark, arf",
+   0.8
+  ],
+  "woof_q": [
+   "small dog questioning bark, woof with a rising tone, surprised",
+   1.0
+  ],
+  "woof_happy": [
+   "happy small dog woof bark, joyful",
+   1.0
+  ],
+  "snore": [
+   "small dog snoring softly while asleep",
+   3.0
+  ],
+  "tick": [
+   "very soft pencil tick on paper, tiny",
+   0.5
+  ]
+ },
+ "ambience": {
+  "rain": [
+   "steady rain on a window with distant soft thunder rumbles, cozy night indoors",
+   10.0
+  ],
+  "birds": [
+   "gentle morning birdsong outside a window, calm",
+   10.0
+  ],
+  "music": [
+   "quiet playful spooky halloween lullaby, soft pizzicato strings and celesta, gentle, simple melody, loopable",
+   12.0
+  ]
+ }
+}
