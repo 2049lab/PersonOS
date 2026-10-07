@@ -4,7 +4,7 @@
 
 <h1 align="center">PersonOS</h1>
 
-<p align="center"><strong>Multimodal long-term memory that knows who.</strong></p>
+<p align="center"><strong>Multimodal long-term memory that knows who</strong></p>
 
 <p align="center">
   <a href="https://pypi.org/project/personos/"><img src="https://img.shields.io/pypi/v/personos?color=6C4CF1&label=pypi" alt="PyPI"></a>
