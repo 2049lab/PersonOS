@@ -1,4 +1,5 @@
-"""Build the PersonOS brand assets (SVG + PNG + contact sheet).
+"""Build the PersonOS architecture diagrams (SVG + PNG + contact sheet).
+Brand assets are generated only by brand/build_brand.py.
 
     python docs/assets/build_assets.py
 
@@ -85,136 +86,6 @@ def svg_doc(w: int, h: int, body: str, defs: str = "", font: bool = True, label:
     aria = f' role="img" aria-label="{label}"' if label else ""
     return (f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" '
             f'viewBox="0 0 {w} {h}"{aria}><defs>{style}{defs}</defs>{body}</svg>\n')
-
-
-# ───────────────────────── logo ─────────────────────────
-
-def mark(x: float = 0, y: float = 0, size: float = 64, uid: str = "g") -> tuple[str, str]:
-    """The mark in a 64x64 box, returns (defs, body)."""
-    s = size / 64
-    defs = defs_grad(uid, 8, 6, 56, 60, "userSpaceOnUse")
-    f = f"url(#{uid})"
-    nodes = [(9, 56.5), (19.5, 41), (44.5, 41), (55, 56.5)]
-    line = "M" + " L".join(f"{a} {b}" for a, b in nodes)
-    body = (f'<g transform="translate({x} {y}) scale({s})">'
-            f'<path d="{line}" fill="none" stroke="{f}" stroke-width="3.2" stroke-linecap="round" '
-            f'stroke-linejoin="round"/>'
-            f'<circle cx="32" cy="17" r="11" fill="{f}"/>'
-            + "".join(f'<circle cx="{a}" cy="{b}" r="4.6" fill="{f}"/>' for a, b in nodes) + "</g>")
-    return defs, body
-
-
-def logo_svg() -> str:
-    d, b = mark()
-    return svg_doc(64, 64, b, d, font=False, label="PersonOS")
-
-
-def wordmark_svg(theme: dict) -> str:
-    d, b = mark(4, 4, 64)
-    text = (f'<text x="84" y="53" {SANS} font-size="44" font-weight="600" letter-spacing="-1" '
-            f'fill="{theme["text"]}">Person<tspan font-weight="500" fill="{theme["muted"]}">OS</tspan></text>')
-    return svg_doc(300, 72, b + text, d, label="PersonOS", css=font_css("PersonOS", mono=False))
-
-
-# ───────────────────────── banner ─────────────────────────
-
-def _avatar(cx: float, cy: float, r: float, kind: str, uid: str, grad: str) -> str:
-    clip = f"av{uid}"
-    out = (f'<clipPath id="{clip}"><circle cx="{cx}" cy="{cy}" r="{r}"/></clipPath>'
-           f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="#1A2030"/><g clip-path="url(#{clip})">')
-    if kind == "robot":
-        out += (f'<rect x="{cx - 17}" y="{cy - 14}" width="34" height="28" rx="9" fill="{grad}"/>'
-                f'<circle cx="{cx - 7}" cy="{cy}" r="3.2" fill="#12151C"/><circle cx="{cx + 7}" cy="{cy}" r="3.2" fill="#12151C"/>'
-                f'<rect x="{cx - 1.5}" y="{cy - 22}" width="3" height="9" rx="1.5" fill="{grad}"/>'
-                f'<circle cx="{cx}" cy="{cy - 24}" r="3" fill="{grad}"/>')
-    else:
-        out += (f'<circle cx="{cx}" cy="{cy - 6}" r="{r * 0.34}" fill="{grad}"/>'
-                f'<path d="M{cx - r * 0.78} {cy + r} a{r * 0.78} {r * 0.78} 0 0 1 {r * 1.56} 0 Z" fill="{grad}"/>')
-    out += f'</g><circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="{grad}" stroke-width="1.5" opacity=".8"/>'
-    return out
-
-
-def _chip(x: float, y: float, text: str, t: dict, fill: str | None = None, color: str | None = None) -> tuple[str, float]:
-    w = 12 + 6.9 * len(text)
-    f = fill or "none"
-    stroke = "none" if fill else t["border"]
-    c = color or t["muted"]
-    return (f'<rect x="{x}" y="{y}" width="{w:.1f}" height="22" rx="11" fill="{f}" stroke="{stroke}"/>'
-            f'<text x="{x + w / 2:.1f}" y="{y + 15}" text-anchor="middle" {MONO} font-size="11" fill="{c}">{text}</text>'), w
-
-
-def banner_svg() -> str:
-    t = DARK
-    W, H = 1280, 640
-    d, mk = mark(72, 52, 44, "gm")
-    defs = (d + defs_grad("gt", 0, 0, 1, 0) + defs_grad("gc", 0, 0, 1, 1)
-            + f'<clipPath id="round"><rect width="{W}" height="{H}" rx="24"/></clipPath>'
-            f'<pattern id="dots" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="1.5" cy="1.5" r="1.1" fill="{t["dots"]}" opacity="{t["dot_op"]}"/></pattern>'
-            '<radialGradient id="fade" cx="0.62" cy="0.45" r="0.75"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#000"/></radialGradient>'
-            '<mask id="dm"><rect width="1280" height="640" fill="url(#fade)"/></mask>'
-            f'<radialGradient id="glow1" cx="0.78" cy="0.15" r="0.5"><stop offset="0" stop-color="{VIOLET}" stop-opacity=".22"/><stop offset="1" stop-color="{VIOLET}" stop-opacity="0"/></radialGradient>'
-            f'<radialGradient id="glow2" cx="0.95" cy="0.95" r="0.5"><stop offset="0" stop-color="{CYAN}" stop-opacity=".14"/><stop offset="1" stop-color="{CYAN}" stop-opacity="0"/></radialGradient>')
-    b = [f'<g clip-path="url(#round)"><rect width="{W}" height="{H}" fill="{t["bg"]}"/>',
-         f'<rect width="{W}" height="{H}" fill="url(#glow1)"/><rect width="{W}" height="{H}" fill="url(#glow2)"/>',
-         f'<rect width="{W}" height="{H}" fill="url(#dots)" mask="url(#dm)"/>']
-    # wordmark
-    b.append(mk)
-    b.append(f'<text x="128" y="86" {SANS} font-size="30" font-weight="600" letter-spacing="-0.6" fill="{t["text"]}">Person<tspan font-weight="500" fill="{t["muted"]}">OS</tspan></text>')
-    # headline
-    b.append(f'<text x="72" y="256" {SANS} font-size="62" font-weight="700" letter-spacing="-2" fill="{t["text"]}">Memory that knows</text>')
-    b.append(f'<text x="72" y="326" {SANS} font-size="62" font-weight="700" letter-spacing="-2" fill="url(#gt)">who.</text>')
-    for i, line in enumerate(["Multimodal long-term memory for robots,",
-                              "smart glasses and agents. Video, images and",
-                              "conversations in \u2014 people-resolved memory out."]):
-        b.append(f'<text x="72" y="{392 + i * 30}" {SANS} font-size="19" fill="{t["muted"]}">{line}</text>')
-    b.append(f'<rect x="72" y="524" width="226" height="40" rx="12" fill="{t["surface"]}" stroke="{t["border"]}"/>'
-             f'<text x="90" y="549" {MONO} font-size="14" fill="{t["muted"]}">$ </text>'
-             f'<text x="106" y="549" {MONO} font-size="14" fill="{t["text"]}">pip install personos</text>')
-
-    # character cards
-    cards = [("Bob", ["face", "body", "voice"], 700, 62, "v", VIOLET),
-             ("Lily", ["face", "voice"], 760, 170, "p", CYAN),
-             ("Robot", ["wearer"], 700, 278, "robot", OK)]
-    chain_pts = {}
-    for i, (name, chips, x, y, kind, col) in enumerate(cards):
-        w, h = 360, 92
-        g = "url(#gc)" if kind != "robot" else OK
-        b.append(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="18" fill="{t["surface"]}" stroke="{t["border"]}"/>')
-        b.append(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="18" fill="none" stroke="url(#gc)" stroke-opacity=".28"/>')
-        b.append(_avatar(x + 14 + 32, y + 46, 29, "robot" if kind == "robot" else "p", str(i), g if kind != "robot" else "url(#gc)"))
-        b.append(f'<text x="{x + 94}" y="{y + 38}" {SANS} font-size="22" font-weight="600" fill="{t["text"]}">{name}</text>')
-        cx = x + 94
-        for c in chips:
-            if c == "wearer":
-                s, cw = _chip(cx, y + 50, "wearer \u00b7 camera", t, fill="url(#gt)", color="#0B0D12")
-                cw = 12 + 6.9 * len("wearer \u00b7 camera")
-            else:
-                s, cw = _chip(cx, y + 50, c, t)
-            b.append(s)
-            cx += cw + 8
-        chain_pts[name] = (x + w, y + 46)
-    # memory entries
-    ex, ew, eh = 700, 480, 50
-    entries = [(424, [("Bob", VIOLET), (" dribbled a basketball indoors", None)], "00:12"),
-               (490, [("Lily", CYAN), (" asked ", None), ("Bob", VIOLET), (" to stop", None)], "00:41")]
-    ends = []
-    for y, parts, ts in entries:
-        b.append(f'<rect x="{ex}" y="{y}" width="{ew}" height="{eh}" rx="14" fill="{t["surface"]}" stroke="{t["border"]}"/>')
-        b.append(f'<circle cx="{ex + 22}" cy="{y + eh / 2}" r="5" fill="url(#gc)"/>')
-        tsp = "".join(f'<tspan fill="{c or t["text"]}" font-weight="{600 if c else 400}">{s}</tspan>' for s, c in parts)
-        b.append(f'<text x="{ex + 42}" y="{y + 31}" {SANS} font-size="16" fill="{t["text"]}">{tsp}</text>')
-        b.append(f'<text x="{ex + ew - 18}" y="{y + 31}" text-anchor="end" {MONO} font-size="12" fill="{t["muted"]}">{ts}</text>')
-        ends.append((ex + ew, y + eh / 2))
-    b.append(f'<text x="{ex}" y="406" {MONO} font-size="12" fill="{t["muted"]}" letter-spacing="1">MEMORY</text>')
-
-    def curve(p, q, bulge):
-        return (f'<path d="M{p[0]} {p[1]} C{bulge} {p[1]} {bulge} {q[1]} {q[0]} {q[1]}" fill="none" '
-                f'stroke="url(#gc)" stroke-width="1.6" stroke-dasharray="3 5" stroke-linecap="round" opacity=".85"/>')
-    b.append(curve(chain_pts["Bob"], ends[0], 1212))
-    b.append(curve(chain_pts["Lily"], ends[1], 1204))
-    b.append(curve(chain_pts["Bob"], ends[1], 1226))
-    b.append(f'<rect x="0.5" y="0.5" width="{W - 1}" height="{H - 1}" rx="23.5" fill="none" stroke="{t["border"]}"/></g>')
-    return svg_doc(W, H, "".join(b), defs, label="PersonOS \u2014 Memory that knows who.")
 
 
 # ───────────────────────── architecture ─────────────────────────
@@ -391,10 +262,6 @@ def write(name: str, content: str) -> Path:
 
 def build_svgs() -> dict[str, Path]:
     return {
-        "logo.svg": write("logo.svg", logo_svg()),
-        "logo-wordmark.svg": write("logo-wordmark.svg", wordmark_svg(DARK)),
-        "logo-wordmark-light.svg": write("logo-wordmark-light.svg", wordmark_svg(LIGHT)),
-        "banner.svg": write("banner.svg", banner_svg()),
         "architecture.svg": write("architecture.svg", architecture_svg(DARK)),
         "architecture-light.svg": write("architecture-light.svg", architecture_svg(LIGHT)),
     }
@@ -419,25 +286,18 @@ def render_pngs(svgs: dict[str, Path]) -> None:
             page.screenshot(path=str(HERE / out), omit_background=True)
             ctx.close()
 
-        shot(svgs["logo.svg"], "logo-512.png", 64, 64, 8)
-        shot(svgs["banner.svg"], "banner.png", 1280, 640, 2)
         shot(svgs["architecture.svg"], "architecture.png", 1600, 700, 2)
         shot(svgs["architecture-light.svg"], "architecture-light.png", 1600, 700, 2)
-        shot(svgs["logo-wordmark.svg"], "logo-wordmark.png", 300, 72, 4)
 
         sheet = HERE / "_preview.html"
-        def panel(bg, fg, wm, arch, label):
-            return (f'<section style="background:{bg};color:{fg}"><h6>{label}</h6>'
-                    f'<div class="row"><img src="logo.svg" width="32"><img src="logo.svg" width="64"><img src="logo.svg" width="128">'
-                    f'<img src="{wm}" height="56"></div>'
-                    f'<img src="banner.svg" width="1280"><img src="{arch}" width="1280"></section>')
+        def panel(bg, fg, arch, label):
+            return (f'<section style="background:{bg};color:{fg}"><h2>{label}</h2>'
+                    f'<img src="{arch}" width="1280"></section>')
         sheet.write_text(
-            '<!doctype html><meta charset="utf-8"><style>body{margin:0;display:flex;font-family:Inter,sans-serif}'
-            'section{padding:32px;width:1280px;display:flex;flex-direction:column;gap:28px}'
-            'h6{margin:0;font:500 12px monospace;letter-spacing:.1em;opacity:.6;text-transform:uppercase}'
-            '.row{display:flex;align-items:center;gap:32px}</style>'
-            + panel("#0B0D12", "#E6E8EE", "logo-wordmark.svg", "architecture.svg", "on dark")
-            + panel("#FFFFFF", "#0B0D12", "logo-wordmark-light.svg", "architecture-light.svg", "on white"))
+            '<!doctype html><meta charset="utf-8"><style>body{margin:0;display:flex;font-family:sans-serif}'
+            'section{padding:32px;width:1280px}h2{font-size:16px}</style>'
+            + panel("#0B0D12", "#E6E8EE", "architecture.svg", "On dark")
+            + panel("#FFFFFF", "#0B0D12", "architecture-light.svg", "On white"))
         page = browser.new_page(viewport={"width": 2688, "height": 1500})
         page.goto(sheet.resolve().as_uri())
         page.wait_for_timeout(300)
