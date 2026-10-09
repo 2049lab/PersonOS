@@ -3,10 +3,8 @@ the instruction prefix and failures, a fake reranker really reorders, and the ma
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
-from personos.online.rerank import ScoringReranker, NoopReranker, cell_head, rerank_cells
-from personos.online.retrieval import AtomHit, CellHit, QueryRewrite
+from personos.online.rerank import NoopReranker, ScoringReranker, rerank_cells
+from personos.online.retrieval import AtomHit, CellHit
 
 
 def _hit(cid: str, topic="t") -> CellHit:

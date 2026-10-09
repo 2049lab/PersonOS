@@ -70,13 +70,13 @@ def _probes(corpus: dict) -> list[dict]:
 # -- Record ---------------------------------------------------------------
 
 def record(corpus_path: str, *, skip_ingest: bool = False) -> int:
+    from personos.online.write_path import SessionWriter
     from personos.providers.openai_compat import OpenAIChatLLM, OpenAIEmbedder
     from personos.storage.atom_store import AtomStore
     from personos.storage.cell_store import CellStore
     from personos.storage.chain_store import ChainStore
     from personos.storage.db import Database
     from personos.storage.evidence_store import EvidenceStore
-    from personos.online.write_path import SessionWriter
     from scripts.baseline.cassette import Cassette, RecordingEmbedder, RecordingLLM
     from scripts.baseline.golden import fingerprint
 
@@ -201,8 +201,7 @@ def verify() -> int:
     from personos.storage.cell_store import CellStore
     from personos.storage.db import Database
     from personos.storage.evidence_store import EvidenceStore
-    from scripts.baseline.cassette import (
-        Cassette, CassetteMiss, ReplayEmbedder, ReplayLLM)
+    from scripts.baseline.cassette import Cassette, CassetteMiss, ReplayEmbedder, ReplayLLM
     from scripts.baseline.golden import diff, fingerprint
 
     for p in (SNAP, TAPE, GOLD):

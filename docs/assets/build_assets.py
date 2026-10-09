@@ -15,8 +15,8 @@ import io
 from pathlib import Path
 
 from fontTools import subset
-from fontTools.varLib import instancer
 from fontTools.ttLib import TTFont
+from fontTools.varLib import instancer
 
 HERE = Path(__file__).parent
 FONTS = HERE / "fonts"
@@ -178,10 +178,10 @@ def banner_svg() -> str:
     chain_pts = {}
     for i, (name, chips, x, y, kind, col) in enumerate(cards):
         w, h = 360, 92
-        g = f"url(#gc)" if kind != "robot" else OK
+        g = "url(#gc)" if kind != "robot" else OK
         b.append(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="18" fill="{t["surface"]}" stroke="{t["border"]}"/>')
         b.append(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="18" fill="none" stroke="url(#gc)" stroke-opacity=".28"/>')
-        b.append(_avatar(x + 14 + 32, y + 46, 29, "robot" if kind == "robot" else "p", str(i), g if kind != "robot" else f"url(#gc)"))
+        b.append(_avatar(x + 14 + 32, y + 46, 29, "robot" if kind == "robot" else "p", str(i), g if kind != "robot" else "url(#gc)"))
         b.append(f'<text x="{x + 94}" y="{y + 38}" {SANS} font-size="22" font-weight="600" fill="{t["text"]}">{name}</text>')
         cx = x + 94
         for c in chips:
@@ -232,7 +232,7 @@ class Arch:
         if maxw:
             cid = f' data-maxw="{maxw}"'
         self.o.append(f'<text x="{x}" y="{y}" {fam} font-size="{size}" font-weight="{weight}" fill="{fill}" '
-                      f'text-anchor="{anchor}" letter-spacing="{ls}"{cid}>{s.replace('&', '&amp;')}</text>')
+                      f'text-anchor="{anchor}" letter-spacing="{ls}"{cid}>{s.replace("&", "&amp;")}</text>')
 
     def rect(self, x, y, w, h, rx=14, fill=None, stroke=None, dash=None, sw=1):
         fill = fill or self.t["surface2"]

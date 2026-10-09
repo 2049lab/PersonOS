@@ -18,9 +18,10 @@ def main():
     log_level = os.environ.get("PERSONOS_LOG_LEVEL", "info").lower()
     # Import late so env vars like MYSQL_* / PERSONOS_LOG_DIR are in place before
     # settings/rt are initialized.
-    from server.app import app
-    from personos.config import settings
     from loguru import logger
+
+    from personos.config import settings
+    from server.app import app
 
     logger.info(f"PersonOS starting http://{host}:{port} · "
                 f"log_dir={settings.log_dir}")

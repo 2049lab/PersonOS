@@ -44,7 +44,9 @@ def make_backends(profile: str | None = None) -> dict[str, Any]:
         raise RuntimeError(_DISABLED_HINT)
     if profile == "mock":
         from personos.identity.backends.mock import (
-            MockFaceDetector, MockOmni, MockVoiceprint,
+            MockFaceDetector,
+            MockOmni,
+            MockVoiceprint,
         )
         return {"mm_runner": MockOmni(), "face_detector": MockFaceDetector(),
                 "voiceprint": MockVoiceprint()}

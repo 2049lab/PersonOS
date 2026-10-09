@@ -14,12 +14,23 @@ import numpy as np
 
 from personos.models import ChainInfo, EvidenceRecord, EvidenceRef, MemCell, MemoryAtom
 from personos.online.deep_recall import (
-    DeepDeps, HandleRegistry, MaasChatModel, build_handoff, cell_full, cell_row,
-    evidence_page, run_deep, tool_find_cells, tool_get_cell_evidence, tool_open_cell,
-    tool_remember, tool_search_atoms, tool_search_evidence,
+    DeepDeps,
+    HandleRegistry,
+    MaasChatModel,
+    build_handoff,
+    cell_full,
+    cell_row,
+    evidence_page,
+    run_deep,
+    tool_find_cells,
+    tool_get_cell_evidence,
+    tool_open_cell,
+    tool_remember,
+    tool_search_atoms,
+    tool_search_evidence,
 )
-from personos.online.retrieval import AtomHit, CellHit, QueryRewrite
 from personos.online.rerank import NoopReranker
+from personos.online.retrieval import AtomHit, CellHit, QueryRewrite
 from personos.storage.atom_store import AtomStore
 from personos.storage.cell_store import CellStore
 from personos.storage.chain_store import ChainStore
@@ -164,9 +175,9 @@ def test_search_atoms_window_filter_and_payload_shape(db):
 
 def test_search_atoms_rerank_reorders_candidates(db):
     env = Env(db)
-    strong = env.add_cell(topic="画展", episode="画展叙事。",
+    env.add_cell(topic="画展", episode="画展叙事。",
                           atoms=[{"text": "展期", "vec": _v(1, 0, 0, 0)}])
-    weak = env.add_cell(topic="跑步", episode="跑步叙事。",
+    env.add_cell(topic="跑步", episode="跑步叙事。",
                         atoms=[{"text": "配速", "vec": _v(0.6, 0.8, 0, 0)}])
     d = env.deps(TableEmbedder({"展期": _v(1, 0, 0, 0)}))
     noop_out = tool_search_atoms(d, query="展期")
@@ -244,7 +255,7 @@ def test_search_atoms_weaves_chain_members(db, monkeypatch):
     assert "woven from fact-chains" in out
     h1, h3 = d.reg.real("c1"), d.reg.real("c2")
     assert {h1, h3} == {c1.id, c3.id}                           # both member cells are registered, so open works
-    assert f"━━━ c1, c2 ━━━" in out                             # the woven block header lists several handles side by side
+    assert "━━━ c1, c2 ━━━" in out                             # the woven block header lists several handles side by side
     assert "跑步叙事。" in out                                  # ordinary units coexist with it
     assert "(pulled via chain" not in out                       # the old scattered-cell expansion has been removed
 
@@ -371,7 +382,7 @@ def test_search_evidence_finds_utterance_atoms_missed(db):
     """The fallback scenario: a fact that exists only in the raw utterance (zero atoms were
     extracted) can still be found, and the answer names the cell it belongs to."""
     env = Env(db)
-    c = env.add_cell(topic="厨房琐事", episode="聊了些家里的事。",
+    env.add_cell(topic="厨房琐事", episode="聊了些家里的事。",
                      atoms=(),                                    # extraction missed it, so the index is empty
                      evidence=[("Melanie", "I broke my favourite bowl last night"),
                                ("user", "没事,再买一个就好")])

@@ -18,7 +18,11 @@ import pytest
 
 from personos.config import Config
 from personos.providers.openai_compat import (
-    NullMllm, OpenAIChatLLM, OpenAIEmbedder, OpenAIMllm, OpenAIReranker,
+    NullMllm,
+    OpenAIChatLLM,
+    OpenAIEmbedder,
+    OpenAIMllm,
+    OpenAIReranker,
 )
 from personos.providers.registry import PROVIDERS, build, load
 

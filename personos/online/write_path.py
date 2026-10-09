@@ -18,16 +18,26 @@ import numpy as np
 from loguru import logger
 
 from ..models import (
-    AXIS_MENU, ATOM_TEXT_SPEC, DOMAIN_VOCAB, EvidenceRecord, EvidenceRef,
-    MemCell, MemoryAtom, ensure_aware, normalize_domains, normalize_kind, now, vocab_menu,
+    ATOM_TEXT_SPEC,
+    AXIS_MENU,
+    DOMAIN_VOCAB,
+    EvidenceRecord,
+    EvidenceRef,
+    MemCell,
+    MemoryAtom,
+    ensure_aware,
+    normalize_domains,
+    normalize_kind,
+    now,
+    vocab_menu,
 )
 from ..storage.atom_store import AtomStore
-from .events import EVENT_ADD, emit
 from ..storage.cell_store import CellStore
 from ..storage.chain_store import ChainStore
 from ..storage.evidence_store import EvidenceStore
 from ..storage.seg_store import MemorySegStore, SegStore
 from . import chain_build
+from .events import EVENT_ADD, emit
 from .llm import ChatLLM, chat_json, with_scenario
 
 # Directives for caller-scenario injection (they only tune attention and level of detail; facts are

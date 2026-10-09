@@ -22,7 +22,13 @@ import numpy as np
 from loguru import logger
 
 from ..models import (
-    DOMAIN_VOCAB, MemCell, MemoryAtom, atom_anchor, ensure_aware, now, vocab_menu,
+    DOMAIN_VOCAB,
+    MemCell,
+    MemoryAtom,
+    atom_anchor,
+    ensure_aware,
+    now,
+    vocab_menu,
 )
 from ..storage.atom_store import AtomStore
 from .llm import ChatLLM, chat_json, with_scenario

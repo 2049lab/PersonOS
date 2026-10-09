@@ -17,7 +17,14 @@ from dataclasses import dataclass
 from loguru import logger
 
 from .llm import ChatLLM, chat_json
-from .retrieval import _MOST_RECENT_RULE, _R5_ORDER_ENV, _order_hits_for_answer, CellHit, MemoryAnswer, cell_block
+from .retrieval import (
+    _MOST_RECENT_RULE,
+    _R5_ORDER_ENV,
+    CellHit,
+    MemoryAnswer,
+    _order_hits_for_answer,
+    cell_block,
+)
 
 _REVIEW_SYS = (
     "# Role\n"

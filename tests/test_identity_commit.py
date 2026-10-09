@@ -11,7 +11,7 @@ from __future__ import annotations
 import numpy as np
 
 from personos.identity.backends.mock import MockOmni
-from personos.identity.chains import FIRST_SEEN, ChainBook
+from personos.identity.chains import ChainBook
 from personos.identity.cloud import CloudEngine
 from personos.identity.commit import commit_session
 from personos.identity.draft import MemoryDraftStore
@@ -29,7 +29,8 @@ class _FailOmni:
 
 
 def _e(i: int, dim: int = 8) -> np.ndarray:
-    v = np.zeros(dim, dtype=np.float64); v[i] = 1.0
+    v = np.zeros(dim, dtype=np.float64)
+    v[i] = 1.0
     return v
 
 
@@ -106,7 +107,7 @@ def test_second_session_wearer_binds_to_existing_wearer(db):
     """The wearer is the device: a new session's SW chain must land on the existing wearer
     even when the model votes NEW, and its voice samples are added to that character."""
     store, cloud, draft, book, registry = _setup(db)
-    ref1 = _seed_wearer(draft, S, voice_i=2)
+    _seed_wearer(draft, S, voice_i=2)
     r1 = commit_session(store, cloud, registry, book, session_id=S, omni=MockOmni("END"))
     wearer = r1["wearer"]
     assert r1["registered"] == [wearer] and len(store.active_assets(wearer, "voice")) == 1

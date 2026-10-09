@@ -48,6 +48,7 @@ def test_init_detects_the_installed_sdk_signature():
     import pytest
     anthropic = pytest.importorskip("anthropic")
     import inspect
+
     from personos.config import Config
 
     llm = AnthropicChatLLM(Config(anthropic_api_key="k"))

@@ -16,9 +16,8 @@ import re
 
 import pytest
 
-from personos.storage.db.ddl import TABLE_PK, _DDL, sqlite_ddl
+from personos.storage.db.ddl import _DDL, TABLE_PK, sqlite_ddl
 from personos.storage.db.dialect import DialectError, translate
-
 
 # ── placeholders ────────────────────────────────────────────────────────
 

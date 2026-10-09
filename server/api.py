@@ -26,19 +26,20 @@ from pydantic import BaseModel
 
 from personos import obs
 from personos.config import settings
+from personos.errors import QueueBusy
 from personos.logging_setup import trace
 from personos.models import now
 from personos.online.profile_render import render as render_profile
+from personos.online.recall_flow import PUBLIC_MODES, run_recall
 from personos.online.trust import build_trust_chain, trace_evidence
-from personos.errors import QueueBusy
+from personos.online.views import profile_view
+from personos.session_scope import scoped_session, valid_user_id
 from personos.storage.msg_queue import EnqueueBusy
 from personos.storage.profile_store import ProfileStore
-from personos.online.recall_flow import PUBLIC_MODES, run_recall
-from .response import EnvelopeRoute
 from server.runtime import UserContext, rt
-from personos.session_scope import scoped_session, valid_user_id
+
+from .response import EnvelopeRoute
 from .signing import verify_signature
-from personos.online.views import profile_view
 
 # route_class: centrally wraps whatever each handler returns into {code, data, msg}, so
 # no endpoint body has to be changed.

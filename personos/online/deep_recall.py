@@ -25,31 +25,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-import numpy as np
-from loguru import logger
-from pydantic import (
-    AliasChoices, BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator,
-)
-
-from .. import obs
-from ..config import settings
-from ..models import (
-    MemCell, MemoryAtom, ensure_aware, stamped_atom_text,
-)
-from ..storage.atom_store import AtomStore
-from ..storage.cell_store import CellStore
-from ..storage.chain_store import ChainStore
-from ..storage.evidence_store import EvidenceStore
-from .arbitrate import ReviewResult
-from .llm import ChatLLM, strip_fences, with_scenario
-from .chain_face import assemble_units
-from .rerank import NoopReranker, Reranker, rerank_cells
-from .retrieval import (
-    CellHit, MemoryAnswer, QueryRewrite, _date_window, _in_window, _vec_ranking,
-    cell_block, cell_lead, search_atoms as _pool_search,
-)
-from .write_path import _match_evidence_refs
-
 # langchain 1.x: the classic agents (JSON protocol, no dependency on gateway tool-calling) live in
 # langchain-classic
 from langchain_classic.agents import AgentExecutor
@@ -57,13 +32,56 @@ from langchain_classic.agents.format_scratchpad import format_log_to_messages
 from langchain_classic.agents.output_parsers import JSONAgentOutputParser
 from langchain_core.agents import AgentAction
 from langchain_core.language_models.chat_models import (
-    BaseChatModel, ChatGeneration, ChatResult,
+    BaseChatModel,
+    ChatGeneration,
+    ChatResult,
 )
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.tools import StructuredTool
 from langchain_core.tools.render import render_text_description
+from loguru import logger
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
+
+from .. import obs
+from ..config import settings
+from ..models import (
+    MemCell,
+    MemoryAtom,
+    ensure_aware,
+    stamped_atom_text,
+)
+from ..storage.atom_store import AtomStore
+from ..storage.cell_store import CellStore
+from ..storage.chain_store import ChainStore
+from ..storage.evidence_store import EvidenceStore
+from .arbitrate import ReviewResult
+from .chain_face import assemble_units
+from .llm import ChatLLM, strip_fences, with_scenario
+from .rerank import NoopReranker, Reranker, rerank_cells
+from .retrieval import (
+    CellHit,
+    MemoryAnswer,
+    QueryRewrite,
+    _date_window,
+    _in_window,
+    _vec_ranking,
+    cell_block,
+    cell_lead,
+)
+from .retrieval import (
+    search_atoms as _pool_search,
+)
+from .write_path import _match_evidence_refs
 
 _MAX_STEPS = 9         # cap on the agent's tool calls (each step may batch several calls; every observation carries a remaining-budget hint)
 _REMEMBER_CAP = 8      # cap on remember write-backs per session (a guard; writes past it are refused)

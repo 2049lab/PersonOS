@@ -1,4 +1,3 @@
-import pytest
 """Trust-chain unit tests: from an adopted atom to its ownership / awareness state and then
 down to the evidence — the chain must assemble correctly and degrade without crashing."""
 

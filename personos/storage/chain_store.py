@@ -26,7 +26,6 @@ from typing import Optional
 
 import numpy as np
 from loguru import logger
-from pydantic import BaseModel
 
 from ..models import ChainInfo, MemoryAtom, now
 from .db import Database, _Tx, blob_of, blob_param

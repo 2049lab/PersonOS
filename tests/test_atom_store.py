@@ -1,4 +1,3 @@
-import numpy as np
 
 from personos.models import MemoryAtom
 from personos.storage.atom_store import AtomStore

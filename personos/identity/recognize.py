@@ -100,11 +100,14 @@ def build_arbitration_prompt(queries: list[dict[str, Any]], candidates: list[Can
                         " (clothing may differ now)")
         attached = []
         if card.face_b64:
-            images.append(card.face_b64); attached.append(f"image #{len(images)} = face photo")
+            images.append(card.face_b64)
+            attached.append(f"image #{len(images)} = face photo")
         if card.body_b64:
-            images.append(card.body_b64); attached.append(f"image #{len(images)} = full-body photo")
+            images.append(card.body_b64)
+            attached.append(f"image #{len(images)} = full-body photo")
         if card.voice_b64:
-            audios.append(card.voice_b64); attached.append(f"audio #{len(audios)} = voice sample")
+            audios.append(card.voice_b64)
+            attached.append(f"audio #{len(audios)} = voice sample")
         if attached:
             rows.append(f"    attached: {', '.join(attached)}")
         blocks.append("\n".join(rows))
@@ -121,11 +124,14 @@ def build_arbitration_prompt(queries: list[dict[str, Any]], candidates: list[Can
             rows.append(f"    note: {query['note']}")
         attached = []
         if query.get("face_b64"):
-            images.append(query["face_b64"]); attached.append(f"image #{len(images)} = face photo")
+            images.append(query["face_b64"])
+            attached.append(f"image #{len(images)} = face photo")
         if query.get("body_b64"):
-            images.append(query["body_b64"]); attached.append(f"image #{len(images)} = full-body photo")
+            images.append(query["body_b64"])
+            attached.append(f"image #{len(images)} = full-body photo")
         if query.get("voice_b64"):
-            audios.append(query["voice_b64"]); attached.append(f"audio #{len(audios)} = voice sample")
+            audios.append(query["voice_b64"])
+            attached.append(f"audio #{len(audios)} = voice sample")
         if attached:
             rows.append(f"    attached: {', '.join(attached)}")
         blocks.append("\n".join(rows))

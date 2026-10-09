@@ -46,7 +46,8 @@ from dataclasses import dataclass, field
 from typing import Optional, Protocol
 
 from ..config import get_config
-from .redis_client import _esc, key as _key
+from .redis_client import _esc
+from .redis_client import key as _key
 
 # Releasing the enqueue lock: a single EVAL comparing the token, the same pattern
 # session_lock uses, so a holder only ever deletes its own lock.

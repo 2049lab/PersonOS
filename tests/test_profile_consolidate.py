@@ -110,4 +110,3 @@ def test_consolidate_preserves_existing_via_patch():
 
 # Kept at the bottom: an import at the top of the file would be order-dependent with conftest,
 # so it is referenced close to where it is used.
-from .fakes import FakeLLM  # noqa: E402

@@ -13,7 +13,6 @@ import base64
 import io
 
 import numpy as np
-import pytest
 
 from personos.identity.types import CandidateCard
 from personos.online.visual_query import VisualDeps, enrich_query_with_image

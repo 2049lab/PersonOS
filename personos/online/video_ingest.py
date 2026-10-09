@@ -25,16 +25,20 @@ from typing import Any, Optional
 
 from loguru import logger
 
+from personos.identity import repair
 from personos.identity.chains import ChainBook, resolve_chain_collisions
 from personos.identity.cloud import CloudEngine
 from personos.identity.commit import commit_session
 from personos.identity.draft import DraftStore
 from personos.identity.harvest import harvest_clip
 from personos.identity.recognize import build_arbitration_prompt, parse_verdicts
-from personos.identity import repair
 from personos.identity.registry import AnchorRegistry
-from personos.identity.screenplay import (WEARER_CAST_ID, build_clip_prompt, parse_clip_output,
-                                          rewrite_ids)
+from personos.identity.screenplay import (
+    WEARER_CAST_ID,
+    build_clip_prompt,
+    parse_clip_output,
+    rewrite_ids,
+)
 from personos.identity.store import CharacterStore
 from personos.identity.types import CastEvidence
 from personos.online.video_memory import CellBuild, flush_session_to_memory
@@ -358,7 +362,8 @@ def _process_clip_locked(deps: VideoDeps, *, session_id: str, clip_key: str, cli
             for cards in cand.values():
                 for card in cards:
                     if card.character_id not in seen:
-                        seen.add(card.character_id); pool.append(card)
+                        seen.add(card.character_id)
+                        pool.append(card)
             n_cand = len(pool)
             if pool:
                 ap, ai, aa = build_arbitration_prompt([qbc[c] for c in eval_casts], pool)
@@ -385,9 +390,9 @@ def _process_clip_locked(deps: VideoDeps, *, session_id: str, clip_key: str, cli
             draft.stage_evidence(canonical, session_id=session_id, clip_index=clip_index,
                                  evidence=ev, media_store=ms)
         draft.stage_lines(session_id, clip_index,
-                          [(l.t0, l.t1, script.cast_map.get(l.who, l.who), l.kind,
-                            rewrite_ids(l.text, script.cast_map))
-                           for l in script.lines])
+                          [(line.t0, line.t1, script.cast_map.get(line.who, line.who), line.kind,
+                            rewrite_ids(line.text, script.cast_map))
+                           for line in script.lines])
         registry.update_roster(session_id, clip_index, script, bindings={},
                                evidence_by_cast=evidence)
         # Only mark it done after every stage has landed in the draft — marking too early would make

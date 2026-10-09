@@ -10,7 +10,11 @@ from __future__ import annotations
 from loguru import logger
 
 from ._common import (
-    MediaNotFoundError, MediaStoreError, StoredImage, StoredVideo, content_key,
+    MediaNotFoundError,
+    MediaStoreError,
+    StoredImage,
+    StoredVideo,
+    content_key,
 )
 from .local import LocalMediaStore
 

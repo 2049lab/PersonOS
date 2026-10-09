@@ -65,7 +65,8 @@ def test_merge_canonical_and_aliases_flatten():
 
 def test_merge_same_chain_noop():
     d = _draft()
-    d.ensure_chain(S, "S1"); d.ensure_chain(S, "S2")
+    d.ensure_chain(S, "S1")
+    d.ensure_chain(S, "S2")
     r1, r2 = d.chain_ref(S, "S1"), d.chain_ref(S, "S2")
     d.merge_chain(r1, r2)
     d.merge_chain(r1, r2)   # already on the same chain, so this is idempotent
@@ -138,7 +139,8 @@ def test_next_clip_seq_monotonic():
 
 def test_commit_chain_marks_aliases():
     d = _draft()
-    d.ensure_chain(S, "S1"); d.ensure_chain(S, "S2")
+    d.ensure_chain(S, "S1")
+    d.ensure_chain(S, "S2")
     r1, r2 = d.chain_ref(S, "S1"), d.chain_ref(S, "S2")
     d.merge_chain(r1, r2)
     d.commit_chain(r2, "char_final")

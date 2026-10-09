@@ -135,13 +135,17 @@ def commit_session(store: CharacterStore, clouds: CloudEngine, registry: AnchorR
             majority = book.strong_majority(ref)
             if cast in defaulted:
                 if majority:
-                    verdicts[cast] = majority; report["fallbacks"][ref] = "majority"
+                    verdicts[cast] = majority
+                    report["fallbacks"][ref] = "majority"
                 elif chain["hypothesis"] != "NEW":
-                    verdicts[cast] = chain["hypothesis"]; report["fallbacks"][ref] = "hypothesis"
+                    verdicts[cast] = chain["hypothesis"]
+                    report["fallbacks"][ref] = "hypothesis"
                 else:
-                    verdicts[cast] = "NEW"; report["fallbacks"][ref] = "new"
+                    verdicts[cast] = "NEW"
+                    report["fallbacks"][ref] = "new"
             elif verdicts.get(cast) == "NEW" and majority:
-                verdicts[cast] = majority; report["fallbacks"][ref] = "majority_over_new"
+                verdicts[cast] = majority
+                report["fallbacks"][ref] = "majority_over_new"
         _apply_final_verdicts(book, chains, verdicts, issues, session_id=session_id, report=report)
     _resolve_final_collisions(book, session_id, report)
     _merge_same_name_chains(book, session_id, report)
@@ -284,7 +288,9 @@ def _final_arbitration(store: CharacterStore, registry: AnchorRegistry, book: Ch
         raws.append(raw)
         bv, bi, bd = parse_verdicts_detailed(
             raw, cast_ids=[c["cast_id"] for c in batch_chains], candidate_ids=candidate_ids)
-        verdicts.update(bv); issues.extend(bi); defaulted.update(bd)
+        verdicts.update(bv)
+        issues.extend(bi)
+        defaulted.update(bd)
     if not raws:
         logger.warning("every final review batch failed -> every chain falls back")
         return None, [], set()
@@ -459,7 +465,8 @@ def _resolve_final_collisions(book: ChainBook, session_id: str, report: dict[str
         strong = [c for c in group if book.strong_majority(c["chain_ref"]) == target]
         group.sort(key=lambda c: (-c["best_face_q"], min(c["presence"] or [10**9])))
         if len(strong) == 1:
-            group.remove(strong[0]); group.insert(0, strong[0])
+            group.remove(strong[0])
+            group.insert(0, strong[0])
         kept = [group[0]]
         for chain in group[1:]:
             if any(set(chain["presence"]) & set(k["presence"]) for k in kept):

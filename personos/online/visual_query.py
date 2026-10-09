@@ -166,7 +166,8 @@ def _candidates(deps: VisualDeps, picks: list[FacePick]) -> list[CandidateCard]:
             ev = CastEvidence(cast_id=f"F{i}", faces=[p])
             for cid, _score in deps.cloud.coarse_recall(ev, list(by_id), k=COARSE_TOP_K):
                 if cid not in seen:
-                    seen.add(cid); chosen.append(cid)
+                    seen.add(cid)
+                    chosen.append(cid)
     return [deps.registry.candidate_card(by_id[cid]) for cid in chosen]
 
 
@@ -194,9 +195,11 @@ def build_prompt(query: str, picks: list[FacePick], cands: list[CandidateCard],
     for i, p in enumerate(picks):
         attached = []
         if p.crop_b64:
-            images.append(p.crop_b64); attached.append(f"image #{len(images) + 1} = face crop")
+            images.append(p.crop_b64)
+            attached.append(f"image #{len(images) + 1} = face crop")
         if p.body_crop_b64:
-            images.append(p.body_crop_b64); attached.append(f"image #{len(images) + 1} = body crop")
+            images.append(p.body_crop_b64)
+            attached.append(f"image #{len(images) + 1} = body crop")
         blocks.append(f"  FACE {i}: " + (", ".join(attached) or "(no crop available)"))
 
     if cands:
@@ -209,7 +212,8 @@ def build_prompt(query: str, picks: list[FacePick], cands: list[CandidateCard],
                 rows.append(f"    appearance: {c.desc}")
             attached = []
             if c.face_b64:
-                images.append(c.face_b64); attached.append(f"image #{len(images) + 1} = face photo")
+                images.append(c.face_b64)
+                attached.append(f"image #{len(images) + 1} = face photo")
             if c.body_b64:
                 images.append(c.body_b64)
                 attached.append(f"image #{len(images) + 1} = full-body photo")

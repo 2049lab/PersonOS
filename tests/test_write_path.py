@@ -11,7 +11,12 @@ from datetime import datetime
 
 from personos.models import now
 from personos.online.write_path import (
-    FeedMsg, SessionWriter, _match_evidence_refs, append_utterance, build_cell, detect_boundary,
+    FeedMsg,
+    SessionWriter,
+    _match_evidence_refs,
+    append_utterance,
+    build_cell,
+    detect_boundary,
 )
 from personos.storage.atom_store import AtomStore
 from personos.storage.cell_store import CellStore

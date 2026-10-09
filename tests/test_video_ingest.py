@@ -164,11 +164,16 @@ def test_bulk_mixed_stress_no_loss_no_dup(spy):
     per_session_msgs = {}
     for s in sessions:                                   # flood everything first without consuming
         n = 0
-        mq.enqueue(U, s, _txt(text="开"), kind="ingest"); n += 1
-        mq.enqueue(U, s, _vid(f"{s}-a.mp4", f"{s}-b.mp4"), kind="video"); n += 1
-        mq.enqueue(U, s, _txt(text="中"), kind="ingest"); n += 1
-        mq.enqueue(U, s, _vid(f"{s}-c.mp4"), kind="video"); n += 1
-        mq.enqueue(U, s, {}, kind="session_end"); n += 1
+        mq.enqueue(U, s, _txt(text="开"), kind="ingest")
+        n += 1
+        mq.enqueue(U, s, _vid(f"{s}-a.mp4", f"{s}-b.mp4"), kind="video")
+        n += 1
+        mq.enqueue(U, s, _txt(text="中"), kind="ingest")
+        n += 1
+        mq.enqueue(U, s, _vid(f"{s}-c.mp4"), kind="video")
+        n += 1
+        mq.enqueue(U, s, {}, kind="session_end")
+        n += 1
         per_session_msgs[s] = n
     # Consume: drain each session until empty. drain has a max_drain cap, so loop until
     # more is False.

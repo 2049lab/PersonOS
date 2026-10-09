@@ -25,21 +25,31 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from loguru import logger
 
-from .arbitrate import ReviewResult, review_answer
-from .chain_face import UnitAssembly, assemble_units
-from .rerank import NoopReranker, Reranker, rerank_cells
-from .retrieval import (
-    AtomHit, CellHit, MemoryAnswer, QueryRewrite, answer_from_cells, rewrite_query, search_atoms,
-)
-from .session_context import build_history
-from .visual_query import VisualRewrite, enrich_query_with_image
 from ..storage.atom_store import AtomStore
 from ..storage.cell_store import CellStore
 from ..storage.chain_store import ChainStore
 from ..storage.evidence_store import EvidenceStore
+from .arbitrate import ReviewResult, review_answer
+from .chain_face import UnitAssembly, assemble_units
+from .rerank import NoopReranker, Reranker, rerank_cells
+from .retrieval import (
+    AtomHit,
+    CellHit,
+    MemoryAnswer,
+    QueryRewrite,
+    answer_from_cells,
+    rewrite_query,
+    search_atoms,
+)
+from .session_context import build_history
+from .visual_query import VisualRewrite, enrich_query_with_image
+
+if TYPE_CHECKING:
+    from .deep_recall import DeepOutcome
 
 # Three public modes: auto (escalates automatically) | fast (fast path only) | deep (straight to the
 # deep track, for standalone benchmarking)

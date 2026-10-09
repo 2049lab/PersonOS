@@ -15,7 +15,6 @@ in-memory implementations take over. Requires ``pip install personos[redis]``.
 
 from __future__ import annotations
 
-import os
 import threading
 
 from ..config import settings

@@ -15,7 +15,10 @@ import pytest
 
 from personos.config import Config
 from personos.storage.media import (
-    LocalMediaStore, MediaNotFoundError, MediaStoreError, media_store_from_settings,
+    LocalMediaStore,
+    MediaNotFoundError,
+    MediaStoreError,
+    media_store_from_settings,
 )
 from personos.storage.media._common import _detect_image_type, content_key
 

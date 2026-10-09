@@ -13,7 +13,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from personos.online.recall_flow import run_recall
-from personos.storage.cell_store import CellStore
 
 from .test_retrieval import Env, TableEmbedder, _v
 

@@ -54,19 +54,19 @@ from loguru import logger
 
 from personos.config import get_config
 from personos.models import TZ, stamped_atom_text
+from personos.online.profile_consolidate import run_user_consolidation
+from personos.online.profile_render import render as render_profile
 from personos.online.recall_flow import run_recall
 from personos.online.rerank import NoopReranker, ScoringReranker
 from personos.online.retrieval import cell_lead
 from personos.online.trust import evidence_entries
-from personos.online.profile_consolidate import run_user_consolidation
-from personos.online.profile_render import render as render_profile
-from personos.storage.profile_store import ProfileStore
 from personos.online.write_path import SessionWriter
 from personos.providers.registry import build as build_provider
 from personos.storage.atom_store import AtomStore
 from personos.storage.cell_store import CellStore
 from personos.storage.db import Database
 from personos.storage.evidence_store import EvidenceStore
+from personos.storage.profile_store import ProfileStore
 from scripts.bench.judge import Verdict, answer_mode_a, judge
 
 LOCOMO_PATH = Path("data/locomo10.json")   # --download fills this; --data overrides
@@ -932,7 +932,7 @@ def main():
                    "conversations": {t["meta"]["conv"]: t["summary"] for t in scored}}
         (run_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=1))
         n_ = max(1, tot_q)
-        lines = [f"# LoCoMo-10 x personos — run summary", "",
+        lines = ["# LoCoMo-10 x personos — run summary", "",
                  f"- run: {meta['run_at']} - mode {args.mode} - git `{meta.get('git', '')}`",
                  f"- benchmark LLM: {meta['llm']} - judge: {meta['judge']}",
                  f"- reranker: {meta['reranker']} - embedding: {meta['embedding']}", "",

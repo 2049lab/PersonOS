@@ -555,7 +555,7 @@ def _write_summary(run_dir: Path, traces: list[dict], meta: dict, mode: str) -> 
     (run_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=1))
 
     n_ = max(1, tot_n)
-    lines = [f"# LongMemEval-S x personos — run summary", "",
+    lines = ["# LongMemEval-S x personos — run summary", "",
              f"- run: {meta['run_at']} - mode {mode} - git `{meta.get('git', '')}`",
              f"- benchmark LLM: {meta['llm']} - judge: {meta['judge']}",
              f"- reranker: {meta['reranker']} - embedding: {meta['embedding']}", "",

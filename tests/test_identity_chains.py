@@ -16,7 +16,7 @@ from personos.identity.chains import (
     ChainBook,
 )
 from personos.identity.draft import MemoryDraftStore
-from personos.identity.screenplay import CastDecl, ClipLine, ClipScript
+from personos.identity.screenplay import CastDecl, ClipScript
 from personos.identity.types import CastEvidence, FacePick
 
 S = "sess1"

@@ -121,7 +121,6 @@ def assign_chains(llm: ChatLLM, store: ChainStore,
     per = _prefilter(items, chains)
     union = sorted({i for cands in per.values() for i in cands})
     label2idx = {f"c{n}": i for n, i in enumerate(union, start=1)}
-    idx_by_id = {chains[i][0].id: i for i in union}
 
     atom_lines = []
     for k, (a, _) in enumerate(items, start=1):
@@ -131,7 +130,7 @@ def assign_chains(llm: ChatLLM, store: ChainStore,
         atom_lines.append(f"[{k}] ({when}) {a.text}\n{cs}")
     cand_block = (_render_candidates([info for info, _ in chains], union, store)
                   if union else "(no existing chains yet — every atom starts a new chain)")
-    user = (f"—— New atoms from this segment ——\n" + "\n".join(atom_lines)
+    user = ("—— New atoms from this segment ——\n" + "\n".join(atom_lines)
             + f"\n\n—— Candidate chains (nearest by meaning) ——\n{cand_block}")
 
     try:

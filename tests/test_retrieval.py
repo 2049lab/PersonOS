@@ -13,7 +13,13 @@ import numpy as np
 
 from personos.models import MemCell, MemoryAtom
 from personos.online.retrieval import (
-    AtomHit, CellHit, QueryRewrite, answer_from_cells, cell_block, rewrite_query, search_atoms,
+    AtomHit,
+    CellHit,
+    QueryRewrite,
+    answer_from_cells,
+    cell_block,
+    rewrite_query,
+    search_atoms,
 )
 from personos.storage.atom_store import AtomStore
 from personos.storage.cell_store import CellStore
@@ -379,7 +385,7 @@ def test_r5_order_none_tstart_floor_and_stable_ties(monkeypatch):
 def test_answer_prompt_carries_p1_rules():
     """Guard over the P1 clauses: "trust the most recent" for consuming conflicts, and
     "count first, then verify" for enumeration, must not be quietly dropped by a later rewrite."""
-    from personos.online.retrieval import CONFLICT_RULE, _ANSWER_SYS
+    from personos.online.retrieval import _ANSWER_SYS, CONFLICT_RULE
     assert "the MOST RECENT statement is the current state" in CONFLICT_RULE
     assert "count the distinct items the materials actually contain" in _ANSWER_SYS
     assert "verify your list has exactly that many" in _ANSWER_SYS

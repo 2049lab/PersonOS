@@ -16,16 +16,18 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from personos.online.recall_flow import run_recall
-from personos.online.llm import _SCEN_HEADER, with_scenario
-from personos.online import write_path as W
-from personos.online import retrieval as R
-from personos.online import profile_consolidate as P
 from personos.online import deep_recall as D
+from personos.online import profile_consolidate as P
+from personos.online import retrieval as R
+from personos.online import write_path as W
+from personos.online.llm import _SCEN_HEADER, with_scenario
+from personos.online.recall_flow import run_recall
 from personos.online.write_path import FeedMsg
 
-from .test_retrieval import Env as REnv, TableEmbedder, _v
-from .test_write_path import Env as WEnv, ATOMS_OK, BOUNDARY_END, EPISODE_OK
+from .test_retrieval import Env as REnv
+from .test_retrieval import TableEmbedder, _v
+from .test_write_path import ATOMS_OK, BOUNDARY_END, EPISODE_OK
+from .test_write_path import Env as WEnv
 
 _SCEN = "饮食健康 App:用户记录三餐并咨询饮食习惯,重点记饮食偏好/忌口/热量目标。"
 _T = datetime(2026, 8, 25, 10, 0, tzinfo=timezone.utc)

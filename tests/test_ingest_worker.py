@@ -399,7 +399,10 @@ def test_two_consumers_single_flight_cross_pod():
 
     t1 = threading.Thread(target=worker, args=(c1,))
     t2 = threading.Thread(target=worker, args=(c2,))
-    t1.start(); t2.start(); t1.join(10); t2.join(10)
+    t1.start()
+    t2.start()
+    t1.join(10)
+    t2.join(10)
     assert log == list(range(30))                      # two pods competing, still ordered with no duplicates and no losses
 
 

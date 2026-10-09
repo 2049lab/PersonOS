@@ -35,7 +35,7 @@ def test_parse_full_json_screenplay():
     assert {c.local_id for c in s.casts} == {"P1", "SW"}
     assert s.cast_decl("P1").name == "David"
     assert s.cast_decl("SW").is_wearer is True
-    kinds = {(l.who, l.kind) for l in s.lines}
+    kinds = {(line.who, line.kind) for line in s.lines}
     assert ("P1", "speech") in kinds and ("P1", "action") in kinds
     assert (ENV_WHO, "environment") in kinds and ("SW", "action") in kinds
     assert s.nominations[0].pos == "left"

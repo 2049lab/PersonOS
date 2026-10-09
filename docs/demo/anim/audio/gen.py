@@ -29,7 +29,7 @@ CACHE.mkdir(exist_ok=True)
 def spent() -> float:
     if not LEDGER.exists():
         return 0.0
-    return sum(json.loads(l).get("credits", 0) for l in LEDGER.read_text().splitlines() if l.strip())
+    return sum(json.loads(line).get("credits", 0) for line in LEDGER.read_text().splitlines() if line.strip())
 
 
 def _log(rec: dict) -> None:
@@ -112,5 +112,6 @@ def shift_voice(src: Path, semitones: float, formant: float = 1.0, robot: bool =
     if robot:
         af = "chorus=0.7:0.9:28|40:0.25|0.2:0.3|0.25:1.5|2,aecho=0.8:0.85:7:0.22," + af
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(tmp), "-af", af, "-ar", "44100", str(out)], check=True)
-    wav.unlink(missing_ok=True); tmp.unlink(missing_ok=True)
+    wav.unlink(missing_ok=True)
+    tmp.unlink(missing_ok=True)
     return out

@@ -249,16 +249,19 @@ class CharacterStore:
             pl = a["payload"]
             sid = str(pl.get("session", ""))
             if per_session.get(sid, 0) >= session_face_cap or len(keep_pairs) >= face_cap:
-                self.retire_asset(a["id"]); retired += 1
+                self.retire_asset(a["id"])
+                retired += 1
                 continue
             per_session[sid] = per_session.get(sid, 0) + 1
             keep_pairs.add((sid, pl.get("clip")))
         for a in self.active_assets(character_id, "body"):
             pl = a["payload"]
             if (str(pl.get("session", "")), pl.get("clip")) not in keep_pairs:
-                self.retire_asset(a["id"]); retired += 1
+                self.retire_asset(a["id"])
+                retired += 1
         for a in self.active_assets(character_id, "voice")[voice_cap:]:
-            self.retire_asset(a["id"]); retired += 1
+            self.retire_asset(a["id"])
+            retired += 1
         return retired
 
     # ── Probability cloud: the prototype (slot=prototype, one row per

@@ -12,15 +12,22 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from personos.identity import repair
 from personos.identity.inspect import (
-    inspect_cont_conflict, inspect_duplicate_cast, inspect_name_claims,
-    inspect_nom_position, inspect_script, inspect_voice_overlap, inspect_wearer_visible,
+    inspect_cont_conflict,
+    inspect_duplicate_cast,
+    inspect_name_claims,
+    inspect_nom_position,
+    inspect_script,
+    inspect_voice_overlap,
+    inspect_wearer_visible,
 )
 from personos.identity.screenplay import (
-    CastDecl, ClipLine, ClipScript, Nomination, VoiceRange,
+    CastDecl,
+    ClipLine,
+    ClipScript,
+    Nomination,
+    VoiceRange,
 )
 
 

@@ -15,9 +15,9 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from server.runtime import UserContext, rt
-from server.app import app
 from server.api import _ctx
+from server.app import app
+from server.runtime import UserContext, rt
 from server.signing import verify_signature
 
 U = "vtest_ingest_valid"

@@ -131,11 +131,14 @@ class CellStore:
         """
         clauses, params = ["user_id=%s"], [self.user_id]
         if episode_type:
-            clauses.append("episode_type=%s"); params.append(episode_type)
+            clauses.append("episode_type=%s")
+            params.append(episode_type)
         if start:
-            clauses.append("t_start >= %s"); params.append(start)      # t_start holds an ISO string, so lexical order is chronological order
+            clauses.append("t_start >= %s")
+            params.append(start)      # t_start holds an ISO string, so lexical order is chronological order
         if end:
-            clauses.append("t_start <= %s"); params.append(end)
+            clauses.append("t_start <= %s")
+            params.append(end)
         return " AND ".join(clauses), params
 
     def list_by_type(self, *, episode_type: Optional[str] = None, start: Optional[str] = None,

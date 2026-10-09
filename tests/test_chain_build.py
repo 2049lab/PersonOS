@@ -12,7 +12,7 @@ from datetime import datetime
 
 import numpy as np
 
-from personos.models import ChainInfo, EvidenceRecord, MemoryAtom, now
+from personos.models import ChainInfo, EvidenceRecord, MemoryAtom
 from personos.online.chain_build import assign_chains
 from personos.online.write_path import build_cell
 from personos.storage.atom_store import AtomStore
@@ -98,7 +98,7 @@ def test_new_chain_grouping(db):
 def test_append_existing_prefilter_and_centroid(db, rng_vec):
     """Appending to an existing chain: the pre-filtered candidates make it into the prompt, the
     append is persisted, and the centroid is updated incrementally at group level."""
-    at, cs = AtomStore(db), ChainStore(db)
+    cs = ChainStore(db)
     old_vec = rng_vec(1)
     ch0, _ = _chain_with_atom(db, "Caroline 的瑜伽馆", "Caroline 的瑜伽馆在 MBS", old_vec)
 
@@ -107,7 +107,7 @@ def test_append_existing_prefilter_and_centroid(db, rng_vec):
     # Candidate chain labels follow chain creation order; the callable picks the target label
     # back out of the prompt.
     def pick(prompt):
-        label = next(l for l in ("c1", "c2") if f"{l} · Caroline 的瑜伽馆" in prompt)
+        label = next(candidate for candidate in ("c1", "c2") if f"{candidate} · Caroline 的瑜伽馆" in prompt)
         return json.dumps({"assignments": [{"chain": label, "atoms": [1]}]})
     llm = RoutingLLM(assign=[pick])
     res = assign_chains(llm, cs, items, origin_cell_id="cell_y")
@@ -157,7 +157,7 @@ def test_unplaced_atoms_default_free(db):
 def test_execution_conflict_isolated(db):
     """When one group fails to execute (a double-attachment conflict), only that group is lost;
     the remaining groups are persisted as usual."""
-    at, cs = AtomStore(db), ChainStore(db)
+    cs = ChainStore(db)
     ch_b, b1 = _chain_with_atom(db, "链B", "B 的事实", np.random.default_rng(5).standard_normal(8).astype(np.float32))
     fresh = _seeded(db, ["干净的新事实"])
     items = [(b1, np.random.default_rng(6).standard_normal(8).astype(np.float32))] + fresh

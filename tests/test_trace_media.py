@@ -13,9 +13,9 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from personos.online.views import memory_view
 from personos.models import EvidenceRecord, EvidenceRef, MemoryAtom
 from personos.online.trust import _ev_dict, evidence_entries
+from personos.online.views import memory_view
 
 _T = datetime(2026, 8, 25, 10, 0)
 

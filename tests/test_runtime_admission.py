@@ -19,7 +19,8 @@ def test_gate_fills_then_rejects():
 
 def test_gate_leave_makes_room():
     g = AdmissionGate(cap=2)
-    g.try_enter(); g.try_enter()
+    g.try_enter()
+    g.try_enter()
     assert not g.try_enter()
     g.leave()
     assert g.try_enter()                            # release one, get one slot back
@@ -31,7 +32,8 @@ def test_gate_cross_thread_release():
     g = AdmissionGate(cap=1)
     assert g.try_enter()
     t = threading.Thread(target=g.leave)
-    t.start(); t.join()
+    t.start()
+    t.join()
     assert g.try_enter()
 
 
@@ -39,7 +41,8 @@ def test_gate_double_release_explodes():
     """BoundedSemaphore raises ValueError on an extra release, which is exactly the self-check
     for "every path releases exactly once"."""
     g = AdmissionGate(cap=1)
-    g.try_enter(); g.leave()
+    g.try_enter()
+    g.leave()
     with pytest.raises(ValueError):
         g.leave()
 

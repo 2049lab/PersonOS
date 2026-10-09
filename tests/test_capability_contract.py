@@ -18,8 +18,14 @@ from personos import MissingCapability
 from personos.config import Config, reset_config, set_config
 from personos.diagnostics import inspect, render
 from personos.errors import (
-    image_not_understood, no_deep_track, no_embedder, no_identity_backend,
-    no_llm, no_public_media_url, no_vision, visual_recall_unavailable,
+    image_not_understood,
+    no_deep_track,
+    no_embedder,
+    no_identity_backend,
+    no_llm,
+    no_public_media_url,
+    no_vision,
+    visual_recall_unavailable,
 )
 
 

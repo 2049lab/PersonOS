@@ -134,7 +134,7 @@ class MemorySessionLock:
         with self._guard:
             lk = self._locks.setdefault(k, threading.Lock())
             if len(self._locks) > self._CAP:     # over the cap: clear old unheld locks, excluding the one just taken
-                for stale in [s for s, l in self._locks.items() if s != k and not l.locked()]:
+                for stale in [s for s, lock in self._locks.items() if s != k and not lock.locked()]:
                     self._locks.pop(stale, None)
         with lk:
             yield
@@ -143,7 +143,7 @@ class MemorySessionLock:
         with self._guard:
             lk = self._locks.setdefault(k, threading.Lock())
             if len(self._locks) > self._CAP:     # over the cap: clear old unheld locks, so the try_acquire path cannot leak either
-                for stale in [s for s, l in self._locks.items() if s != k and not l.locked()]:
+                for stale in [s for s, lock in self._locks.items() if s != k and not lock.locked()]:
                     self._locks.pop(stale, None)
             return lk
 

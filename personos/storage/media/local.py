@@ -20,8 +20,14 @@ from pathlib import Path
 from loguru import logger
 
 from ._common import (
-    MediaNotFoundError, MediaStoreError, StoredImage, StoredVideo,
-    content_key, validate_audio, validate_image, validate_video,
+    MediaNotFoundError,
+    MediaStoreError,
+    StoredImage,
+    StoredVideo,
+    content_key,
+    validate_audio,
+    validate_image,
+    validate_video,
 )
 
 

@@ -16,8 +16,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
-
-from gen import CACHE, CONF, HERE, shift_voice, sfx, spent, tts
+from gen import CACHE, CONF, HERE, sfx, shift_voice, spent, tts
 
 OUT = HERE.parent.parent / "out"
 SR = 44100
@@ -51,7 +50,8 @@ def beep(path: Path) -> Path:
 
 def audition() -> None:
     OUT.mkdir(exist_ok=True)
-    tmp = CACHE / "_aud"; tmp.mkdir(exist_ok=True)
+    tmp = CACHE / "_aud"
+    tmp.mkdir(exist_ok=True)
     gap, short, bp = silence(0.7, tmp / "gap.wav"), silence(0.35, tmp / "short.wav"), beep(tmp / "beep.wav")
     parts, index, n = [], [], 0
     for ch, cfg in CONF["characters"].items():
@@ -70,8 +70,10 @@ def audition() -> None:
     norm = []
     for i, p in enumerate(parts):
         q = tmp / f"n{i:03d}.wav"
-        run("ffmpeg", "-y", "-loglevel", "error", "-i", p, "-ac", "1", "-ar", "44100", q); norm.append(q)
-    lst = tmp / "list.txt"; lst.write_text("".join(f"file '{q}'\n" for q in norm))
+        run("ffmpeg", "-y", "-loglevel", "error", "-i", p, "-ac", "1", "-ar", "44100", q)
+        norm.append(q)
+    lst = tmp / "list.txt"
+    lst.write_text("".join(f"file '{q}'\n" for q in norm))
     run("ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", lst, "-c:a", "libmp3lame", "-b:a", "160k", OUT / "voice_audition.mp3")
     (OUT / "voice_audition.txt").write_text("Voice audition order (a beep precedes each candidate; two beeps precede the SFX samples)\n\n" + "\n".join(index) + "\n")
     print("audition ready;", f"credits spent so far: {spent():.0f}")
@@ -89,10 +91,14 @@ def voices() -> dict:
             if who == "biscuit":
                 continue
             cast_who, text = CONF["lines"][key]
-            name, vid = CONF["cast"][cast_who]; cfg = CONF["characters"][cast_who]
+            name, vid = CONF["cast"][cast_who]
+            cfg = CONF["characters"][cast_who]
             raw = tts(vid, text, f"line:{key}:{name}")
             vc = shift_voice(raw, cfg["semitones"], cfg["formant"], cfg.get("robot", False))
-            d = dur(vc); tempo = max(1.0, d / win); fits = tempo <= MAX_TEMPO + 1e-6; tempo = min(tempo, MAX_TEMPO)
+            d = dur(vc)
+            tempo = max(1.0, d / win)
+            fits = tempo <= MAX_TEMPO + 1e-6
+            tempo = min(tempo, MAX_TEMPO)
             out = CACHE / f"fit_{vc.stem}_{tempo:.3f}.wav"
             if not out.exists():
                 run("ffmpeg", "-y", "-loglevel", "error", "-i", vc, "-af", f"atempo={tempo:.4f}" if tempo > 1.001 else "anull", "-ar", SR, "-ac", 1, out)
@@ -116,10 +122,22 @@ def sfx_all() -> dict[str, Path]:
 def music_check(path: Path) -> dict:
     """Crude musicality test: pitched (harmonic) fraction + onset periodicity. We can't listen, so report the numbers."""
     import parselmouth
-    wav = CACHE / "_music.wav"; run("ffmpeg", "-y", "-loglevel", "error", "-i", path, "-ac", 1, "-ar", SR, wav)
-    snd = parselmouth.Sound(str(wav)); hnr = snd.to_harmonicity_cc(time_step=0.05); h = hnr.values[0]; h = h[h > -100]
-    x = decode(path); hop = 512; frames = len(x) // hop; env = np.array([np.abs(x[i * hop:(i + 1) * hop]).mean() for i in range(frames)]); on = np.maximum(0, np.diff(env)); on -= on.mean()
-    ac = np.correlate(on, on, "full")[len(on) - 1:]; ac /= ac[0] + 1e-9; lag = np.arange(len(ac)) * hop / SR; m = (lag > 0.25) & (lag < 2.0)
+    wav = CACHE / "_music.wav"
+    run("ffmpeg", "-y", "-loglevel", "error", "-i", path, "-ac", 1, "-ar", SR, wav)
+    snd = parselmouth.Sound(str(wav))
+    hnr = snd.to_harmonicity_cc(time_step=0.05)
+    h = hnr.values[0]
+    h = h[h > -100]
+    x = decode(path)
+    hop = 512
+    frames = len(x) // hop
+    env = np.array([np.abs(x[i * hop:(i + 1) * hop]).mean() for i in range(frames)])
+    on = np.maximum(0, np.diff(env))
+    on -= on.mean()
+    ac = np.correlate(on, on, "full")[len(on) - 1:]
+    ac /= ac[0] + 1e-9
+    lag = np.arange(len(ac)) * hop / SR
+    m = (lag > 0.25) & (lag < 2.0)
     return {"harmonic_fraction": round(float((h > 6).mean()), 2), "mean_hnr_db": round(float(h.mean()), 1), "beat_peak": round(float(ac[m].max()), 2), "beat_period_s": round(float(lag[m][ac[m].argmax()]), 2)}
 
 
@@ -135,72 +153,106 @@ SFX_MAP = {  # event name -> (sfx key, gain dB, offset s)
 
 
 def place(buf: np.ndarray, x: np.ndarray, t: float, gain_db: float = 0.0) -> None:
-    i = int(round(t * SR)); i = max(i, 0)
+    i = int(round(t * SR))
+    i = max(i, 0)
     if i >= len(buf):
         return
-    n = min(len(x), len(buf) - i); buf[i:i + n] += x[:n] * 10 ** (gain_db / 20)
+    n = min(len(x), len(buf) - i)
+    buf[i:i + n] += x[:n] * 10 ** (gain_db / 20)
 
 
 def sfx_clip(path: Path, peak: float = 0.7) -> np.ndarray:
-    x = decode(path); m = np.abs(x).max() + 1e-9
+    x = decode(path)
+    m = np.abs(x).max() + 1e-9
     return x * (peak / m)
 
 
 def envelope(x: np.ndarray, atk: float = 0.03, rel: float = 0.35) -> np.ndarray:
-    win = int(SR * 0.02); e = np.sqrt(np.convolve(x * x, np.ones(win) / win, "same")); e = np.clip(e / (np.percentile(e[e > 1e-4], 90) + 1e-9), 0, 1)
-    out = np.zeros_like(e); a, r = np.exp(-1 / (atk * SR)), np.exp(-1 / (rel * SR)); y = 0.0
+    win = int(SR * 0.02)
+    e = np.sqrt(np.convolve(x * x, np.ones(win) / win, "same"))
+    e = np.clip(e / (np.percentile(e[e > 1e-4], 90) + 1e-9), 0, 1)
+    out = np.zeros_like(e)
+    a, r = np.exp(-1 / (atk * SR)), np.exp(-1 / (rel * SR))
+    y = 0.0
     for i in range(0, len(e), 8):                                  # coarse-step smoothing keeps this fast
-        v = e[i]; y = a * y + (1 - a) * v if v > y else r * y + (1 - r) * v
+        v = e[i]
+        y = a * y + (1 - a) * v if v > y else r * y + (1 - r) * v
         out[i:i + 8] = y
     return out
 
 
 def tile(x: np.ndarray, n: int, xf: float = 1.0) -> np.ndarray:
-    k = int(xf * SR); out = np.zeros(n, dtype=np.float32); pos = 0; fade = np.linspace(0, 1, k, dtype=np.float32)
+    k = int(xf * SR)
+    out = np.zeros(n, dtype=np.float32)
+    pos = 0
+    fade = np.linspace(0, 1, k, dtype=np.float32)
     while pos < n:
-        seg = x.copy(); seg[:k] *= fade; seg[-k:] *= fade[::-1]
-        m = min(len(seg), n - pos); out[pos:pos + m] += seg[:m]; pos += len(seg) - k
+        seg = x.copy()
+        seg[:k] *= fade
+        seg[-k:] *= fade[::-1]
+        m = min(len(seg), n - pos)
+        out[pos:pos + m] += seg[:m]
+        pos += len(seg) - k
     return out
 
 
 def mix_all(use_music: bool | None = None) -> dict:
-    info = json.loads((CACHE / "lines.json").read_text()); S = sfx_all(); N = int((CUES["duration"] + 1.0) * SR)
-    voice = np.zeros(N, np.float32); fx = np.zeros(N, np.float32); amb = np.zeros(N, np.float32); mus = np.zeros(N, np.float32)
+    info = json.loads((CACHE / "lines.json").read_text())
+    S = sfx_all()
+    N = int((CUES["duration"] + 1.0) * SR)
+    voice = np.zeros(N, np.float32)
+    fx = np.zeros(N, np.float32)
+    amb = np.zeros(N, np.float32)
+    mus = np.zeros(N, np.float32)
     for lid, d in info.items():
         for who, v in d.items():
             x = decode(CACHE / v["file"])
             if v["offscreen"]:
-                tmp = CACHE / "_off.wav"; run("ffmpeg", "-y", "-loglevel", "error", "-i", CACHE / v["file"], "-af", "lowpass=f=2600,aecho=0.8:0.6:60|120:0.3|0.2,volume=0.7", "-ar", SR, "-ac", 1, tmp); x = decode(tmp)
+                tmp = CACHE / "_off.wav"
+                run("ffmpeg", "-y", "-loglevel", "error", "-i", CACHE / v["file"], "-af", "lowpass=f=2600,aecho=0.8:0.6:60|120:0.3|0.2,volume=0.7", "-ar", SR, "-ac", 1, tmp)
+                x = decode(tmp)
             place(voice, x, v["start"] + 0.06, -2 if who != "pebble" else -3)
     # biscuit: SFX only, on the dialogue lines' windows
     for s in CUES["says"]:
         if s["speaker"] == "biscuit":
-            key = CONF["biscuit_sfx"][s["id"]]; place(voice, sfx_clip(S[key], .8), s["start"] + .05, -2)
+            key = CONF["biscuit_sfx"][s["id"]]
+            place(voice, sfx_clip(S[key], .8), s["start"] + .05, -2)
     # SFX from the cue sheet
     clips = {k: sfx_clip(p) for k, p in S.items() if not k.startswith("amb_")}
     for e in CUES["events"]:
         n = e["name"]
         if n == "script_act":
-            if "doorbell" in e["text"]: place(fx, clips["doorbell"], e["t"] - .05, -4)
-            else: place(fx, clips["pen_scribble"], e["t"], -24)
+            if "doorbell" in e["text"]:
+                place(fx, clips["doorbell"], e["t"] - .05, -4)
+            else:
+                place(fx, clips["pen_scribble"], e["t"], -24)
         elif n in SFX_MAP:
-            k, g, off = SFX_MAP[n]; place(fx, clips[k], e["t"] + off, g)
+            k, g, off = SFX_MAP[n]
+            place(fx, clips[k], e["t"] + off, g)
     for s in CUES["says"]:
-        if s["speaker"] != "biscuit": place(fx, clips["pen_scribble"], s["start"] + .1, -26)
+        if s["speaker"] != "biscuit":
+            place(fx, clips["pen_scribble"], s["start"] + .1, -26)
     # candy wrappers sticking after each grab; ink wipe over the whole rewrite
-    for e in [e for e in CUES["events"] if e["name"] == "candy_grab"]: place(fx, clips["wrapper_stick"], e["t"] + .5, -11)
-    ws = [e["t"] for e in CUES["events"] if e["name"] == "wipe_start"][0]; we = [e["t"] for e in CUES["events"] if e["name"] == "wipe_end"][0]
-    seg = tile(clips["ink_wipe"], int((we - ws + .4) * SR), .4); place(fx, seg, ws, -10)
+    for e in [e for e in CUES["events"] if e["name"] == "candy_grab"]:
+        place(fx, clips["wrapper_stick"], e["t"] + .5, -11)
+    ws = [e["t"] for e in CUES["events"] if e["name"] == "wipe_start"][0]
+    we = [e["t"] for e in CUES["events"] if e["name"] == "wipe_end"][0]
+    seg = tile(clips["ink_wipe"], int((we - ws + .4) * SR), .4)
+    place(fx, seg, ws, -10)
     # ambience: night rain until the page turn to morning, birds after, both crossfaded
     night_end, flip = 110.4, 111.3
-    rain = tile(decode(S["amb_rain"]), N, 1.5); birds = tile(decode(S["amb_birds"]), N, 1.5); t = np.arange(N) / SR
+    rain = tile(decode(S["amb_rain"]), N, 1.5)
+    birds = tile(decode(S["amb_birds"]), N, 1.5)
+    t = np.arange(N) / SR
     rain_env = np.clip((t - 3.2) / 2.0, 0, 1) * np.clip((flip - t) / (flip - night_end), 0, 1) * (1 + 0.8 * ((t > 65.4) & (t < 72.8)))
     bird_env = np.clip((t - night_end) / (flip - night_end), 0, 1) * np.clip((156.5 - t) / 2.0, 0, 1)
     amb += rain * rain_env * 10 ** (-27 / 20) + birds * bird_env * 10 ** (-24 / 20)
     if use_music:
         mus += tile(decode(S["amb_music"]), N, 1.5) * np.clip(t / 2, 0, 1) * np.clip((CUES["duration"] - t) / 3, 0, 1) * 10 ** (-27 / 20)
     # ducking: dialogue envelope pushes effects / ambience / music down
-    env = envelope(voice); duck = lambda depth: 1 - depth * env
+    env = envelope(voice)
+    def duck(depth):
+        return 1 - depth * env
     mixed = voice + fx * duck(.35) + amb * duck(.55) + mus * duck(.6)
     tmp = CACHE / "_premix.wav"
     import soundfile as sf
@@ -214,9 +266,13 @@ def mix_all(use_music: bool | None = None) -> dict:
     run("ffmpeg", "-y", "-loglevel", "error", "-i", tmp, "-af", af + ",alimiter=limit=0.89:level=false", "-ar", SR, "-ac", 2, final)
     r2 = subprocess.run(["ffmpeg", "-hide_banner", "-nostats", "-i", str(final), "-af", "ebur128=peak=true", "-f", "null", "-"], capture_output=True, text=True).stderr
     summ = r2[r2.rindex("Summary:"):]
-    I = float(re.search(r"I:\s+(-?[\d.]+) LUFS", summ).group(1)); tp = float(re.search(r"Peak:\s+(-?[\d.]+) dBFS", summ).group(1)); lra = float(re.search(r"LRA:\s+([\d.]+) LU", summ).group(1))
-    res = {"integrated_lufs": I, "true_peak_dbtp": tp, "lra": lra, "premix_input_lufs": m["input_i"], "music": bool(use_music)}
-    print(res); (CACHE / "mix_report.json").write_text(json.dumps(res, indent=1)); return res
+    integrated_lufs = float(re.search(r"I:\s+(-?[\d.]+) LUFS", summ).group(1))
+    tp = float(re.search(r"Peak:\s+(-?[\d.]+) dBFS", summ).group(1))
+    lra = float(re.search(r"LRA:\s+([\d.]+) LU", summ).group(1))
+    res = {"integrated_lufs": integrated_lufs, "true_peak_dbtp": tp, "lra": lra, "premix_input_lufs": m["input_i"], "music": bool(use_music)}
+    print(res)
+    (CACHE / "mix_report.json").write_text(json.dumps(res, indent=1))
+    return res
 
 
 def mux(video_silent: Path, video_out: Path) -> None:
@@ -225,9 +281,15 @@ def mux(video_silent: Path, video_out: Path) -> None:
 
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
-    if cmd == "audition": audition()
-    elif cmd == "voices": voices()
-    elif cmd == "sfx": sfx_all()
-    elif cmd == "mix": mix_all(use_music="--music" in sys.argv)
-    elif cmd == "mux": mux(OUT / "halloween_silent.mp4", OUT / "halloween.mp4")
-    elif cmd == "music": print(music_check(sfx_all()["amb_music"]))
+    if cmd == "audition":
+        audition()
+    elif cmd == "voices":
+        voices()
+    elif cmd == "sfx":
+        sfx_all()
+    elif cmd == "mix":
+        mix_all(use_music="--music" in sys.argv)
+    elif cmd == "mux":
+        mux(OUT / "halloween_silent.mp4", OUT / "halloween.mp4")
+    elif cmd == "music":
+        print(music_check(sfx_all()["amb_music"]))

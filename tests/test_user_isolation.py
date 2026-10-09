@@ -7,7 +7,6 @@ This test doubles as the isolation guard for the MySQL migration -- it covers ev
 from personos.models import EvidenceRecord, MemoryAtom
 from personos.online.session_context import build_history
 from personos.storage.atom_store import AtomStore
-from personos.storage.db import Database
 from personos.storage.evidence_store import EvidenceStore
 from personos.storage.session_store import SessionContextStore
 from personos.storage.user_store import UserStore

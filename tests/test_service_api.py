@@ -8,8 +8,8 @@ singleton, so they are covered by manual smoke tests rather than deterministic u
 
 from datetime import datetime, timezone
 
-from personos.online.views import memory_view
 from personos.models import EvidenceRecord, EvidenceRef, MemoryAtom
+from personos.online.views import memory_view
 from personos.storage.evidence_store import EvidenceStore
 
 

@@ -22,7 +22,6 @@ Geometry (units, y down; the mark is 24 tall):
 from __future__ import annotations
 
 import io
-import math
 from pathlib import Path
 
 import uharfbuzz as hb

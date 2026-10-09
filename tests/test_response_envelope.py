@@ -19,7 +19,6 @@ from fastapi.responses import JSONResponse
 
 from server.response import ResponseUtils, _wrap_response
 
-
 # -- The pure function layer --
 
 def test_ok_envelope():
@@ -66,6 +65,7 @@ def client():
     """The real app with AK/SK signature verification overridden (production enforces it
     unconditionally; tests bypass it via dependency_overrides)."""
     from fastapi.testclient import TestClient
+
     from server.app import app
     from server.signing import verify_signature
     app.dependency_overrides[verify_signature] = lambda: None
@@ -81,9 +81,10 @@ def auth_client():
     """The real app with _ctx overridden to inject a read-only UserContext (no database writes,
     which sidesteps the register guard) and signature verification bypassed."""
     from fastapi.testclient import TestClient
+
     from server import api as service_api
-    from server.runtime import rt
     from server.app import app
+    from server.runtime import rt
     from server.signing import verify_signature
 
     app.dependency_overrides[service_api._ctx] = lambda: rt.for_user("envtest_ro")

@@ -46,11 +46,19 @@ from typing import Any, Optional
 from loguru import logger
 
 from personos.identity.inspect import (
-    DEGRADE_ONLY, REPAIRABLE, Violation, inspect_script,
+    DEGRADE_ONLY,
+    REPAIRABLE,
+    Violation,
+    inspect_script,
 )
 from personos.identity.screenplay import (
-    ENV_WHO, WEARER_CAST_ID, CastDecl, ClipScript, Nomination, VoiceRange,
-    _render_roster, parse_clip_output,
+    ENV_WHO,
+    WEARER_CAST_ID,
+    CastDecl,
+    ClipScript,
+    VoiceRange,
+    _render_roster,
+    parse_clip_output,
 )
 
 MAX_REPAIR_ATTEMPTS = 2
@@ -103,8 +111,8 @@ def _render_cast_records(script: ClipScript) -> str:
 
 
 def _render_lines_context(script: ClipScript, cap: int = 40) -> str:
-    return "\n".join(f"[{l.t0:.1f}-{l.t1:.1f}] {l.who} ({l.kind}): {l.text}"
-                     for l in script.lines[:cap])
+    return "\n".join(f"[{line.t0:.1f}-{line.t1:.1f}] {line.who} ({line.kind}): {line.text}"
+                     for line in script.lines[:cap])
 
 
 def _roster_text(roster_cards: "list[dict] | str | None") -> str:
@@ -189,7 +197,8 @@ def degrade(script: ClipScript, violations: list[Violation]) -> ClipScript:
             if c.local_id in seen:
                 notes.append(f"dropped duplicate declaration {c.local_id}")
                 continue
-            seen.add(c.local_id); kept.append(c)
+            seen.add(c.local_id)
+            kept.append(c)
         casts = kept
 
     if "cont_conflict" in hit:                        # break the implied continuation and let arbitration decide from the assets

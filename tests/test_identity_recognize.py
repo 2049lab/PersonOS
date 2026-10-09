@@ -24,7 +24,8 @@ U = "vtest_recog"
 
 
 def _e(i: int, dim: int = 8) -> np.ndarray:
-    v = np.zeros(dim, dtype=np.float64); v[i] = 1.0
+    v = np.zeros(dim, dtype=np.float64)
+    v[i] = 1.0
     return v
 
 

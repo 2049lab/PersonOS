@@ -36,7 +36,9 @@ PATTERNS: dict[str, str] = {
         "internal private packages (not installable from the public index)",
     r"RedHub|redhub": "internal database proxy",
     r"\bcorvus\b": "internal Redis cluster implementation",
-    r"\bmaas\b|MAAS_": "internal model gateway",
+    # Alibaba's public endpoint uses this DNS label too. Exempt only its exact
+    # domain suffix, not prose, environment prefixes, or lookalike hostnames.
+    r"\bmaas\b(?!\.aliyuncs\.com(?=$|[^a-z0-9_.-]))|MAAS_": "internal model gateway",
     r"\bapollo\b|pyapollo": "internal configuration service",
     r"xray-langfuse|xray": "internal observability platform",
     r"mneme|meme-backend|wallace": "internal project codenames",

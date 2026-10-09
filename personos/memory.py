@@ -30,28 +30,26 @@ otherwise. The write state machine holds no instance state.
 from __future__ import annotations
 
 import base64
-import os
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from contextlib import contextmanager
 from pathlib import Path
-from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
+from typing import Any
 
 from loguru import logger
 
 from . import obs
-from .providers.registry import build as build_provider
+from .admission import _MAX_PENDING, AdmissionGate, TaskOverloaded
 from .config import settings
-from .admission import AdmissionGate, TaskOverloaded, _MAX_PENDING
 from .ingest_worker import Dispatcher, SessionConsumer
 from .logging_setup import setup_logging
 from .models import now
 from .online.profile_consolidate import run_user_consolidation, should_consolidate
 from .online.rerank import ScoringReranker
-from .storage.profile_store import ProfileStore
 from .online.write_path import MAX_SEGMENT_TURNS, SessionWriter
+from .providers.registry import build as build_provider
 from .storage.atom_store import AtomStore
 from .storage.cell_store import CellStore
 from .storage.chain_store import ChainStore
@@ -59,6 +57,7 @@ from .storage.db import Database
 from .storage.evidence_store import EvidenceStore
 from .storage.media import media_store_from_settings
 from .storage.msg_queue import EnqueueBusy, MemoryMsgQueue, MsgQueue, RedisMsgQueue
+from .storage.profile_store import ProfileStore
 from .storage.redis_client import get_redis
 from .storage.seg_store import MemorySegStore, RedisSegStore, SegStore
 from .storage.session_lock import LOCK_TTL_S, MemorySessionLock, RedisSessionLock, SessionLock

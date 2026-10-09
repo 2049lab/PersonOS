@@ -210,9 +210,11 @@ def _render_roster(cards: list[dict[str, Any]]) -> tuple[str, list[str]]:
                     + (f" name={c['name']}" if c.get("name") else "")
                     + (f" appearance={c['desc']}" if c.get("desc") else ""))
         if c.get("face_b64"):
-            images.append(c["face_b64"]); rows[-1] += f" [face=image #{len(images)}]"
+            images.append(c["face_b64"])
+            rows[-1] += f" [face=image #{len(images)}]"
         if c.get("body_b64"):
-            images.append(c["body_b64"]); rows[-1] += f" [body=image #{len(images)}]"
+            images.append(c["body_b64"])
+            rows[-1] += f" [body=image #{len(images)}]"
     return "\n".join(rows), images
 
 
@@ -286,7 +288,7 @@ def parse_clip_output(raw: str, *, duration_sec: float | None = None) -> ClipScr
     # a structurally reserved id, which makes this a completion rather than a
     # format patch.
     if not script.cast_decl(WEARER_CAST_ID) and (
-            any(l.who == WEARER_CAST_ID for l in script.lines)
+            any(line.who == WEARER_CAST_ID for line in script.lines)
             or any(v.local_id == WEARER_CAST_ID for v in script.voice_ranges)):
         script.casts.insert(0, CastDecl(local_id=WEARER_CAST_ID, is_wearer=True,
                                         desc="wearer behind the camera"))

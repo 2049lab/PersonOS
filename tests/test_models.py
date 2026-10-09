@@ -2,7 +2,12 @@
 kind validator, which is what keeps the schema forward compatible."""
 
 from personos.models import (
-    DOMAIN_LABELS, DOMAIN_VOCAB, KIND_LABELS, KindLiteral, MemoryAtom, vocab_menu,
+    DOMAIN_LABELS,
+    DOMAIN_VOCAB,
+    KIND_LABELS,
+    KindLiteral,
+    MemoryAtom,
+    vocab_menu,
 )
 
 
