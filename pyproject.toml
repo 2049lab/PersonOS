@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "personos"
 version = "0.1.3"
-description = "Multimodal long-term memory with person identity resolution and evidence-backed retrieval"
+description = "Long-term multimodal memory for personal agents"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"

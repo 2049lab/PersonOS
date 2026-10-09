@@ -38,14 +38,16 @@ def _font_b64(name: str, chars: str = _UNICODE) -> str:
     opts.layout_features = ["kern", "liga", "calt"]
     opts.notdef_outline = False
     opts.hinting = False
-    font = TTFont(str(FONTS / name))
+    # Preserve the source font metadata so identical diagrams produce identical bytes.
+    opts.recalc_timestamp = False
+    font = TTFont(str(FONTS / name), recalcTimestamp=False)
     limits = {"wght": (400, 700)}
     font = instancer.instantiateVariableFont(
         font, {k: v for k, v in limits.items() if any(a.axisTag == k for a in font["fvar"].axes)})
     tmp = io.BytesIO()
     font.save(tmp)
     tmp.seek(0)
-    font = TTFont(tmp)
+    font = TTFont(tmp, recalcTimestamp=False)
     sub = subset.Subsetter(opts)
     sub.populate(text=chars)
     sub.subset(font)
@@ -147,8 +149,8 @@ class Arch:
 def architecture_svg(t: dict) -> str:
     a = Arch(t)
     W, H = 1600, 700
-    xs = [35, 400, 865, 1230]
-    ws = [330, 430, 330, 335]
+    xs = [35, 550, 1065]
+    ws = [480, 480, 500]
     stroke = t["muted"]
     defs = (defs_grad("ga", 0, 0, 1, 1) + defs_grad("gl", 0, 0, 1600, 0, "userSpaceOnUse")
             + f'<pattern id="dots" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="1.5" cy="1.5" r="1.1" fill="{t["dots"]}" opacity="{t["dot_op"]}"/></pattern>')
@@ -156,7 +158,7 @@ def architecture_svg(t: dict) -> str:
     a.text(35, 38, "PERSONOS \u00b7 ARCHITECTURE", 12, 500, fill=t["muted"], mono=True, ls=1.5)
 
     # arrows between columns
-    for i in range(3):
+    for i in range(2):
         a.arrow(xs[i] + ws[i] + 6, 350, xs[i + 1] - 6, 350)
 
     def ic(path, x, y, color=None):
@@ -169,87 +171,64 @@ def architecture_svg(t: dict) -> str:
 
     # 1 Perceive
     x, w = xs[0], ws[0]
-    a.column(x, w, 1, "Perceive", "multimodal in")
-    for i, (ti, su, icon) in enumerate([("Video clips", "frames \u00b7 audio \u00b7 speech", film),
-                                         ("Images", "faces \u00b7 scenes \u00b7 text", image),
-                                         ("Dialogue", "who said what", bubble)]):
-        y = 176 + i * 104
-        a.step(x + 24, y, w - 48, 84, ti, su, icon=icon.replace("translate(14 22)", f"translate({x + 24 + 14} {y + 20})"))
-    a.text(x + 28, 592, "robot \u00b7 smart glasses \u00b7 agents", 12, 400, fill=t["muted"], mono=True, maxw=w - 56)
-    a.text(x + 28, 614, "any OpenAI-compatible MLLM", 12, 400, fill=t["muted"], mono=True, maxw=w - 56)
+    a.column(x, w, 1, "Perceive", "text, images and video")
+    for i, (ti, su, icon) in enumerate([("Text", "conversation turns", bubble),
+                                       ("Images", "text + visual content", image),
+                                       ("Video clips", "frames \u00b7 speech \u00b7 actions", film)]):
+        y = 176 + i * 94
+        a.step(x + 24, y, w - 48, 76, ti, su,
+               icon=icon.replace("translate(14 22)", f"translate({x + 38} {y + 16})"))
+    a.arrow(x + w / 2, 444, x + w / 2, 466, color=t["muted"], sw=1.3)
+    a.rect(x + 24, 472, w - 48, 144, rx=14, fill=t["surface2"], stroke=VIOLET, dash="4 4")
+    a.text(x + 40, 497, "OPTIONAL VIDEO PATH", 10, 500, fill=t["muted"], mono=True, ls=1)
+    a.text(x + 40, 526, "Associate people with events", 16, 600, maxw=w - 80)
+    a.text(x + 40, 550, "Revise identity matches across clips.", 12, fill=t["muted"], maxw=w - 80)
+    a.text(x + 40, 582, "Requires multimodal + identity backends;", 11, fill=t["muted"], mono=True, maxw=w - 80)
+    a.text(x + 40, 600, "commits person links at session close.", 11, fill=t["muted"], mono=True, maxw=w - 80)
 
-    # 2 Resolve identity
+    # 2 Remember: all input paths converge on evidence-linked memory.
     x, w = xs[1], ws[1]
-    a.column(x, w, 2, "Resolve identity", "who is who, across clips")
-    steps = [("Screenplay", "MLLM \u2192 casts \u00b7 lines \u00b7 face nominations", None),
-             ("Repair", "physical-contradiction guard \u00b7 re-ask \u00b7 degrade", WARN),
-             ("Character chains", "evidence-triggered re-evaluation per person", None),
-             ("Commit", "final adjudication \u2192 persistent character", OK)]
-    for i, (ti, su, ac) in enumerate(steps):
-        y = 172 + i * 70
-        a.step(x + 24, y, w - 48, 54, ti, su, accent=ac)
-        if i < 3:
-            a.arrow(x + w / 2, y + 56, x + w / 2, y + 68, color=t["muted"], sw=1.3)
-    a.rect(x + 24, 462, w - 48, 92, rx=14, fill=t["surface2"], stroke=VIOLET, dash="4 4")
-    a.text(x + 40, 488, "Identity cloud", 14, 600, maxw=200)
-    px = x + 40
-    for lab in ("face", "body", "voiceprint"):
-        px += a.pill(px, 502, lab, color=t["text"], h=30) + 8
-    a.text(x + 40, 546, "recognises people it has never been told about", 11, 400, fill=t["muted"], mono=True, maxw=w - 80)
-    px = x + 24
-    px += a.pill(px, 574, "names learned from dialogue", color=OK, stroke=OK) + 10
-    a.pill(px, 574, "wearer = camera", color=t["text"], stroke=VIOLET)
-
-    # 3 Remember
-    x, w = xs[2], ws[2]
-    a.column(x, w, 3, "Remember", "append-only memory")
-    for i, (ti, su) in enumerate([("evidence", "raw lines \u00b7 clips \u00b7 crops"),
-                                  ("memcell", "one episode per recording"),
-                                  ("atom", "one fact \u00b7 holder \u00b7 time"),
-                                  ("atom_chain", "history of a fact over time")]):
+    a.column(x, w, 2, "Remember", "evidence-linked long-term memory")
+    for i, (ti, su) in enumerate([("evidence", "source text, media and timestamps"),
+                                  ("memcell", "episodic records linked to sources"),
+                                  ("atom", "retrieval anchors with evidence references")]):
         y = 172 + i * 76
         a.step(x + 24, y, w - 48, 56, "", None)
         a.text(x + 40, y + 24, ti, 15, 600, mono=True, maxw=w - 80)
         a.text(x + 40, y + 43, su, 11, 400, fill=t["muted"], mono=True, maxw=w - 80)
-        if i < 3:
+        if i < 2:
             a.arrow(x + w / 2, y + 58, x + w / 2, y + 74, color=t["muted"], sw=1.3)
-    # chain of nodes with one contradiction
-    cy = 504
-    nodes = [x + 52, x + 112, x + 172, x + 232, x + 292 - 12]
-    a.o.append(f'<path d="M{nodes[0]} {cy} L{nodes[-1]} {cy}" stroke="url(#gl)" stroke-width="2"/>')
-    for i, nx in enumerate(nodes):
-        col = WARN if i == 3 else "url(#ga)"
-        a.o.append(f'<circle cx="{nx}" cy="{cy}" r="8" fill="{t["surface"]}" stroke="{col}" stroke-width="2.4"/>')
-    a.text(nodes[3], cy + 30, "conflict", 11, 500, fill=WARN, mono=True, anchor="middle")
-    a.text(x + 28, 574, "append-only", 12, 500, fill=t["text"], mono=True)
-    a.text(x + 28, 596, "contradictions are kept, not overwritten", 11, 400, fill=t["muted"], mono=True, maxw=w - 56)
+    a.text(x + 28, 415, "ACROSS SESSIONS", 10, 500, fill=t["muted"], mono=True, ls=1)
+    half = (w - 64) / 2
+    for dx, title, lines in [(24, "atom_chain", ("Related statements", "across records")),
+                             (40 + half, "profile", ("Versioned user", "profile summary"))]:
+        a.rect(x + dx, 432, half, 88, rx=12)
+        a.text(x + dx + 16, 458, title, 15, 600, mono=True, maxw=half - 32)
+        for j, line in enumerate(lines):
+            a.text(x + dx + 16, 480 + 18 * j, line, 11, fill=t["muted"], mono=True, maxw=half - 32)
+    a.text(x + 28, 567, "Source evidence stays linked.", 12, 500, maxw=w - 56)
+    a.text(x + 28, 593, "Related statements can remain in conflict.", 11, fill=t["muted"], mono=True, maxw=w - 56)
 
-    # 4 Recall
-    x, w = xs[3], ws[3]
-    a.column(x, w, 4, "Recall", "answers that show their work")
+    # 3 Recall
+    x, w = xs[2], ws[2]
+    a.column(x, w, 3, "Recall", "evidence-backed answers")
     px = x + 24
     px += a.pill(px, 168, "fast", color=t["text"], h=34, pad=22) + 10
-    a.pill(px, 168, "deep (agent)", color=t["text"], h=34, pad=16, stroke=VIOLET)
-    a.rect(x + 24, 220, w - 48, 52, rx=12)
-    a.text(x + 40, 241, "QUESTION", 10, 500, fill=t["muted"], mono=True, ls=1)
-    a.text(x + 40, 261, "Who ate all the candy?", 15, 500, maxw=w - 80)
-    a.arrow(x + w / 2, 276, x + w / 2, 294, color=t["muted"], sw=1.3)
-    a.rect(x + 24, 298, w - 48, 148, rx=12, stroke=VIOLET)
-    a.text(x + 40, 322, "ANSWER", 10, 500, fill=t["muted"], mono=True, ls=1)
-    a.text(x + 40, 350, "Mia \u2014 wearing Leo's", 16, 500, maxw=w - 80)
-    a.text(x + 40, 374, "ketchup sheet.", 16, 500, maxw=w - 80)
-    cx = x + 40
-    for lab in ("21:15 \u00b7 candy bowl", "21:16 \u00b7 takes a candy"):
-        cx += a.pill(cx, 396, lab, color=t["text"], stroke=CYAN, h=28, size=11) + 8
-    a.text(x + 40, 436, "every claim cites its clip & timestamp", 11, 400, fill=t["muted"], mono=True, maxw=w - 80)
-    a.text(x + 28, 478, "SHOWS ITS WORK", 11, 500, fill=t["muted"], mono=True, ls=1.5)
-    for i, s in enumerate(["search \u2192 3 atoms, 2 memcells", "rerank \u2192 evidence by speaker", "answer + citations"]):
-        y = 502 + i * 38
-        a.o.append(f'<circle cx="{x + 36}" cy="{y}" r="9" fill="none" stroke="{OK}" stroke-width="1.6"/>'
-                   f'<path d="M{x + 32} {y} l3 3 l5-6" fill="none" stroke="{OK}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>')
-        a.text(x + 56, y + 4, s, 12, 400, fill=t["text"], mono=True, maxw=w - 84)
+    px += a.pill(px, 168, "deep (agent)", color=t["text"], h=34, pad=16, stroke=VIOLET) + 10
+    a.pill(px, 168, "auto", color=t["text"], h=34, pad=22)
+    a.step(x + 24, 224, w - 48, 68, "Text or image query", "scoped to a user")
+    a.arrow(x + w / 2, 298, x + w / 2, 314, color=t["muted"], sw=1.3)
+    a.step(x + 24, 320, w - 48, 76, "Retrieve & rerank", "atoms \u2192 source episodes and evidence")
+    a.arrow(x + w / 2, 402, x + w / 2, 418, color=t["muted"], sw=1.3)
+    a.rect(x + 24, 424, w - 48, 100, rx=12, stroke=VIOLET)
+    a.text(x + 40, 452, "Answer with references", 16, 600, maxw=w - 80)
+    a.text(x + 40, 477, "supporting material + review information", 11, fill=t["muted"], mono=True, maxw=w - 80)
+    a.text(x + 40, 506, "trace() follows source evidence", 11, fill=t["muted"], mono=True, maxw=w - 80)
+    a.text(x + 28, 567, "auto starts fast; deep follows if needed.", 12, 500, maxw=w - 56)
+    a.text(x + 28, 593, "Deep recall requires optional dependencies.", 11, fill=t["muted"], mono=True, maxw=w - 56)
 
-    return svg_doc(W, H, "".join(a.o), defs, label="PersonOS architecture: perceive, resolve identity, remember, recall")
+    return svg_doc(W, H, "".join(a.o), defs,
+                   label="PersonOS architecture: perceive, remember, recall; optional video identity path")
 
 
 # ───────────────────────── render ─────────────────────────
