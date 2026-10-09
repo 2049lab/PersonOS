@@ -13,5 +13,5 @@ ELEVENLABS_API_KEY=... python docs/demo/anim/audio/gen.py          # voices + SF
 python docs/demo/anim/audio/mix.py          # -> out/halloween.mp4
 ```
 
-The end card loads `docs/assets/brand/lockup-tagline.svg` — the same file the
-README uses, so the two cannot drift apart.
+The end card uses `docs/assets/brand/lockup-tagline.svg`. The README uses the
+light and dark wordmarks from the same `docs/assets/brand/` directory.

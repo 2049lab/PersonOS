@@ -1,183 +1,242 @@
 <p align="center">
-  <img src="docs/assets/banner.png" alt="PersonOS — Memory that knows who." width="100%">
+  <a href="https://personos-ai.com/">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/wordmark-dark.svg">
+      <img src="docs/assets/brand/wordmark.svg" alt="PersonOS" width="320">
+    </picture>
+  </a>
 </p>
 
-<h1 align="center">PersonOS</h1>
-
-<p align="center"><strong>Multimodal long-term memory that knows who</strong></p>
+<p align="center"><strong>Identity-aware multimodal memory</strong></p>
 
 <p align="center">
-  <a href="https://pypi.org/project/personos/"><img src="https://img.shields.io/pypi/v/personos?color=6C4CF1&label=pypi" alt="PyPI"></a>
-  <a href="https://pypi.org/project/personos/"><img src="https://img.shields.io/pypi/pyversions/personos?color=3B82F6" alt="Python"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-10B981" alt="License"></a>
-  <a href="#evaluation"><img src="https://img.shields.io/badge/M3--Bench--robot-61.5%25-F43F5E" alt="M3-Bench-robot"></a>
-  <a href="#evaluation"><img src="https://img.shields.io/badge/Video--MME_long-87.0%25-F59E0B" alt="Video-MME long"></a>
+  <a href="https://personos-ai.com/">Website</a> ·
+  <a href="docs/usage.md">Documentation</a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#case-study">Case study</a> ·
+  <a href="docs/evaluation.md">Evaluation</a> ·
+  <a href="README.zh-CN.md">简体中文</a>
 </p>
 
 <p align="center">
-  English · <a href="README.zh-CN.md">简体中文</a>
+  <a href="https://pypi.org/project/personos/"><img src="https://img.shields.io/pypi/v/personos?style=flat-square&color=526479" alt="PyPI version"></a>
+  <a href="pyproject.toml"><img src="https://img.shields.io/badge/python-3.10%2B-526479?style=flat-square" alt="Python 3.10+"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-526479?style=flat-square" alt="Apache 2.0 license"></a>
 </p>
 
-<p align="center">
-  <a href="#demo">Demo</a> ·
-  <a href="#introduction">Introduction</a> ·
-  <a href="#key-features">Key Features</a> ·
-  <a href="#quick-start">Quick Start</a> ·
-  <a href="#evaluation">Evaluation</a> ·
-  <a href="#progress">Progress</a>
-</p>
+PersonOS is a Python framework for multimodal long-term memory, developed within the [PersonOS research initiative](https://personos-ai.com/) at [2049lab](https://github.com/2049lab). It organizes conversations, images, and video into persistent memories, with person identity resolution and evidence-backed retrieval.
 
-PersonOS is a long-term memory framework for devices that see and hear: home robots, smart glasses, desktop agents.
-It takes multimodal input — video, images and conversations — records what happened, works out **who** said and did what, and returns answers together with the evidence behind them.
+This repository contains the memory framework and HTTP service. The website presents the broader research program, ecosystem, and roadmap.
 
-## Demo
+## Capabilities
+
+- **Multimodal ingestion.** Organize conversations, images, and video clips into episodic records linked to source evidence.
+- **Person identity.** Accumulate face, voice, and contextual evidence; revise identity hypotheses and commit persistent characters at session close. Names can be learned from observation without prior enrollment.
+- **Layered memory.** Separate source evidence, episodes, retrieval anchors, and related facts over time. Store data locally with SQLite or configure shared storage for service deployments.
+- **Evidence-backed retrieval.** Retrieve relevant episodes and return answers with citations and review information. Optional deep recall supports multi-step retrieval.
+
+## Applications
+
+| Application | Memory it needs | PersonOS provides |
+|---|---|---|
+| Personal or desktop agents | Preferences, past conversations and changing facts | Layered text memory, user profiles and fact chains over time |
+| Wearable and camera assistants | Events seen across consecutive recordings | Video episodes linked to people and source clips |
+| Home robot prototypes | Who said or did something across encounters | Identity evidence accumulated across clips, revisable matches and persistent characters |
+
+## Architecture
+
+The core design separates an **event record** from an **identity hypothesis**. A clip can be recorded under a temporary person code while face, voice and contextual evidence accumulate. Identity matches can be revised before the session is committed. Names are taken from observed evidence; people can remain unnamed.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/architecture.svg">
+  <img src="docs/assets/architecture-light.svg" alt="Perceive → Resolve identity → Remember → Recall" width="100%">
+</picture>
+
+1. **Perceive.** Convert conversations, images and video into records of speech, actions and surroundings. Video clips produce an episodic screenplay with temporary person codes.
+2. **Resolve identity.** Collect face, voice, body and continuity evidence in character chains. Revisit matches as evidence arrives; adjudicate identities at session close.
+3. **Remember.** Preserve source evidence, organize episodes, extract atomic memories for retrieval, and link related facts over time.
+4. **Recall.** Retrieve and rank relevant material, assemble an answer, and return citations and review information for inspection. Optional deep recall can take multiple steps through the store.
+
+```text
+evidence ──────► memcell ─────────► atom ─────────────► atom_chain
+source input     episode            retrieval anchor    related facts over time
+```
+
+Source inputs are retained as evidence. Atoms serve as retrieval anchors for episodic records, while atom chains group related facts over time.
+
+Storage defaults to SQLite and local media files under `~/.personos`. Model calls use the endpoints you configure; local storage alone does not make inference offline.
+
+## Case study
+
+An animated walkthrough of identity resolution across video clips. Three children wear matching ghost costumes; new voice, location, and visual evidence helps resolve conflicting identity matches.
 
 https://github.com/user-attachments/assets/2faea78b-7db6-4a7a-8f6d-22c7cd4a7a38
 
-**Who ate the Halloween candy?** Pebble, a small home robot, watches three kids arrive for trick-or-treat. At first it doesn't know
-any of them. Over the evening it learns their names from how they talk to each other, keeps telling them apart after they put on identical
-bedsheets, and catches the moment Mia swaps sheets during a blackout to pin the candy theft on Leo.
+Events are recorded with temporary person codes such as `P1` and `P2`, while identity hypotheses are maintained separately. New evidence can revise those hypotheses before session consolidation links observations to persistent characters. Retrieval then returns the relevant events and supporting material.
 
-The notebook on the right is Pebble's memory, and it works the way PersonOS does. The **episodic screenplay** is written the moment things
-happen, using temporary person codes (`P1`, `P2`…). Pebble keeps **who's who** in a separate character table. As stronger evidence comes in
-from the people it observes (a clearer face, a voice, and so on), it revises its identity guesses, and only when the night's memory is saved are the names written back into the screenplay.
-Next morning, when everyone suspects Leo, Pebble steps in and sets the record straight.
+This is an animated design case, not a live robot recording or an accuracy test. The [animation source and storyboard](docs/demo/README.md) are included; see the [video example](examples/video.py) for an executable ingestion workflow.
+
+<details>
+<summary><b>Full scenario, six-panel storyboard, and event records</b></summary>
+
+### Who ate the Halloween candy?
+
+Pebble, a small home robot, watches three children arrive for trick-or-treat. It initially knows none of them, learns candidate names from their conversations, and continues associating observations after they put on matching ghost costumes. During a blackout, Mia swaps into Leo's ketchup-stained sheet to make him appear responsible for taking the candy. Voices, locations, and a pair of pink sneakers provide evidence for revisiting that identity match.
+
+The notebook on the right separates two records. An **episodic screenplay** records events using temporary person codes such as `P1` and `P2`; a **character table** holds hypotheses about who those codes refer to. New evidence revises the character table. When the session is saved, observations are linked to persistent characters. The next morning, Pebble uses the records to answer who ate the candy and show the supporting material.
 
 <table>
   <tr>
-    <td width="33%"><img src="docs/assets/demo/beat-1-names.jpg" alt="Zero-shot: identities learned from natural conversation"></td>
-    <td width="33%"><img src="docs/assets/demo/beat-2-ghosts.jpg" alt="Multi-cue identification"></td>
-    <td width="33%"><img src="docs/assets/demo/beat-3-conflict.jpg" alt="Physical consistency check"></td>
+    <td width="33%"><img src="docs/assets/demo/beat-1-names.jpg" alt="Learning Mia's name from natural conversation"></td>
+    <td width="33%"><img src="docs/assets/demo/beat-2-ghosts.jpg" alt="Combining identity cues after the children put on matching ghost costumes"></td>
+    <td width="33%"><img src="docs/assets/demo/beat-3-conflict.jpg" alt="Conflicting identity evidence from a stained sheet and a voice in the kitchen"></td>
   </tr>
   <tr>
-    <td><b>Zero-shot: identities learned from natural conversation.</b> One line — "Whoa… Mia, the candy's over there!" — turns stranger <code>P1</code> into <i>Mia?</i></td>
-    <td><b>Multi-cue identification.</b> Recognition doesn't rest on face and voice alone. Spatio-temporal continuity, build and gait all count, so every ghost is still identified correctly once the faces are covered.</td>
-    <td><b>Physical consistency check.</b> Nobody can be in two places at once. When the ketchup-stained ghost looks like Leo but Leo's voice is coming from the kitchen, one of them has to be wrong.</td>
+    <td><b>Learn a name.</b> A spoken reference gives stranger <code>P1</code> the candidate name Mia, without prior enrollment.</td>
+    <td><b>Combine cues.</b> With faces covered, voice, build, and spatio-temporal continuity can still help connect observations.</td>
+    <td><b>Review a conflict.</b> The stained sheet suggests Leo, but Leo's voice comes from the kitchen. The earlier match needs review.</td>
   </tr>
   <tr>
-    <td><img src="docs/assets/demo/beat-4-fixed.jpg" alt="Identities can be corrected"></td>
-    <td><img src="docs/assets/demo/beat-5-saved.jpg" alt="Identities and the final screenplay are settled last"></td>
-    <td><img src="docs/assets/demo/beat-6-recall.jpg" alt="Every answer comes with traceable evidence"></td>
+    <td><img src="docs/assets/demo/beat-4-fixed.jpg" alt="A giggle and pink sneakers support revising the match to Mia"></td>
+    <td><img src="docs/assets/demo/beat-5-saved.jpg" alt="Linking episodic records to persistent characters at session close"></td>
+    <td><img src="docs/assets/demo/beat-6-recall.jpg" alt="Returning an answer with episodic records and supporting imagery"></td>
   </tr>
   <tr>
-    <td><b>…and the identity gets corrected.</b> Identities are revisable. A giggle and a pair of pink sneakers give the ghost away as Mia, so its temporary code is reassigned to Mia's character card. The episodic record already written is left untouched; only what the temporary code points to changes.</td>
-    <td><b>Identities and the final screenplay are settled last.</b> When capture ends and the memory is saved, every temporary code in the episodic screenplay is replaced with a real name, leaving one complete record.</td>
-    <td><b>Every answer comes with traceable evidence.</b> All answers are backed by episodic memory. When Mum demands "who ate the candy?", Pebble doesn't just say Mia — it attaches the exact lines from the screenplay and the photo of those sneakers as evidence.</td>
+    <td><b>Revise the match.</b> A giggle and pink sneakers point to Mia. The temporary code is reassigned while the recorded events are preserved.</td>
+    <td><b>Commit the session.</b> Consolidate evidence and link temporary identities to persistent characters. A person can remain unnamed when the evidence does not establish a name.</td>
+    <td><b>Recall with evidence.</b> Answer “who ate the candy?” with the relevant screenplay events and the sneakers image as supporting material.</td>
   </tr>
 </table>
 
-## Introduction
+### Event records in this scenario
 
-Most multimodal memory systems stop at understanding; they don't identify people. PersonOS adds identity on top: zero-shot person identification and episodic memory, with no enrollment step.
+These illustrative records describe the animation. An appearance-based description records the action; linking it to a person also makes the event usable for questions about who did what.
 
-<picture>
-  <source media="(prefers-color-scheme: light)" srcset="docs/assets/architecture-light.svg">
-  <img src="docs/assets/architecture.svg" alt="Perceive → Resolve identity → Remember → Recall" width="100%">
-</picture>
+Appearance-based description:
 
-**1. Perceive.** A multimodal model watches each video clip in turn and writes an episodic screenplay: who said what, what happened, and what the surroundings were like.
-
-**2. Resolve identity.** People in the video are matched against known characters by face, voice, build and continuity. Meanwhile, character chains keep collecting and updating evidence (a first sighting, a clearer face,
-a cleaner voice sample, a name called out loud). When the session closes, temporary identities are adjudicated and promoted to persistent characters.
-
-**3. Remember.** Once identities are resolved, the screenplay is written into a layered, append-only memory:
-
-```
-evidence  ──►  memcell (episode)  ──►  atom          ──►  atom_chain
-raw input      the narrative unit      atomic memory,     the same fact over time,
-never edited   consulted at answer     retrieval anchor   kept as a group
-               time
+```text
+[21:15] A ghost in a ketchup-stained sheet went to the candy bowl.
+[21:16] A ghost took a candy.
+[21:22] A ghost took a candy.
+[21:29] A ghost took a candy.
 ```
 
-**4. Recall.** Locate the answer and its evidence in the layered memory, assemble them, and answer.
+After identity resolution:
 
-## Key Features
-
-- **Zero-shot person identification.** No enrollment step. Learn who is who from natural conversation and observation.
-- **Multiple cues, revisable identities.** Combine face, voice, build and spatio-temporal continuity; revise what a temporary identity points to when stronger evidence arrives.
-- **Multimodal episodic memory.** Take in video, images and conversations, write what happened into layered memory, and connect episodes to people.
-- **Answers with evidence.** Return the relevant episodes and original evidence alongside each answer, so it can be traced back to what happened.
-
-A multimodal memory system that understands video but not people records this:
-
-```diff
-- [21:15] A ghost in a ketchup-stained sheet went to the candy bowl.
-- [21:16] A ghost took a candy.
-- [21:22] A ghost took a candy.
-- [21:29] A ghost took a candy.
+```text
+[21:15] Mia, wearing Leo's ketchup-stained sheet, went to the candy bowl.
+[21:16] Mia took a candy.
+[21:22] Mia took a candy.
+[21:29] Mia took a candy.
 ```
 
-Because it never knew who was who or who did what, it can never answer "who ate the candy?" correctly. PersonOS records this instead:
+</details>
 
-```diff
-+ [21:15] Mia, wearing Leo's ketchup-stained sheet, went to the candy bowl.
-+ [21:16] Mia took a candy.
-+ [21:22] Mia took a candy.
-+ [21:29] Mia took a candy.
-```
+## Quick start
 
-Every episodic memory points at a stable person. That is what lets an agent built on PersonOS go from seeing, to understanding, to actually knowing what happened.
+### 1. Install and configure text memory
 
-## Quick Start
-
-### Text memory
+Requires **Python 3.10+** and access to both chat completions and embeddings. The following uses the package's OpenAI defaults; the key must have access to both models.
 
 ```bash
-pip install personos
-export PERSONOS_LLM_API_KEY=sk-...
-export PERSONOS_LLM_BASE_URL=https://api.openai.com/v1   # any OpenAI-compatible endpoint
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install personos
+
+export PERSONOS_LLM_API_KEY="your-api-key"
+export PERSONOS_LLM_BASE_URL="https://api.openai.com/v1"
+export PERSONOS_LLM_MODEL="gpt-4o-mini"
+export PERSONOS_EMBEDDING_MODEL="text-embedding-3-small"
+export PERSONOS_EMBEDDING_DIM=1536
+
+personos doctor
 ```
+
+On Windows, activate the environment with `.venv\Scripts\Activate.ps1` and set the same variables in PowerShell or a `.env` file. `personos doctor` checks configuration and installed dependencies; it does not test API credentials, model availability or network access.
+
+Using another provider? Set its chat model and embedding model explicitly. The embedding endpoint and key inherit `PERSONOS_LLM_BASE_URL` and `PERSONOS_LLM_API_KEY`; override `PERSONOS_EMBEDDING_BASE_URL` and `PERSONOS_EMBEDDING_API_KEY` if they differ. `PERSONOS_EMBEDDING_DIM` must match the vectors your model returns. Chat API compatibility does not imply embedding support.
+
+### 2. Write a memory and ask about it
 
 ```python
 from personos import Memory
 
-m = Memory()   # SQLite under ~/.personos, nothing to install
+with Memory() as memory:
+    memory.add(
+        "I moved from Hangzhou to Shanghai in June.",
+        user_id="quickstart-alice",
+        session_id="first-conversation",
+    )
+    memory.end_session(
+        user_id="quickstart-alice",
+        session_id="first-conversation",
+        sync=True,
+    )
 
-m.add("I moved from Hangzhou to Shanghai in June", user_id="alice", session_id="s1")
-m.end_session(user_id="alice", session_id="s1", sync=True)
-
-print(m.search("where do I live?", user_id="alice").ans.answer)
-# -> Shanghai
+    result = memory.search("Where do I live?", user_id="quickstart-alice")
+    print(result.ans.answer if result.ans else "No answer returned.")
+    print(result.ans.cited_cells if result.ans else [])
 ```
 
-### Video memory
+The expected answer refers to Shanghai; wording and retrieval quality depend on your models. `add()` queues work. `end_session(sync=True)` closes the episode and waits for ingestion before the read. The example keeps its memory for later questions.
 
-Video understanding needs a multimodal model configured as well:
+### 3. Add video and person identity
+
+Keep the text configuration above. Install the identity dependencies and configure a multimodal endpoint that supports the backend's `video_url`, `image_url` and `input_audio` content formats. A text-only or image-only chat endpoint is insufficient.
 
 ```bash
-pip install 'personos[identity]'
+python -m pip install 'personos[identity]'
 export PERSONOS_VIDEO_BACKEND=real
-export PERSONOS_MLLM_API_KEY=sk-...  PERSONOS_MLLM_MODEL=...   # any model that accepts video
+export PERSONOS_MLLM_API_KEY="your-multimodal-api-key"
+export PERSONOS_MLLM_BASE_URL="https://your-provider.example/v1"
+export PERSONOS_MLLM_MODEL="your-video-model"
+export PERSONOS_MEDIA_BASE_URL="https://your-media-host.example/media"
 ```
+
+Replace the example URLs and model name with your service settings. Serve the contents of `~/.personos/media` at the media URL so the model service can fetch clips, or configure [OSS storage](.env.example). Setting the URL does not start a media server. Identity dependencies and model weights require additional downloads; see the installation details below.
 
 ```python
-for clip in ["clip000.mp4", "clip001.mp4", "clip002.mp4"]:          # consecutive clips
-    m.add([{"role": "user", "content": "", "video": clip}],
-          user_id="robot", session_id="living-room")
+from personos import Memory
 
-m.end_session(user_id="robot", session_id="living-room", sync=True)  # identities are committed here
+clips = ["clip000.mp4", "clip001.mp4", "clip002.mp4"]  # your consecutive clips
 
-out = m.search("What's the name of the girl at the table, and what does she study?", user_id="robot")
-print(out.ans.answer)       # Alice ... math
-print(out.ans.cited_cells)  # the episodes (and clips) the answer came from
+with Memory() as memory:
+    for clip in clips:
+        memory.add(
+            [{"role": "user", "content": "", "video": clip}],
+            user_id="robot",
+            session_id="living-room",
+        )
+
+    memory.end_session(
+        user_id="robot", session_id="living-room",
+        sync=True, timeout_s=600 * len(clips) + 600,
+    )
+    result = memory.search("Who appeared, and what did they do?", user_id="robot")
+    print(result.ans.answer if result.ans else "No answer returned.")
+    print(result.ans.cited_cells if result.ans else [])
 ```
 
-Run `personos doctor` to see which features your current configuration supports. More examples in
-[examples/](examples/README.md).
+Video is processed in clip order, with identities committed at session close. Allow minutes per clip depending on the model and recording. See [the video example](examples/README.md#3-video-and-person-identity) for sample preparation, hosting and data-source terms.
 
-### Installation options and usage
+<details>
+<summary><b>Installation options</b></summary>
 
-Install only the extras you need:
+Install only the extras you need. Use `python -m pip install 'personos[EXTRA]'`; combine extras with commas, for example `'personos[deep,image]'`.
 
 | Install | What it adds |
 |---|---|
-| `pip install personos` | Text memory: layered writes, fast and deep recall, user profiles |
+| `personos` | Layered text writes, fast recall, user profiles and local SQLite |
 | `personos[deep]` | Multi-step deep-recall agent (recommended) |
 | `personos[image]` | Image ingest and recall over photos |
 | `personos[identity]` | Video with face / build / voiceprint identity (~2 GB) |
 | `personos[mysql]` `personos[redis]` | Multi-process deployments |
 | `personos[oss]` | Object storage instead of local media files |
-| `personos[all]` | Everything |
+| `personos[anthropic]` | Anthropic-protocol chat; embeddings need their own endpoint |
+| `personos[observability]` | Optional Langfuse tracing |
+| `personos[all]` | All optional capabilities |
+
+</details>
 
 <details>
 <summary><b>Model weights</b></summary>
@@ -190,7 +249,9 @@ Install only the extras you need:
 |---|---|---|
 | Face recognition | InsightFace `buffalo_l` (~300 MB) | `~/.insightface` (auto-download) |
 | Voiceprints | SpeechBrain `spkrec-ecapa-voxceleb` | HuggingFace cache; override with `PERSONOS_ECAPA_MODEL` / `PERSONOS_ECAPA_DIR` |
-| Multimodal understanding | none, remote API | `PERSONOS_MLLM_*` points at any MLLM endpoint |
+| Multimodal understanding | none, remote API | `PERSONOS_MLLM_*` points at a compatible endpoint |
+
+Model weights and external datasets have their own terms, separate from the library's license.
 
 </details>
 
@@ -199,7 +260,7 @@ Install only the extras you need:
 
 <br>
 
-Only the model endpoint is required. Everything else degrades gracefully.
+Chat and embeddings are required. Optional capabilities need the corresponding dependencies and configuration.
 
 | | Default | If unset |
 |---|---|---|
@@ -208,14 +269,16 @@ Only the model endpoint is required. Everything else degrades gracefully.
 | Multimodal model | off | images are stored but not understood; video is refused with instructions |
 | Media storage | local files | set `PERSONOS_MEDIA_BACKEND=oss` for object storage |
 | Reranker | off | retrieval keeps its fusion order |
-| Deep recall | off | `pip install personos[deep]` |
+| Deep recall | off | install `personos[deep]`; `auto` can then escalate to the multi-step agent |
 | Redis | off | single process; session state in memory |
 | Tracing | off | every tracing call is a no-op |
 
 The model service fetches video clips by URL, so with local media storage set `PERSONOS_MEDIA_BASE_URL`
-to a publicly reachable prefix (or use OSS). Every option is listed in [.env.example](.env.example).
+to a publicly reachable prefix (or use OSS). Primary options are listed in [.env.example](.env.example). For multiple workers, configure both shared MySQL and Redis.
 
-Calling a capability that isn't configured produces a warning like this:
+The library reads `.env` from the working directory or its parents; already exported variables take precedence. Use `PERSONOS_ENV_FILE` for a specific configuration file and `PERSONOS_DATA_DIR` for a separate data directory.
+
+Unavailable required capabilities raise `MissingCapability`; some optional paths, such as image understanding, emit a warning and retain the source. Diagnostics include setup guidance:
 
 ```
 MissingCapability: video understanding is unavailable: no multimodal model is configured
@@ -244,18 +307,20 @@ fair across sessions, backpressure when overloaded) and return an `AddReceipt` i
 pass `sync=True` or call `m.flush(...)`. When the queue is full, `QueueBusy` is raised; the HTTP API reports it as
 `503 + Retry-After`.
 
-Reads (`search`, `profile`, `trace`) are synchronous.
+Close the session to finalize its trailing episode. Profile consolidation can continue separately in the background. Reads (`search`, `profile`, `trace`) are synchronous. Requesting `mode="deep"` without the extra raises a capability error.
 
 The recall result also includes the answer, resolved person, evidence and review:
 
 ```python
 out = m.search("who ate the candy?", user_id="pebble")
-out.ans.answer   # the answer
+out.ans.answer   # the answer, if out.ans is present
 out.rw.subject   # who the question was resolved to be about
 out.hits         # atoms retrieved, in fusion order
 out.reviews      # the adjudicator's verdict on the draft
 out.to_public()  # the same, as a plain dict
 ```
+
+Model-generated answers and identity matches can be wrong. Inspect citations and original source records when checking an answer.
 
 </details>
 
@@ -268,15 +333,41 @@ out.to_public()  # the same, as a plain dict
 
 </details>
 
+## Examples
+
+The repository includes executable text, image, and video examples. Outputs depend on the configured models; the scenarios below describe what each script demonstrates.
+
+| Example | Scenario | What it demonstrates |
+|---|---|---|
+| [Text: a week of Alice's life](examples/quickstart.py) | The fish count changes from 15 to 13, then to 11 across conversations | Current facts, their history, and a user profile built over time |
+| [Images: a whiteboard image](examples/images.py) | Store a locally generated whiteboard image alongside text and retain its original file | Image descriptions, text retrieval, and provenance; retaining the image with a warning when no vision model is configured |
+| [Video: people and events across clips](examples/video.py) | In the M3-Bench sample, Bob enters with a basketball while other people may remain unnamed | Accumulating face, voice, and body evidence and resolving identities at session close |
+
+See the [examples guide](examples/README.md) for commands, sample preparation, media hosting, and dataset terms.
+
 ## Evaluation
+
+| Benchmark | Reported score (%) | Scope |
+|---|---:|---|
+| [M3-Bench-robot](https://github.com/bytedance-seed/m3-agent) | **61.5** | Robot-view multimodal memory |
+| [Video-MME](https://github.com/BradyFU/Video-MME) | **87.0** | Long videos, no subtitles |
+| [LoCoMo-10](https://github.com/snap-research/locomo) | **83.3** | Conversational memory |
+| [LongMemEval-S](https://github.com/xiaowu0162/LongMemEval) | **80.6** | Long-term conversational memory |
+
+Text evaluation scripts are available. Complete model manifests, video evaluation code, and per-question artifacts for these reported scores are not yet published. See [evaluation notes](docs/evaluation.md) for category results, scoring conventions, and reproduction status.
+
+<details>
+<summary><b>Category breakdowns and historical baselines</b></summary>
 
 **[M3-Bench-robot](https://github.com/bytedance-seed/m3-agent)** — a multimodal memory benchmark shot from a robot's first-person view across everyday environments.
 
 | | **Overall** | Person understanding | Multi-hop | Multi-evidence | Cross-modal | General knowledge |
 |---|:---:|:---:|:---:|:---:|:---:|:---:|
 | **PersonOS** | **61.5** | **73.5** | **63.5** | **62.8** | **59.0** | **48.0** |
-| M3-Agent, same models | 37.4 | 50.9 | 42.4 | 37.1 | 37.0 | 28.4 |
-| M3-Agent, as published | 30.7 | 43.3 | 29.4 | 32.8 | 31.2 | 19.1 |
+| M3-Agent, reported as “same models” | 37.4 | 50.9 | 42.4 | 37.1 | 37.0 | 28.4 |
+| M3-Agent, reported as “as published” | 30.7 | 43.3 | 29.4 | 32.8 | 31.2 | 19.1 |
+
+The historical baseline labels are retained from the earlier report; a model manifest for “same models” is not included in this repository.
 
 **[Video-MME](https://github.com/BradyFU/Video-MME)** — long videos, no subtitles.
 
@@ -284,36 +375,43 @@ out.to_public()  # the same, as a plain dict
 |:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | **87.0** | 93.3 | 92.6 | 90.9 | 87.9 | 87.9 | 84.1 | 85.0 | 83.3 | 85.2 | 78.6 | 70.8 | 33.3 |
 
-PersonOS holds up just as well on text benchmarks:
+Reported text-memory results:
 
 | Benchmark | Overall | Breakdown |
 |---|:---:|---|
 | [LoCoMo-10](https://github.com/snap-research/locomo) | **83.3** | single-hop 89.3 · temporal 79.8 · multi-hop 77.3 · open-domain 58.7 |
 | [LongMemEval-S](https://github.com/xiaowu0162/LongMemEval) | **80.6** | knowledge-update 91.7 · single-session-assistant 98.2 · single-session-user 89.1 · multi-session 76.9 · temporal 76.4 · preference 43.3 · abstention 73.3 |
 
-## Progress
+</details>
 
-- [x] Layered memory architecture
-- [x] Multimodal memory: understanding and recall
-- [x] Person identification
-- [x] Async task processing, HTTP server
-- [ ] Memory inspector UI: timeline, character gallery, episodic memory
-- [ ] MCP server for Claude Code, Cursor and other MCP clients
+## Documentation
+
+| Resource | Contents |
+|---|---|
+| [Product website](https://personos-ai.com/) | Research initiative, ecosystem, and research roadmap |
+| [Usage guide](docs/usage.md) | Installation, model configuration, video ingestion, and API reference |
+| [Examples](examples/README.md) | Runnable text, image, and video examples |
+| [HTTP service](server/README.md) | Service API, authentication, queues, and deployment |
+| [Evaluation notes](docs/evaluation.md) | Reported results, scoring conventions, and reproducibility |
+| [Configuration reference](.env.example) | Provider, storage, worker, and tracing settings |
+| [Animated case study](docs/demo/README.md) | Storyboard, animation source, and rendering instructions |
+| [Benchmark guide](scripts/bench/README.md) | Text evaluation commands, judge configuration, and scoring protocols |
+| [Contributing](CONTRIBUTING.md) | Development setup and checks |
+| [Releases](https://github.com/2049lab/personos/releases) · [PyPI](https://pypi.org/project/personos/) | Source releases and installable packages |
+
+## Development
+
+The current package is an alpha release. It includes layered text memory, image understanding, video identity, asynchronous ingestion, and an HTTP service. Behavior depends on the configured models and input quality.
+
+Planned work:
+
+- [ ] Memory inspector: timeline, character gallery, and episodic records
+- [ ] MCP server for agent clients
 - [ ] Streaming ingestion for live camera feeds
-- [ ] Paper and the full video evaluation code
+- [ ] Paper, full video evaluation code, and reproducible result artifacts
 
----
+Broader research directions are described on the [website](https://personos-ai.com/research.html). See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow and [SECURITY.md](SECURITY.md) for reporting security issues. Project questions and reproducible bug reports can be submitted through [GitHub Issues](https://github.com/2049lab/personos/issues).
 
-**Contributing**
+## License
 
-Issues and PRs are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Tests run with `pytest` and need no external services.
-
-**Acknowledgements**
-
-- The M3-Bench-robot benchmark comes from
-  [M3-Agent / M3-Bench](https://github.com/bytedance-seed/m3-agent)
-  (ByteDance-Seed, CC BY-NC-SA 4.0).
-
-**License**
-
-Apache-2.0. See [LICENSE](LICENSE).
+PersonOS is licensed under [Apache 2.0](LICENSE). External model weights and datasets retain their respective licenses. The separately downloaded M3-Bench sample is provided by [ByteDance-Seed](https://github.com/bytedance-seed/m3-agent) under CC BY-NC-SA 4.0.

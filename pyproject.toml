@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "personos"
 version = "0.1.3"
-description = "Multimodal long-term memory for robots, smart glasses and agents — video, images and conversations in; memory that knows who, out"
+description = "Multimodal long-term memory with person identity resolution and evidence-backed retrieval"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
@@ -71,7 +71,9 @@ dev = ["pytest>=8.0", "pytest-cov", "ruff", "pre-commit", "fastapi>=0.110",
 personos = "personos.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/2049lab/personos"
+Homepage = "https://personos-ai.com/"
+Documentation = "https://github.com/2049lab/personos/blob/main/docs/usage.md"
+Repository = "https://github.com/2049lab/personos"
 Issues = "https://github.com/2049lab/personos/issues"
 
 [tool.hatch.build.targets.wheel]
