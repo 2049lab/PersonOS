@@ -22,6 +22,9 @@ def main() -> None:
                         '-o', str(output), str(HERE / source)], check=True)
     subprocess.run([renderer, '-o', str(HERE / 'social-preview.png'),
                     str(HERE / 'social-preview.svg')], check=True)
+    subprocess.run([renderer, '-w', '512', '-h', '512',
+                    '-o', str(HERE / 'mark-color.png'),
+                    str(HERE / 'mark-color.svg')], check=True)
 
 
 if __name__ == '__main__':

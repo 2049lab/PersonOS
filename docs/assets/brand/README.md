@@ -10,12 +10,12 @@ The lettering is Inter SemiBold, converted to outlines.
 
 | Asset | Use |
 |---|---|
-| `mark.svg`, `wordmark.svg` | Primary identity on light backgrounds |
-| `mark-dark.svg`, `wordmark-dark.svg` | White identity on dark backgrounds |
-| `mark-color.svg` | Optional color variant in product illustrations |
-| `presentation.png` | Color presentation artwork for product introductions and avatars |
+| `mark-color.svg`, `wordmark.svg` | Primary color identity on light backgrounds |
+| `mark-color-dark.svg`, `wordmark-dark.svg` | Color identity with a white neutral arc and lettering on dark backgrounds |
+| `mark-color.png` | Transparent 512 px export of the primary mark |
+| `mark.svg`, `mark-dark.svg`, `mark-mono.svg` | Monochrome alternatives for single-color use |
 | `favicon.svg` | Browser icon; adapts to the browser's light/dark preference |
-| `icon.svg`, `favicon-180.png`, `favicon-512.png` | White mark on a dark application tile |
+| `icon.svg`, `favicon-180.png`, `favicon-512.png` | Color mark on a warm-white application tile |
 | `favicon-16.png`, `favicon-32.png` | Raster fallback on light backgrounds |
 | `lockup-tagline*.svg` | Animation end cards |
 | `social-preview.*` | Share artwork |
@@ -23,20 +23,19 @@ The lettering is Inter SemiBold, converted to outlines.
 Keep the mark square, leave at least one center radius of clear space around
 it, and display it at 16 pixels or larger. Use the explicit light/dark assets;
 do not recolor them with CSS filters, stretch them, add shadows, or rotate
-individual arcs. The primary wordmark is monochrome.
+individual arcs. The symbol uses cobalt blue, cyan and a neutral arc around
+an amber center; the lettering remains black or white for legibility.
 
-## Presentation artwork
+## Color identity
 
-<img src="presentation.png" alt="PersonOS: three blue arcs around an amber center on a dark blue background" width="256" height="256">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="mark-color-dark.svg">
+  <img src="mark-color.svg" alt="PersonOS: three colored arcs around an amber center" width="160" height="160">
+</picture>
 
-The presentation image follows the same three-arc silhouette, with blue glass
-surfaces and a warm amber center. It adds depth for product introductions and
-larger avatars. Use the complete image, including its background, without
-stretching or cropping the mark. Navigation, compact UI controls and favicons
-continue to use the SVG assets above.
-
-This raster artwork is maintained separately; the rebuild commands below
-regenerate the vector assets and their raster exports, not this illustration.
+Use this flat color mark in navigation, project introductions and avatars.
+Keep its background transparent except in application tiles. Do not add glass
+effects, gradients, lighting or dimensional backgrounds to the mark.
 
 ## Rebuild
 

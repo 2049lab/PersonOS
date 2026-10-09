@@ -23,11 +23,12 @@ CENTER_COLOR = "#FFB344"
 ARC = "M32 8 A24 24 0 0 1 52.78461 20"
 
 
-def mark_group(ink: str = INK, *, color: bool = False) -> str:
+def mark_group(ink: str = INK, *, color: bool = False, dark: bool = False) -> str:
     """Three equal 60-degree arcs, 120 degrees apart, around one solid center."""
+    palette = (COLORS[0], WHITE if dark else COLORS[1], COLORS[2])
     arcs = "".join(
         f'<path d="{ARC}" transform="rotate({angle} 32 32)" '
-        f'fill="none" stroke="{COLORS[i] if color else ink}" '
+        f'fill="none" stroke="{palette[i] if color else ink}" '
         'stroke-width="6" stroke-linecap="round"/>'
         for i, angle in enumerate((0, 120, 240))
     )
@@ -84,7 +85,7 @@ def wordmark(ink: str, tagline: bool = False) -> str:
     # 30-unit cap height, vertically centered against the 64-unit mark.
     d, _, advance = text_path("PersonOS", size=30 / .7275, wght=600,
                              tracking=-.025, x=80, baseline=47)
-    body = mark_group(ink) + f'<path d="{d}" fill="{ink}"/>'
+    body = mark_group(color=True, dark=ink == WHITE) + f'<path d="{d}" fill="{ink}"/>'
     width = math.ceil(80 + advance + 2)
     height = 64
     if tagline:
@@ -102,17 +103,19 @@ def build() -> dict[str, str]:
         "mark-dark.svg": svg(64, 64, mark_group(WHITE)),
         "mark-mono.svg": svg(64, 64, mark_group("#000000")),
         "mark-color.svg": svg(64, 64, mark_group(color=True)),
+        "mark-color-dark.svg": svg(64, 64, mark_group(color=True, dark=True)),
         "wordmark.svg": wordmark(INK),
         "wordmark-dark.svg": wordmark(WHITE),
         "lockup-tagline.svg": wordmark(INK, True),
         "lockup-tagline-dark.svg": wordmark(WHITE, True),
     }
     # Same silhouette in every context; browser theme changes color only.
-    theme = f'<style>svg{{color:{INK}}}@media(prefers-color-scheme:dark){{svg{{color:{WHITE}}}}}</style>'
-    out["favicon.svg"] = svg(64, 64, theme + mark_group("currentColor"))
+    theme = f'<style>svg{{color:{COLORS[1]}}}@media(prefers-color-scheme:dark){{svg{{color:{WHITE}}}}}</style>'
+    adaptive_mark = mark_group(color=True).replace(f'stroke="{COLORS[1]}"', 'stroke="currentColor"')
+    out["favicon.svg"] = svg(64, 64, theme + adaptive_mark)
     out["icon.svg"] = svg(64, 64,
-        f'<rect width="64" height="64" rx="14" fill="{INK}"/>'
-        f'<g transform="translate(4 4) scale(.875)">{mark_group(WHITE)}</g>')
+        f'<rect width="64" height="64" rx="14" fill="{PAPER}"/>'
+        f'<g transform="translate(4 4) scale(.875)">{mark_group(color=True)}</g>')
     wm = out["wordmark.svg"]
     import xml.etree.ElementTree as ET
     wm_width = float(ET.fromstring(wm).attrib["width"])
