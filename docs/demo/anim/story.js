@@ -450,9 +450,30 @@ function drawEnd(t) {
   pebble(1450, 720, 52 * Math.max(.01, k), { wink, look: [-.8, .1], glow: .55 + .35 * Math.sin(t * 5), rot: .05 * Math.sin(t * 3), armR: .9 + .4 * Math.sin(t * 6), roll: 0 });
   sparkles(t, 14); flushGlowQ();
   OVER.push((c) => {
-    c.save(); c.globalAlpha = u; const lw = 980, lh = lw * (LOCKUP.height / LOCKUP.width); c.drawImage(LOCKUP, 330, 230 + (1 - u) * 30, lw, lh); c.restore();
+    const lw = 980, S = lw / 273, y0 = 230 + (1 - u) * 30, lh = 80 * S, SPLIT = 70;                      // lockup viewBox is 273 x 80; the mark lives at x < 70
+    c.save(); c.globalAlpha = u; c.drawImage(LOCKUP, SPLIT * LOCKUP.width / 273, 0, LOCKUP.width * (273 - SPLIT) / 273, LOCKUP.height, 330 + SPLIT * S, y0, (273 - SPLIT) * S, lh); c.restore();   // wordmark + tagline only
+    drawEyeMark(c, t - T_END, 330 + 32 * S, y0 + 32 * S, S, u);
     c.save(); c.globalAlpha = p2; c.fillStyle = '#FFFBF0'; c.strokeStyle = PAL.ink; c.lineWidth = 3; roundRect(c, 330, 640, 640, 96, 22); c.fill(); c.stroke(); c.fillStyle = PAL.ink; c.font = '600 60px Caveat'; c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillText('$ ' + STORY.ui.pip, 650, 690);
     c.font = '500 44px Caveat'; c.fillStyle = '#6a5f55'; c.fillText(STORY.ui.gh, 650, 790); c.font = '500 28px Caveat'; c.fillStyle = '#9a8f84'; c.fillText('Voices & SFX: ElevenLabs', 650, 852); c.restore(); });
+}
+
+/* The PersonOS mark as an eye: three rigid arcs (never rotated relative to each other) around an amber pupil. A pure function of tau (seconds into the end card). */
+const easeInOutCubic = x => { x = clamp(x); return x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2; };
+function eyeMarkState(tau) {
+  const D2R = Math.PI / 180, STEPS = [1.2, 2.8, 4.4], STEP_D = .75; let rot = 0, dx = 0, dy = 0;
+  const intro = easeOut(seg(tau, .25, .95)), sweep = 60 * intro; rot += lerp(-120, 0, intro);
+  const pop = backOut(seg(tau, .15, .55));
+  for (const st of STEPS) { const u = clamp((tau - st) / STEP_D); rot += 120 * easeInOutCubic(u);
+    const d = tau - (st + STEP_D); if (d > 0 && d < .18) { const x = d / .18; rot += 5 * Math.sin(Math.PI * x) * (1 - x) * 2; }                             // a small settle overshoot
+    if (u > 0 && u < 1) { const m = 2.5 * 1.65 * Math.sin(Math.PI * u) * (1 - u) - (u > .55 ? .5 * Math.sin(Math.PI * clamp((u - .55) / .45)) : 0), a = (rot) * D2R; dx += Math.cos(a) * m; dy += Math.sin(a) * m; } }
+  return { rot, sweep, pop, dx, dy };
+}
+function drawEyeMark(c, tau, cx, cy, S, alpha) {
+  const m = eyeMarkState(tau), cols = ['#225CFF', '#111719', '#79C8FF'];
+  c.save(); c.globalAlpha = alpha; c.lineCap = 'round'; c.lineWidth = 6 * S;
+  if (m.sweep > .5) cols.forEach((col, i) => { const a0 = (-90 + i * 120 + m.rot) * Math.PI / 180; c.strokeStyle = col; c.beginPath(); c.arc(cx, cy, 24 * S, a0, a0 + m.sweep * Math.PI / 180, false); c.stroke(); });
+  if (m.pop > .001) { c.fillStyle = '#FFB344'; c.beginPath(); c.arc(cx + m.dx * S, cy + m.dy * S, 8 * S * m.pop, 0, Math.PI * 2); c.fill(); }
+  c.restore();
 }
 /* ───────── compositing ───────── */
 let layerA = null, layerB = null, LOCKUP = null;

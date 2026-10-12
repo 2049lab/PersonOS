@@ -289,7 +289,7 @@ evidence ──────► memcell ─────────► atom ─�
 
 这段动画演示跨视频片段的人物身份解析。三个孩子穿着相同的幽灵服装，声音、位置和视觉证据帮助复核相互冲突的身份判断。
 
-https://github.com/user-attachments/assets/2faea78b-7db6-4a7a-8f6d-22c7cd4a7a38
+https://github.com/user-attachments/assets/252e5d6c-b959-4d2c-a06d-7cf5367a55da
 
 事件先用 `P1`、`P2` 等人物临时代号记录，身份判断单独维护。新证据可以修订身份判断，会话整合时再将观察关联到持久化人物档案；检索回答时返回相关事件及其证据。
 

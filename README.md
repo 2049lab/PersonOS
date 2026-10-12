@@ -289,7 +289,7 @@ See the [examples guide](examples/README.md) for commands, sample preparation, m
 
 An animated walkthrough of identity resolution across video clips. Three children wear matching ghost costumes; new voice, location, and visual evidence helps resolve conflicting identity matches.
 
-https://github.com/user-attachments/assets/2faea78b-7db6-4a7a-8f6d-22c7cd4a7a38
+https://github.com/user-attachments/assets/252e5d6c-b959-4d2c-a06d-7cf5367a55da
 
 Events are recorded with temporary person codes such as `P1` and `P2`, while identity hypotheses are maintained separately. New evidence can revise those hypotheses before session consolidation links observations to persistent characters. Retrieval then returns the relevant events and supporting material.
 
