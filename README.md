@@ -7,7 +7,7 @@
 
 <p>
   <a href="#quick-start"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/nav-start-dark.svg"><img src="docs/assets/brand/nav-start.svg" alt="Quick start" width="124" height="44"></picture></a>
-  <a href="docs/usage.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/nav-docs-dark.svg"><img src="docs/assets/brand/nav-docs.svg" alt="Documentation" width="124" height="44"></picture></a>
+  <a href="docs/usage.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/nav-docs-dark.svg"><img src="docs/assets/brand/nav-docs.svg" alt="Docs" width="124" height="44"></picture></a>
   <a href="examples/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/nav-examples-dark.svg"><img src="docs/assets/brand/nav-examples.svg" alt="Examples" width="124" height="44"></picture></a>
   <a href="README.zh-CN.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/nav-language-dark.svg"><img src="docs/assets/brand/nav-language.svg" alt="简体中文" width="124" height="44"></picture></a>
 </p>

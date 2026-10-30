@@ -140,28 +140,43 @@ def hero(*, dark: bool = False, mobile: bool = False, chinese: bool = False) -> 
 
 NAV = {
     "start": ("Quick start", "快速开始", 124),
-    "docs": ("Documentation", "使用文档", 124),
+    "docs": ("Docs", "使用文档", 124),
     "examples": ("Examples", "示例", 124),
     "language": ("简体中文", "English", 124),
 }
 
 
 def navigation(key: str, *, dark: bool = False, chinese: bool = False) -> str:
-    """Image links preserve readable button styling under GitHub sanitization."""
+    """Keep a readable action area and dissolve only the terminal into particles."""
     en, zh, width = NAV[key]
     label = zh if chinese else en
     primary = key == "start"
     ink = (INK if dark else WHITE) if primary else (WHITE if dark else INK)
-    fill = (WHITE if dark else INK) if primary else ("#151B23" if dark else "#FFFFFF")
-    stroke = fill if primary else ("#3D4651" if dark else "#D9DEE5")
-    body = (f'<rect x=".5" y=".5" width="{width-1}" height="43" rx="8" '
-            f'fill="{fill}" stroke="{stroke}"/>')
+    fill = (WHITE if dark else INK) if primary else ("#1C2430" if dark else "#F1F3F5")
+    stroke = fill if primary else ("#3B4654" if dark else "#CDD3DB")
+    particle = fill if primary else ("#6D7B8E" if dark else "#A7AFBA")
+    # A fixed, sparse continuation of the mark's rightward square fragments.
+    # The first 100 units remain intact so decoration cannot cross the label.
+    cutouts = [(105, 5, 3), (102, 10, 2), (107, 15, 3), (104, 20, 2),
+               (108, 25, 3), (102, 30, 2), (106, 35, 3), (104, 40, 2)]
+    fragments = [(111, 7, 2), (115, 11, 1.5), (110, 15, 2.5),
+                 (114, 19, 2), (120, 21, 1.5), (111, 24, 2),
+                 (117, 28, 2), (111, 31, 2.5), (121, 33, 1),
+                 (115, 36, 1.5), (110, 39, 2), (118, 41, 1)]
+    holes = ''.join(f'<rect x="{x}" y="{y}" width="{s}" height="{s}" fill="#000"/>'
+                    for x, y, s in cutouts)
+    body = ('<defs><mask id="edge" maskUnits="userSpaceOnUse" x="0" y="0" width="124" height="44">'
+            f'<rect width="124" height="44" fill="#fff"/>{holes}</mask></defs>'
+            '<rect x=".5" y=".5" width="108" height="43" rx="7" '
+            f'fill="{fill}" stroke="{stroke}" mask="url(#edge)"/>')
+    body += ''.join(f'<rect x="{x}" y="{y}" width="{s}" height="{s}" fill="{particle}"/>'
+                    for x, y, s in fragments)
     if any(ord(c) > 127 for c in label):
         text_width = len(label) * 14
     else:
         _, _, text_width = text_path(label, x=0, baseline=0, size=14,
                                     wght=500, tracking=-.01)
-    body += lettering(label, (width-text_width)/2, 27, 14, ink, 500, -.01)
+    body += lettering(label, (104-text_width)/2, 27, 14, ink, 500, -.01)
     return svg(width, 44, body, label)
 
 

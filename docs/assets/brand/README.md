@@ -27,7 +27,9 @@ stretching, recoloring individual particles, adding glow or rotating fragments.
 The header uses one composition with product name, purpose and the shared mark.
 The narrow version rearranges that composition. Navigation remains real HTML
 links; the linked SVGs provide styling because GitHub strips custom page CSS.
-The four equal-width controls wrap into two rows on narrow screens. Every link
+The four equal-width controls wrap into two rows on narrow screens. Their right
+edges dissolve into a small fixed set of square fragments; text stays in a solid,
+undecorated area. The compact English label “Docs” keeps that space readable. Every link
 has an accessible text label, and every image is hosted in this repo.
 
 The cover-and-navigation structure was informed by the
