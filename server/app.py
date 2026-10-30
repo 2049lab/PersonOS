@@ -8,10 +8,9 @@ Run with:  uvicorn server.app:app --reload --port 8000
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from loguru import logger
 
 from personos.config import settings
@@ -58,22 +57,13 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="PersonOS", lifespan=lifespan)
 
 
-# -- Static API documentation page: generated at build time by
-# scripts/build_api_doc.py and served directly at runtime with no dependencies --
-_API_DOC_HTML = ""
-try:
-    _API_DOC_HTML = (Path(__file__).parent / "api_doc.html").read_text(encoding="utf-8")
-except OSError:
-    logger.warning("api_doc.html is missing (not built? run scripts/build_api_doc.py); "
-                   "/ and /api-doc will return a placeholder")
-
-
-@app.get("/", response_class=HTMLResponse, include_in_schema=False)
-@app.get("/api-doc", response_class=HTMLResponse, include_in_schema=False)
+# Keep the reference tied to the mounted routes instead of a separately
+# generated HTML copy that can describe a different API version.
+@app.get("/", include_in_schema=False)
+@app.get("/api-doc", include_in_schema=False)
 def api_doc():
-    """API documentation page: callers and agents can read the latest usage by hitting
-    the root path of this domain."""
-    return _API_DOC_HTML or "<h1>personos-mem</h1><p>API docs not built (server/api_doc.html missing)</p>"
+    """Keep historical documentation URLs pointed at the current OpenAPI UI."""
+    return RedirectResponse(url="/docs")
 
 
 # -- Platform probes: outside /api/v1, unauthenticated --

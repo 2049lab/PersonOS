@@ -31,28 +31,36 @@ class EvidenceStore:
         self.db = db
         self.user_id = user_id
 
-    def append(self, rec: EvidenceRecord, embedding: Optional[np.ndarray] = None) -> str:
+    def append(self, rec: EvidenceRecord, embedding: Optional[np.ndarray] = None,
+               *, dedup_by_sha: bool = False) -> str:
         """Append one piece of evidence.
 
-        If that sha256 already exists for this user it counts as a duplicate and
-        the existing id is returned, which makes this deduplicating and idempotent.
+        Message identity is rec.id: retrying that ID leaves the original record
+        unchanged. Identical words from another message remain separate evidence,
+        retaining their own speaker, session and timestamp. Content deduplication
+        is opt-in for media whose hash identifies the same original asset.
 
         embedding is the vector of the evidence text, used for the evidence-level
         semantic fallback search when the fact layer finds nothing.
         """
         if not rec.sha256 and rec.content_inline is not None:
             rec.sha256 = sha256_of(rec.content_inline)
-        existing = self.by_sha256(rec.sha256) if rec.sha256 else None
+        existing = self.by_sha256(rec.sha256) if dedup_by_sha and rec.sha256 else None
         if existing:
             logger.debug(f"evidence deduplicated sha={rec.sha256[:8]} -> {existing.id}")
             return existing.id
         emb_blob = np.asarray(embedding, dtype=np.float32).tobytes() if embedding is not None else None
         self.db.execute(
             "INSERT INTO evidence(id, user_id, sha256, holder, modality, captured_at, payload, embedding) "
-            "VALUES(%s,%s,%s,%s,%s,%s,%s,UNHEX(%s))",
+            "VALUES(%s,%s,%s,%s,%s,%s,%s,UNHEX(%s)) "
+            "ON DUPLICATE KEY UPDATE id=id",
             (rec.id, self.user_id, rec.sha256, rec.holder, rec.modality,
              rec.captured_at.isoformat(), rec.model_dump_json(), blob_param(emb_blob)),
         )
+        # IDs are global primary keys. A collision with another user's record
+        # must fail rather than return a successful reference that this user cannot read.
+        if self.get(rec.id) is None:
+            raise ValueError("Evidence ID is unavailable in this user namespace")
         logger.info(f"evidence stored id={rec.id} user={self.user_id or '(default)'} holder={rec.holder} len={len(rec.content_inline or '')}")
         return rec.id
 

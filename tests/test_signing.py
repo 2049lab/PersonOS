@@ -15,7 +15,7 @@ import pytest
 
 from server import signing
 
-AK, SK = "rokid", "testsk-abc"
+AK, SK = "example-app", "testsk-abc"
 
 
 @pytest.fixture(autouse=True)
@@ -108,11 +108,11 @@ def test_aksk_empty_not_cached_selfheals(monkeypatch):
     """An empty map on the first read is not cached, so once the credentials are in place the
     next call loads them automatically with no restart, and subsequent calls hit the cache."""
     signing._reset_cache()
-    seq = iter(["", '{"rokid":"sk1"}', "SHOULD-NOT-BE-READ"])
+    seq = iter(["", '{"example-app":"sk1"}', "SHOULD-NOT-BE-READ"])
     monkeypatch.setattr(signing, "get_secret", lambda *a, **k: next(seq))
     assert signing._load_aksk() == {}                    # empty -> not cached
-    assert signing._load_aksk() == {"rokid": "sk1"}      # now present -> self-healing load
-    assert signing._load_aksk() == {"rokid": "sk1"}      # already cached -> get_secret is not read again
+    assert signing._load_aksk() == {"example-app": "sk1"}      # now present -> self-healing load
+    assert signing._load_aksk() == {"example-app": "sk1"}      # already cached -> get_secret is not read again
 
 
 def _req(method, path, headers, body=b""):

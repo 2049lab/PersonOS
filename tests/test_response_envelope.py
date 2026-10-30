@@ -119,14 +119,13 @@ def test_healthz_probe_not_enveloped(client):
 
 
 def test_api_doc_page_served(client):
-    """/ and /api-doc serve the API documentation as HTML, so a consumer or an agent can just
-    hit the domain and read it."""
+    """Historical URLs lead to the current route-derived API reference."""
     for path in ("/", "/api-doc"):
         r = client.get(path)
         assert r.status_code == 200
         assert r.headers["content-type"].startswith("text/html")
-        # The title and a copy-pasteable curl are both in place.
-        assert "personos-mem" in r.text and "curl -s" in r.text
+        assert "Swagger UI" in r.text and "/openapi.json" in r.text
+        assert r.url.path == "/docs"
 
 
 def test_422_validation_envelope(auth_client):

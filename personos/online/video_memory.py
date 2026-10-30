@@ -130,7 +130,7 @@ def flush_session_to_memory(
             continue
         rec = EvidenceRecord(modality="video", content_ref=key, sha256=f"clip:{session_id}:{ci}",
                              source={"session_id": session_id, "clip_index": ci, "kind": "raw_clip"})
-        raw_id[ci] = evidence_store.append(rec)
+        raw_id[ci] = evidence_store.append(rec, dedup_by_sha=True)
 
     # (2) Derived line evidence: holder = display name, with the exact character id in
     # source.character_id; collected in time order to feed build_cell.
@@ -172,7 +172,7 @@ def flush_session_to_memory(
             source={"session_id": session_id, "kind": "cast_intro",
                     "cast_id": cast_id, "character_id": cid}))
     for rec in intro:
-        evidence_store.append(rec)
+        rec.id = evidence_store.append(rec, dedup_by_sha=True)
 
     records: list[EvidenceRecord] = list(intro)
     for ln in lines:
@@ -189,7 +189,7 @@ def flush_session_to_memory(
             source={"session_id": session_id, "clip_index": ci, "t0": ln["t0"], "t1": ln["t1"],
                     "kind": ln.get("kind"), "cast_id": ln["who"], "character_id": cid,
                     "raw_evidence_id": raw_id.get(ci)})
-        evidence_store.append(rec)
+        rec.id = evidence_store.append(rec, dedup_by_sha=True)
         records.append(rec)
     if len(records) == len(intro):     # only intro lines, not a single line of dialogue or action -> nothing to record
         logger.info(f"video memory flush: session={session_id} no renderable lines, skipping build_cell")

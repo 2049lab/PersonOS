@@ -333,7 +333,7 @@ def ingest_sessions(lc: LocomoConversation, n_sessions: int, llm, embedder,
                              if r.boundary else None),   # None = first line of a segment (nothing to judge against)
                 "forced_close": r.forced_close,      # the turn-count safety valve, not an LLM decision
             })
-            if r.closed_cell:
+            if r.closed_cell is not None and r.closed_cell.cell is not None:
                 closed_in_session.append(r.closed_cell)
         # end_session returns the cell list for the whole session; take only the
         # unrecorded tail, so cells closed mid-session are not counted twice.

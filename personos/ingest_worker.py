@@ -14,11 +14,12 @@ Architecture (see the design alignment notes under docs/design):
   (recover) -> then drain FIFO for at most max_drain messages (fairness: a chatty
   session must not hog a thread) -> release the lock -> once drained, take the session
   off the board.
-- **No duplicates**: every message's seq is compared with the session cursor; if
+- **Replay handling**: every message's seq is compared with the session cursor; if
   seq <= cursor it is a redelivery and is acked and skipped; after a successful
-  consumption the cursor advances and only then is the message acked. A reliable queue
-  plus a cursor gives exactly-once in the normal case, and at-least-once with idempotent
-  dedup after a crash.
+  consumption the cursor advances and only then is the message acked. Text/image evidence
+  IDs are stable across retries, and buffered copies are reused. A crash between derived-memory
+  persistence and segment-state persistence can still repeat generation: these operations are
+  not one transaction, so this is not an exactly-once processing guarantee.
 
 Dependencies are injected (no coupling to the runtime or FastAPI), which keeps unit
 testing easy: just pass mq / lock / the writer_for callback.
@@ -27,6 +28,7 @@ testing easy: just pass mq / lock / the writer_for callback.
 from __future__ import annotations
 
 import base64
+import json
 import threading
 import time
 import uuid
@@ -174,8 +176,15 @@ class SessionConsumer:
                                 image=base64.b64decode(m["image_b64"]) if m.get("image_b64") else None,
                                 image_content_type=m.get("image_content_type", "image/jpeg"))
                         for m in p.get("messages", [])]       # One queue message = one atomic batch
+                evidence_ids = [
+                    "ev_" + uuid.uuid5(uuid.NAMESPACE_URL, json.dumps(
+                        ["personos-evidence", user_id, session_id, env.msg_id, i],
+                        ensure_ascii=False, separators=(",", ":"))).hex
+                    for i in range(len(msgs))
+                ]
                 writer.feed_batch(msgs, source_extra=p.get("source_extra"),
-                                  task_type=p.get("task_type"), scenario=scenario)
+                                  task_type=p.get("task_type"), scenario=scenario,
+                                  evidence_ids=evidence_ids)
 
     def _apply(self, user_id: str, session_id: str, env: Envelope,
                last_scenario: dict | None = None) -> str:

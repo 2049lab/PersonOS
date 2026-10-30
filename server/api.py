@@ -22,7 +22,7 @@ import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import JSONResponse
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictInt
 
 from personos import obs
 from personos.config import settings
@@ -30,7 +30,7 @@ from personos.errors import QueueBusy
 from personos.logging_setup import trace
 from personos.models import now
 from personos.online.profile_render import render as render_profile
-from personos.online.recall_flow import PUBLIC_MODES, run_recall
+from personos.online.recall_flow import run_recall, validate_recall
 from personos.online.trust import build_trust_chain, trace_evidence
 from personos.online.views import profile_view
 from personos.session_scope import scoped_session, valid_user_id
@@ -38,6 +38,7 @@ from personos.storage.msg_queue import EnqueueBusy
 from personos.storage.profile_store import ProfileStore
 from server.runtime import UserContext, rt
 
+from .query_api import install_query_routes
 from .response import EnvelopeRoute
 from .signing import verify_signature
 
@@ -139,8 +140,8 @@ class RecallBody(BaseModel):
     # visual information.
     image_b64: str | None = None          # With a data:image/...;base64, prefix or as plain base64
     image_content_type: str = "image/jpeg"
-    mode: str = "auto"           # auto (fast path, escalating to the deep track when adjudication fails) | fast (fast path only) | deep (straight to the deep track)
-    top_k: int = 30              # Cap on the R1 atom pool (how many survive the RRF fusion of the two retrieval paths; material units are derived from it)
+    mode: str = "auto"           # auto | fast | deep | flash (retrieved material, no answer)
+    top_k: StrictInt = 30         # Retrieval pool limit, 1..100; booleans are not counts.
     context: CallerContext | None = None  # Optional: the caller's scenario (recall uses scenario only; task_type is ignored)
 
 
@@ -473,7 +474,12 @@ def task_status(task_id: str, ctx: UserContext = Depends(_ctx)):
 
 @router.post("/recall")
 def recall(body: RecallBody, ctx: UserContext = Depends(_ctx)):
-    """Recall: either the whole fast path (R0 -> R1 -> R2 -> R5 draft -> R3' adjudication,
+    """Retrieve memory material or answer from it.
+
+    ``mode=flash`` accepts text queries and returns source ``materials`` and
+    ``memories`` without generating an answer or review. It uses embeddings and
+    the configured reranker. Other modes run the whole fast path
+    (R0 -> R1 -> R2 -> R5 draft -> R3' adjudication,
     escalating to the deep track automatically when adjudication fails) or straight to
     the deep track; returns the answer plus the memories it rests on.
 
@@ -492,9 +498,10 @@ def recall(body: RecallBody, ctx: UserContext = Depends(_ctx)):
     pipeline downstream use the visual information. Without an image the pipeline is
     unchanged, byte for byte.
     """
-    if body.mode not in PUBLIC_MODES:
-        return JSONResponse(status_code=400,
-                            content={"error": f"mode only supports {list(PUBLIC_MODES)}", "got": body.mode})
+    try:
+        validate_recall(body.query, body.mode, body.top_k, has_image=body.image_b64 is not None)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     img, _ = _decode_image_b64(body.image_b64, "image_b64")   # Bad base64 -> 400, too large -> 413
     if img is not None:
         # The query image gets an **extra** format check: it is query input, so if we
@@ -520,11 +527,13 @@ def recall(body: RecallBody, ctx: UserContext = Depends(_ctx)):
                             content={"error": "recall concurrency is at capacity, retry later"})
     # Profile injection (an empty profile gives an empty string, so behavior is unchanged
     # byte for byte): full goes to R0 and the deep track, traits goes to R5
-    _pv = ProfileStore(rt.db, ctx.user_id).current()
-    p_full = render_profile(_pv.profile, mode="full") if _pv else ""
-    p_traits = render_profile(_pv.profile, mode="traits") if _pv else ""
+    p_full = p_traits = ""
     tid = uuid.uuid4().hex   # End-to-end trace_id: the langfuse trace, the log tracing id and the response body all use the same id
     try:
+        if body.mode != "flash":
+            _pv = ProfileStore(rt.db, ctx.user_id).current()
+            p_full = render_profile(_pv.profile, mode="full") if _pv else ""
+            p_traits = render_profile(_pv.profile, mode="traits") if _pv else ""
         with trace(tid), \
                 obs.root_span("recall", user_id=ctx.user_id, session_id=sid,
                               input=body.query, trace_id=tid) as _sp:
@@ -643,3 +652,6 @@ def trace_node(node_id: str, ctx: UserContext = Depends(_ctx)):
     if ev_node is not None:
         return ev_node
     return JSONResponse(status_code=404, content={"error": "not found", "id": node_id})
+
+
+install_query_routes(router, _ctx)

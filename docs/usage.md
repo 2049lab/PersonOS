@@ -8,12 +8,16 @@ PersonOS supports text, image and video memory through the Python `Memory` API o
 
 ## Text memory
 
+This guide describes the current source tree. Install from source for the new browsing APIs and `flash`; the published PyPI package may not yet include them.
+
 Requires **Python 3.10+** and access to both chat completions and embeddings. The following uses the package's OpenAI defaults; the key must have access to both models.
 
 ```bash
+git clone https://github.com/2049lab/PersonOS.git
+cd PersonOS
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install personos
+python -m pip install -e .
 
 export PERSONOS_LLM_API_KEY="your-api-key"
 export PERSONOS_LLM_BASE_URL="https://api.openai.com/v1"
@@ -35,7 +39,7 @@ from personos import Memory
 
 with Memory() as memory:
     memory.add(
-        "I moved from Hangzhou to Shanghai in June.",
+        "I moved from Hangzhou to Shanghai in June 2026.",
         user_id="quickstart-alice",
         session_id="first-conversation",
     )
@@ -169,14 +173,20 @@ The following calls use an existing `Memory` instance:
 memory.add(messages, user_id=..., session_id=...)
 memory.end_session(user_id=..., session_id=..., sync=True)
 memory.flush(user_id=..., session_id=...)
-memory.search(query, user_id=..., mode="auto")  # auto | fast | deep
+memory.search(query, user_id=..., mode="auto")  # flash | auto | fast | deep
 memory.profile(user_id=...)                    # distilled user profile
 memory.trace(node_id, user_id=...)             # provenance in both directions
 memory.capabilities()                         # configuration and dependency checks
-memory.reset(user_id=...)                      # delete this user's data
+memory.reset(user_id=...)                      # clear stored records; see limitations below
 ```
 
 `add()` accepts a string, a message dictionary or a list of dictionaries. A message can contain an `image` (bytes or a path), or a `video` (path, file object or URL). Send video clips and conversation turns in separate calls. See the [text, image and video examples](../examples/README.md) for complete inputs.
+
+### What becomes memory
+
+Text extraction focuses on the user's facts, experiences, preferences, relationships and plans. A segment with no relevant personal content can produce no episode; an episode can also have no atoms. The pipeline does not manufacture a memory to meet a minimum count. Original evidence is retained. If episode extraction fails, evidence remains without substituting the full transcript for the episode. See [framework design](framework.md) for the boundary and behavior changes.
+
+Identical wording in distinct messages is retained separately. Queue consumption retries reuse evidence IDs to avoid duplicating the same original record; this is not an end-to-end exactly-once guarantee.
 
 ### Write ordering
 
@@ -188,7 +198,7 @@ Pass `sync=True` or call `flush(user_id=..., session_id=...)` after enqueueing t
 
 ### Recall and provenance
 
-Reads (`search`, `profile`, `trace`) are synchronous. `mode="fast"` uses the fast recall path; `mode="auto"` can escalate when deep recall is installed; `mode="deep"` requires the `deep` extra.
+Reads (`search`, `profile`, `trace`) are synchronous. Every recall mode requires a nonempty query, a valid mode and integer `top_k` from 1 to 100; booleans are rejected. `mode="fast"` uses the fast recall path; `mode="auto"` can escalate when deep recall is installed; `mode="deep"` requires the `deep` extra.
 
 ```python
 result = memory.search("Who ate the candy?", user_id="pebble")
@@ -206,6 +216,54 @@ print(result.ans.cited_cells if result.ans else [])
 
 Use the cited episodes and `trace()` to inspect the source evidence behind an answer or identity match.
 
+### Material for your agent
+
+```python
+result = memory.search("What are my dietary preferences?", user_id="alice", mode="flash")
+material = result.to_public()
+for item in material["materials"]:
+    print(item["episode"], item["evidence_refs"])
+```
+
+`flash` skips query rewriting, answer generation and answer review. It still embeds the query and uses the configured reranker. `result.ans` is `None`; the public `answer` is empty and `verdict` is `None`. Retrieved memories are candidates for the calling agent to use, not a reviewed answer. This mode accepts text queries only; use `fast` or `auto` when sending an image. `top_k` is an integer from 1 to 100. It uses the raw query, ignores rewriting, profile injection and `scenario`, and does not require chat-model credentials.
+
+The public `materials` field contains episode text, time windows, matched `atom_ids` and evidence references. `memories` retains the atom views with inline evidence. With no retrieval results, both lists are empty and the answer stays blank.
+
+### Browse saved memories
+
+These reads call no models and do not require model credentials. They use an open `Memory` instance and the requested user's stores.
+
+```python
+page = memory.list_memories(
+    user_id="alice", session_id="first-conversation", limit=20, offset=0,
+)
+for item in page["items"]:
+    print(item["atom_id"], item["text"], item["evidence"])
+
+chain_page = memory.list_chains(user_id="alice", limit=20, offset=0)
+if chain_page["items"]:
+    chain_id = chain_page["items"][0]["chain_id"]
+    history = memory.get_chain(chain_id, user_id="alice", limit=20)
+    if history and history["has_more"]:
+        next_page = memory.get_chain(
+            chain_id, user_id="alice", limit=20, cursor=history["next_cursor"],
+        )
+```
+
+| Method | Filters and pagination | Returns |
+|---|---|---|
+| `list_memories` | `session_id`, `object_type`, `holder`, `kind`, `domain`, `query`, `limit`, `offset` | Atom records with current chain links, episode context and scoped source evidence |
+| `list_chains` | `limit`, `offset` | Chain title, count, head/tail IDs and timestamps; no full histories |
+| `get_chain` | `chain_id`, `limit`, `cursor` | Chain metadata and a bounded page of memory records in chain order |
+
+`limit` is 1–100 and defaults to 20; `offset` is 0–100000. List methods return `items`, `limit`, `offset` and `has_more` with deterministic ID ordering. `query` performs a literal text match, not semantic search. Filters combine with AND. `kind` and `domain` use the codes in [`personos/models.py`](../personos/models.py). On MySQL, the `kind`, `domain` and `query` filters require JSON functions (MySQL 5.7+); local validation for this revision uses SQLite.
+
+A chain result adds `next_cursor` and `state`: `complete`, `more`, `incomplete` or `changed`. Continue only with the returned cursor; a changed chain requires restarting from its first page. An unknown chain or one belonging to another user returns `None`. Source references that cannot be resolved inside the same user scope are not filled from another user's data.
+
+### Reset boundaries
+
+`reset(user_id=...)` clears stored records and selected session state. It does not provide a complete erasure workflow for queued work, hosted media or provider-side data. Stop writes and arrange those lifecycle steps in the calling application. See [storage and deployment](framework.md#storage-and-deployment).
+
 ## HTTP service
 
 [`server/`](../server/README.md) provides the HTTP wrapper and has its own dependencies. It is distributed with the source repository, separately from the library wheel. From the repository root, with the model configuration above:
@@ -216,6 +274,17 @@ python -m pip install -e .
 python -m uvicorn server.app:app --host 127.0.0.1 --port 8000
 ```
 
+The new reads use the existing `X-User-Token` scope and `{code, data, msg}` response envelope:
+
+| Route | Purpose |
+|---|---|
+| `GET /api/v1/memories` | Filter and page through atoms; use `caller` with `session_id` to select a caller-scoped session |
+| `GET /api/v1/chains` | Page through chain metadata |
+| `GET /api/v1/chains/{chain_id}` | Read chain history with `limit` and `cursor` |
+| `POST /api/v1/recall` with `mode="flash"` | Return retrieval material without generating an answer |
+
+Invalid query types or out-of-range pagination return `422`; invalid filters or cursors return `400`. An unknown or another user's chain returns `404`. Requests still follow the service's signing and user-token requirements.
+
 The service uses the library configuration, plus:
 
 | Setting | Purpose |
@@ -225,6 +294,6 @@ The service uses the library configuration, plus:
 | `PERSONOS_REDIS_URL` | Shared ingest queues, session locks and segment state |
 | `PERSONOS_ENV` | Namespace for shared Redis state |
 
-Without Redis, queues and session state remain process-local. Configure shared MySQL and Redis before adding workers. Pool sizes and queue limits are documented in [`.env.example`](../.env.example); API routes and signing details are in the [HTTP API reference](../server/api_doc.html).
+Without Redis, queues and session state remain process-local. Configure shared MySQL and Redis before adding workers. Pool sizes and queue limits are documented in [`.env.example`](../.env.example); the running service exposes its current OpenAPI reference at `/docs`. The historical `/` and `/api-doc` addresses redirect to it. See [HTTP authentication](../server/authentication.md) for signing and user-token details.
 
 [← PersonOS](../README.md) · [简体中文](usage.zh-CN.md) · [Evaluation](evaluation.md)

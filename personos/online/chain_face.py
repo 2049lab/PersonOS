@@ -143,6 +143,12 @@ def _assemble(asm: UnitAssembly, pool: list[AtomHit], chains: ChainStore,
     asm.boundary = _boundary_note(missing, infos)
 
 
+def retrieval_units(pool: list[AtomHit], cells: CellStore) -> UnitAssembly:
+    """Return source episodes for retrieval-only consumers, without chain weaving or LLM calls."""
+    units = _plain_units(pool, cells)
+    return UnitAssembly(units=units, n_pool=len(pool), n_plain=len(units))
+
+
 def _plain_units(pool: list[AtomHit], cells: CellStore) -> list[CellHit]:
     """Fallback when assembly fails: plain units for the whole pool, deduped by cell (chain atoms go
     back to their own cells too, ordered by first appearance in the pool)."""

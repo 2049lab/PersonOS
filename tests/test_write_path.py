@@ -163,37 +163,30 @@ def test_end_session_closes_open_segment(db):
 
 # —— W2 ——
 
-def test_w2_call1_failure_falls_back_to_transcript_episode(db):
-    """Call 1 fails: the raw transcript becomes the episode so no information is lost, and the topic falls back to the boundary hint."""
+def test_w2_call1_failure_preserves_evidence_without_memory(db):
     env = Env(db)
-    llm = RoutingLLM(boundary=[BOUNDARY_END], episode=["### 坏了 ###"], atoms=[ATOMS_OK])
+    llm = RoutingLLM(boundary=[BOUNDARY_END], episode=["invalid JSON"] * 3)
     w = env.writer(llm)
-    w.feed("user", "我在帮 Caroline 筹备画展", now_dt=_T0)
-    r = w.feed("user", "换个话题", now_dt=_T0)
-    cell = r.closed_cell.cell
-    assert "user: 我在帮 Caroline 筹备画展" in cell.episode      # _transcript renders the raw utterances
-    assert cell.topic == "画展筹备"                                # falls back to the boundary topic_summary
-    assert len(env.atoms.list_by_cell(cell.id)) == 2              # Call 2 still runs normally
+    first = w.feed("user", "I am organizing an exhibition", now_dt=_T0)
+    result = w.feed("user", "A different topic", now_dt=_T0)
+    assert result.closed_cell.skipped and result.closed_cell.cell is None
+    assert result.closed_cell.skip_reason == "Episode generation failed"
+    assert env.ev.get(first.evidence_id).content_inline == "I am organizing an exhibition"
+    assert env.cells.list_session("t") == [] and env.atoms.list() == []
+    assert w.cells == [] and len(w.seg) == 1
+    assert "atoms" not in llm.calls
 
 
-def test_w2_call2_failure_still_leaves_a_retrieval_anchor(db):
-    """All three Call 2 retries fail: the cell is still stored, **and one summary atom is kept as a
-    retrieval anchor**.
-
-    The invariant changed (it used to be "leave atoms empty"): the fast path only searches atom
-    vectors, so a cell with zero atoms is completely unreachable -- the episode sits in the database
-    but no phrasing can recall it. A failed extraction must not make a whole segment of memory vanish.
-    """
+def test_w2_call2_failure_keeps_episode_without_fabricated_atoms(db):
     env = Env(db)
     llm = RoutingLLM(boundary=[BOUNDARY_END], episode=[EPISODE_OK],
-                     atoms=["### 坏了 ###", "还是坏的", "依旧坏的"])
+                     atoms=["invalid JSON"] * 3)
     w = env.writer(llm)
-    w.feed("user", "我在帮 Caroline 筹备画展", now_dt=_T0)
-    r = w.feed("user", "换个话题", now_dt=_T0)
-    assert env.cells.get(r.closed_cell.cell.id) is not None
-    got = env.atoms.list_by_cell(r.closed_cell.cell.id)
-    assert len(got) == 1 and got[0].source == "w2_fallback", got
-    assert llm.calls.count("atoms") == 3                      # the full num_tries=3 budget was used
+    w.feed("user", "I am organizing an exhibition", now_dt=_T0)
+    result = w.feed("user", "A different topic", now_dt=_T0)
+    assert env.cells.get(result.closed_cell.cell.id) is not None
+    assert env.atoms.list_by_cell(result.closed_cell.cell.id) == []
+    assert llm.calls.count("atoms") == 3  # malformed JSON is still retried
 
 
 def test_w2_call2_retries_then_succeeds(db):
@@ -398,74 +391,100 @@ def test_feed_batch_overrun_valve_closes_old_segment(db):
     assert len(w.seg) == 2 and llm.calls == ["boundary", "episode", "atoms"]
 
 
-def test_zero_atoms_triggers_one_retry_then_accepts(db):
-    """Extracting 0 atoms triggers exactly one re-extraction; only if the second attempt is also empty
-    do we accept that there is genuinely nothing to record (no unbounded retrying).
-
-    Why: an atom is a retrieval anchor, so having none means no query can ever recall this cell -- the
-    episode is still there but unfindable. And chat_json's num_tries only covers JSON parse failures,
-    so a well-formed {"atoms":[]} would sail straight through.
-    """
-    from personos.models import EvidenceRecord
-
-    U2 = "vtest_zero_atom"
-    ev, cells, atoms_st = EvidenceStore(db, U2), CellStore(db, U2), AtomStore(db, U2)
-    rec = EvidenceRecord(holder="user", content_inline="我住在上海", modality="text")
-    ev.append(rec)
-    EP = '{"topic":"住处","episode":"user 说他住在上海","domains":[]}'
-    A_EMPTY, A_OK = '{"atoms":[]}', ('{"atoms":[{"text":"user 住在上海","holder":"user",'
-                                     '"object_type":"fact","kind":"K01","quote":"我住在上海"}]}')
-
-    # 1. First attempt empty, the re-extraction returns one atom
-    llm = FakeLLM([EP, A_EMPTY, A_OK])
-    cb = build_cell(llm, FakeEmbedder(), ev, cells, atoms_st, [rec], session_id="zs1")
-    assert len(cb.atoms) == 1, "an empty first extraction should be retried once and the result adopted"
-
-    # 2. Both attempts empty, so there is no third one (FakeLLM only supplies two atom responses, a
-    #    third would raise IndexError), but 0 is still **not** accepted: one summary atom is stored as
-    #    a fallback, because a cell must always have a retrieval anchor
-    llm2 = FakeLLM([EP, A_EMPTY, A_EMPTY])
-    cb2 = build_cell(llm2, FakeEmbedder(), ev, cells, atoms_st, [rec], session_id="zs2")
-    assert len(cb2.atoms) == 1 and cb2.atoms[0].source == "w2_fallback", cb2.atoms
+def test_zero_atoms_accepted_without_retry_or_fallback(db):
+    env = Env(db)
+    llm = RoutingLLM(episode=[EPISODE_OK], atoms=['{"atoms":[]}'])
+    w = env.writer(llm)
+    w.feed("user", "I am organizing an exhibition", now_dt=_T0)
+    result = w.end_session()
+    assert len(result) == 1 and result[0].atoms == []
+    assert env.cells.get(result[0].cell.id) is not None
+    assert env.atoms.list() == []
+    assert llm.calls == ["episode", "atoms"]
 
 
-def test_zero_atoms_falls_back_to_one_summary_atom(db):
-    """Iron rule: **every memcell must have at least one atom**, otherwise that segment is permanently
-    unrecallable.
-
-    The fast path R1 only searches atom vectors; a cell's topic_embedding is used solely on the deep
-    track over an already-selected subset. So a cell with zero atoms is completely unreachable on the
-    fast path: the episode still sits in the database, but no phrasing can recall it. Observed in
-    practice: single-clip video segments consistently extracted 0 atoms and missed across four
-    different phrasings of the question.
-    """
-    from personos.models import EvidenceRecord
-    from personos.storage.atom_store import AtomStore
-    from personos.storage.cell_store import CellStore
-    from personos.storage.evidence_store import EvidenceStore
-
-    U2 = "vtest_atom_floor"
-    ev, cells, atoms_st = EvidenceStore(db, U2), CellStore(db, U2), AtomStore(db, U2)
-    rec = EvidenceRecord(holder="Alice", content_inline="Bob 又把我的笔记本弄脏了", modality="video")
-    ev.append(rec)
-    EP = '{"topic":"Bob 弄脏了 Alice 的笔记本","episode":"两人为笔记本争执","domains":["D07"]}'
-    EMPTY = '{"atoms":[]}'
-
-    # Both the extraction and the re-extraction come back empty, yet one summary atom must still be stored
-    cb = build_cell(FakeLLM([EP, EMPTY, EMPTY]), FakeEmbedder(), ev, cells, atoms_st,
-                    [rec], session_id="floor1")
-    assert len(cb.atoms) == 1, "with 0 atoms a summary atom must be synthesized as a fallback"
-    a = cb.atoms[0]
-    assert a.text == "Bob 弄脏了 Alice 的笔记本", a.text          # the topic is used as the summary
-    assert a.source == "w2_fallback", "synthesized atoms must be distinguishable so the trigger rate can be measured"
-    assert a.memcell_id == cb.cell.id
-    assert [r.evidence_id for r in a.evidence_refs] == [rec.id], "provenance must point at the whole segment's evidence"
-    # It only counts if it really reached the database -- retrieval reads stored vectors, not return values
-    assert any(x.id == a.id for x in atoms_st.list(limit=50))
+def test_explicit_skip_clears_segment_and_keeps_evidence(db):
+    env = Env(db)
+    llm = RoutingLLM(episode=['{"skip":true,"reason":"Only task instructions"}'])
+    w = env.writer(llm)
+    first = w.feed("user", "Set the button padding to 12 pixels", now_dt=_T0)
+    assert w.end_session(task_type=["work"]) == []
+    assert w.seg == []
+    assert env.ev.get(first.evidence_id) is not None
+    assert env.cells.iter_all() == [] and env.atoms.list() == []
+    assert llm.calls == ["episode"]
+    assert w.end_session() == []  # no duplicate model call after skip
 
 
-def test_fallback_not_used_when_extraction_works(db):
-    """The fallback must not fire when extraction works -- it only steps in when there is not a single atom."""
+def test_skip_during_boundary_keeps_new_batch(db):
+    env = Env(db)
+    llm = RoutingLLM(boundary=[BOUNDARY_END], episode=['{"skip":true}'])
+    w = env.writer(llm)
+    first = w.feed("assistant", "The build passed", now_dt=_T0)
+    result = w.feed("user", "I am moving to a new home", now_dt=_T0)
+    assert result.closed_cell.skipped and result.closed_cell.cell is None
+    assert w.cells == []
+    assert [rec.content_inline for rec in w.seg] == ["I am moving to a new home"]
+    assert env.ev.get(first.evidence_id) is not None
+    assert len(env.ev.list()) == 2
+    assert llm.calls == ["boundary", "episode"]
+
+
+def test_empty_episode_is_skipped_without_embedding(db):
+    class UnexpectedEmbedder:
+        def embed(self, texts):
+            raise AssertionError("Skipped segments must not be embedded")
+
+    env = Env(db)
+    llm = RoutingLLM(episode=['{"topic":"Task instructions","episode":" "}'])
+    w = SessionWriter(llm, UnexpectedEmbedder(), env.ev, env.cells, env.atoms, session_id="t")
+    w.feed("user", "Change the padding", now_dt=_T0)
+    assert w.end_session() == []
+    assert env.cells.iter_all() == []
+    assert llm.calls == ["episode"]
+
+
+def test_skip_with_blank_reason_still_skips(db):
+    env = Env(db)
+    llm = RoutingLLM(episode=['{"skip":true,"reason":"   "}'])
+    writer = env.writer(llm)
+    writer.feed("user", "Move the button", now_dt=_T0)
+    assert writer.end_session() == []
+    assert env.cells.iter_all() == [] and env.atoms.list() == []
+    assert llm.calls == ["episode"]
+
+
+def test_episode_takes_precedence_over_conflicting_skip(db):
+    env = Env(db)
+    llm = RoutingLLM(episode=['{"skip":true,"topic":"Home","episode":"The user lives in Oslo."}'],
+                     atoms=['{"atoms":[]}'])
+    w = env.writer(llm)
+    w.feed("user", "I live in Oslo", now_dt=_T0)
+    result = w.end_session()
+    assert len(result) == 1 and not result[0].skipped
+    assert result[0].cell.episode == "The user lives in Oslo."
+
+
+def test_subject_scope_shared_and_scenario_cannot_broaden_it():
+    from personos.online.write_path import (
+        _ATOM_SYSTEM,
+        _EPISODE_SYSTEM,
+        _SCEN_DIR_ATOM,
+        _SCEN_DIR_EPISODE,
+        _SUBJECT_LENS,
+    )
+    assert _SUBJECT_LENS in _ATOM_SYSTEM and _SUBJECT_LENS in _EPISODE_SYSTEM
+    assert "Episodes contain no inference" in _SUBJECT_LENS
+    assert 'object_type="claim"' in _SUBJECT_LENS
+    assert "Never infer unstated sensitive attributes" in _SUBJECT_LENS
+    assert "task payload" in _SUBJECT_LENS
+    assert "narrow or re-weight" in _SCEN_DIR_EPISODE
+    assert "narrow or re-weight" in _SCEN_DIR_ATOM
+    assert "Always return at least one" not in _ATOM_SYSTEM
+
+
+def test_grounded_atoms_keep_normal_source(db):
+    """Normal extraction still preserves its evidence and source metadata."""
     from personos.models import EvidenceRecord
     from personos.storage.atom_store import AtomStore
     from personos.storage.cell_store import CellStore
@@ -481,3 +500,52 @@ def test_fallback_not_used_when_extraction_works(db):
     cb = build_cell(FakeLLM([EP, OK]), FakeEmbedder(), ev, cells, atoms_st,
                     [rec], session_id="floor2")
     assert len(cb.atoms) == 1 and cb.atoms[0].source == "w2"
+
+
+def test_supplied_message_ids_replay_original_records(db):
+    env = Env(db)
+    writer = env.writer(RoutingLLM())
+    messages = [FeedMsg(speaker="user", text="Yes"), FeedMsg(speaker="assistant", text="Yes")]
+    first = writer.feed_batch(messages, now_dt=_T0, evidence_ids=["ev_first", "ev_second"])
+    replay = writer.feed_batch(messages, evidence_ids=["ev_first", "ev_second"])
+    assert replay.evidence_ids == first.evidence_ids
+    assert [r.model_dump() for r in replay.records] == [env.ev.get(eid).model_dump() for eid in first.evidence_ids]
+    assert len(writer.seg) == 2 and len(env.ev.list()) == 2
+    assert replay.boundary is None and replay.closed_cell is None
+
+
+def test_message_identity_validation_happens_before_writes(db):
+    import pytest
+
+    env = Env(db)
+    writer = env.writer(RoutingLLM())
+    messages = [FeedMsg(speaker="user", text="Yes")]
+    for ids in [[], [""], ["ev_" * 30], ["ev_one", "ev_two"]]:
+        with pytest.raises(ValueError, match="evidence_ids"):
+            writer.feed_batch(messages, evidence_ids=ids)
+    assert env.ev.list() == [] and writer.seg == []
+
+
+def test_invalid_episode_type_is_reported_as_generation_failure(db):
+    env = Env(db)
+    writer = env.writer(RoutingLLM(episode=['{"episode":["not a narrative"]}']))
+    first = writer.feed("user", "I live in Oslo", now_dt=_T0)
+    result = build_cell(writer.llm, writer.embedder, env.ev, env.cells, env.atoms,
+                        writer.seg, session_id="t")
+    assert result.skipped and result.cell is None
+    assert result.skip_reason == "Episode generation failed"
+    assert "episode must be a string" in result.gen["call1"]["raw"]
+    assert env.ev.get(first.evidence_id) is not None
+    assert env.cells.iter_all() == []
+
+
+def test_classified_skip_keeps_its_reason_separate_from_failure(db):
+    env = Env(db)
+    writer = env.writer(RoutingLLM(episode=['{"skip":true,"reason":"Only task instructions"}']))
+    writer.feed("user", "Move the button", now_dt=_T0)
+    result = build_cell(writer.llm, writer.embedder, env.ev, env.cells, env.atoms,
+                        writer.seg, session_id="t")
+    assert result.skipped and result.cell is None
+    assert result.skip_reason == "Only task instructions"
+    assert result.gen["skip"] == "Only task instructions"
+    assert env.cells.iter_all() == []

@@ -8,12 +8,16 @@ PersonOS 通过 Python `Memory` API 或独立部署的 HTTP 服务处理文本�
 
 ## 文本记忆
 
+以下文档以当前源码为准。源码安装包含本次新增的浏览接口与 `flash`；PyPI 已发布版本可能尚未包含这些能力。
+
 需要 **Python 3.10+**，以及可用的对话模型和向量模型。下面使用包内默认的 OpenAI 模型配置，API key 需要能访问这两个模型。
 
 ```bash
+git clone https://github.com/2049lab/PersonOS.git
+cd PersonOS
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install personos
+python -m pip install -e .
 
 export PERSONOS_LLM_API_KEY="your-api-key"
 export PERSONOS_LLM_BASE_URL="https://api.openai.com/v1"
@@ -35,7 +39,7 @@ from personos import Memory
 
 with Memory() as memory:
     memory.add(
-        "我六月份从杭州搬到了上海。",
+        "我在 2026 年 6 月从杭州搬到了上海。",
         user_id="quickstart-alice",
         session_id="first-conversation",
     )
@@ -169,14 +173,20 @@ with Memory() as memory:
 memory.add(messages, user_id=..., session_id=...)
 memory.end_session(user_id=..., session_id=..., sync=True)
 memory.flush(user_id=..., session_id=...)
-memory.search(query, user_id=..., mode="auto")  # auto | fast | deep
+memory.search(query, user_id=..., mode="auto")  # flash | auto | fast | deep
 memory.profile(user_id=...)                    # 提取后的用户画像
 memory.trace(node_id, user_id=...)             # 双向证据溯源
 memory.capabilities()                         # 配置与依赖检查
-memory.reset(user_id=...)                      # 删除该用户的数据
+memory.reset(user_id=...)                      # 清理已保存记录，限制见下文
 ```
 
 `add()` 接受字符串、消息字典或消息字典列表。消息可包含 `image`（字节或路径），或 `video`（路径、文件对象或 URL）。视频片段与对话消息应分别调用写入。完整输入示例见[文本、图片与视频示例](../examples/README.md)。
+
+### 什么会成为记忆
+
+文本提取关注用户的事实、经历、偏好、关系与计划。没有相关个人内容时可以不生成情景；情景也可以没有原子记忆，不会为了满足数量要求补造记忆。原始证据仍保留。情景提取失败时同样保留证据，不把整段原文直接替代为记忆。边界和行为变化见[框架设计](framework.zh-CN.md)。
+
+不同消息中的相同文字会分别保存。队列消费重试沿用原有证据 ID，避免重复写入同一条原始记录；这不构成整条链路的“恰好处理一次”保证。
 
 ### 写入顺序
 
@@ -186,9 +196,9 @@ memory.reset(user_id=...)                      # 删除该用户的数据
 
 `timeout_s` 控制同步操作的等待时间，超时会抛出 `TimeoutError`。队列满时抛出 `QueueBusy`，HTTP API 返回带 `Retry-After` 的 `503`。
 
-### 检索与溯源
+### 召回与溯源
 
-读取（`search`、`profile`、`trace`）是同步的。`mode="fast"` 使用快速检索；安装深度检索依赖后，`mode="auto"` 可以升级到深度检索；`mode="deep"` 需要安装 `deep` 可选依赖。
+读取（`search`、`profile`、`trace`）是同步的。所有召回模式都要求非空查询、有效模式，以及 1–100 范围内的整数 `top_k`，不接受布尔值。`mode="fast"` 使用快速检索；安装深度检索依赖后，`mode="auto"` 可以升级到深度检索；`mode="deep"` 需要安装 `deep` 可选依赖。
 
 ```python
 result = memory.search("谁吃了糖？", user_id="pebble")
@@ -206,6 +216,54 @@ print(result.ans.cited_cells if result.ans else [])
 
 通过引用的情景记录和 `trace()`，可以查看答案或身份匹配背后的原始证据。
 
+### 为 Agent 提供材料
+
+```python
+result = memory.search("我的饮食偏好是什么？", user_id="alice", mode="flash")
+material = result.to_public()
+for item in material["materials"]:
+    print(item["episode"], item["evidence_refs"])
+```
+
+`flash` 跳过查询改写、答案生成与答案复核，仍会对查询向量化并使用已配置的重排服务。`result.ans` 为 `None`，公开结果中的 `answer` 为空、`verdict` 为 `None`。返回的记忆是供接入方 Agent 使用的候选材料，不是已经复核的答案。该模式只接受文本查询；携带图片时请使用 `fast` 或 `auto`。`top_k` 接受 1–100 的整数。它直接使用原查询，不使用查询改写、画像注入或 `scenario`，也不要求对话模型凭证。
+
+公开结果中的 `materials` 包含情景正文、时间范围、命中的 `atom_ids` 与证据引用；`memories` 保留原子记忆与内联证据。没有检索结果时，两者都是空列表，答案保持为空。
+
+### 浏览已保存记忆
+
+这些读取不调用模型，不要求配置模型凭证。调用需要一个尚未关闭的 `Memory` 实例，并始终限定在指定用户的记录内。
+
+```python
+page = memory.list_memories(
+    user_id="alice", session_id="first-conversation", limit=20, offset=0,
+)
+for item in page["items"]:
+    print(item["atom_id"], item["text"], item["evidence"])
+
+chain_page = memory.list_chains(user_id="alice", limit=20, offset=0)
+if chain_page["items"]:
+    chain_id = chain_page["items"][0]["chain_id"]
+    history = memory.get_chain(chain_id, user_id="alice", limit=20)
+    if history and history["has_more"]:
+        next_page = memory.get_chain(
+            chain_id, user_id="alice", limit=20, cursor=history["next_cursor"],
+        )
+```
+
+| 方法 | 过滤与分页参数 | 返回内容 |
+|---|---|---|
+| `list_memories` | `session_id`、`object_type`、`holder`、`kind`、`domain`、`query`、`limit`、`offset` | 原子记忆、当前链关联、情景上下文与本用户的原始证据 |
+| `list_chains` | `limit`、`offset` | 链标题、条数、首尾 ID 与时间，不加载完整历史 |
+| `get_chain` | `chain_id`、`limit`、`cursor` | 链元数据及按链顺序排列的一页记忆 |
+
+`limit` 范围为 1–100，默认 20；`offset` 范围为 0–100000。列表返回 `items`、`limit`、`offset` 和 `has_more`，使用确定的 ID 顺序。`query` 做文字匹配，不做语义检索；多个过滤条件之间为 AND。`kind` 与 `domain` 使用 [`personos/models.py`](../personos/models.py) 中的编码。MySQL 上的 `kind`、`domain` 和 `query` 过滤需要 JSON 函数（MySQL 5.7+）；本次本地验证使用 SQLite。
+
+链详情额外返回 `next_cursor` 和 `state`，状态包括 `complete`、`more`、`incomplete`、`changed`。继续读取时使用返回的游标；链发生变化后应从第一页重新读取。未知链或其他用户的链返回 `None`。无法在当前用户内解析的证据引用，不会从其他用户的数据中补齐。
+
+### 重置的范围
+
+`reset(user_id=...)` 清理已保存记录与部分会话状态，不提供覆盖待处理队列、外部媒体和模型服务端数据的完整擦除流程。调用方需要停止写入并另行处理这些数据生命周期步骤，详见[存储与部署](framework.zh-CN.md#存储与部署)。
+
 ## HTTP 服务
 
 [`server/`](../server/README.md) 提供 HTTP 封装，有独立的依赖。它随源码仓库分发，不包含在库的 wheel 包中。完成上面的模型配置后，在仓库根目录运行：
@@ -216,6 +274,17 @@ python -m pip install -e .
 python -m uvicorn server.app:app --host 127.0.0.1 --port 8000
 ```
 
+新增的读取接口沿用 `X-User-Token` 用户作用域和 `{code, data, msg}` 响应格式：
+
+| 接口 | 用途 |
+|---|---|
+| `GET /api/v1/memories` | 按条件分页查看原子记忆；用 `caller` 和 `session_id` 选择相应调用方的会话 |
+| `GET /api/v1/chains` | 分页读取记忆链元数据 |
+| `GET /api/v1/chains/{chain_id}` | 用 `limit` 与 `cursor` 逐页读取链历史 |
+| `POST /api/v1/recall`，`mode="flash"` | 返回检索材料，不生成答案 |
+
+查询参数类型不符或分页超出范围时返回 `422`，无效过滤值或游标返回 `400`；未知或其他用户的链返回 `404`。请求仍需满足服务的签名和 token 要求。
+
 服务沿用库的配置，并使用以下选项：
 
 | 配置项 | 用途 |
@@ -225,6 +294,6 @@ python -m uvicorn server.app:app --host 127.0.0.1 --port 8000
 | `PERSONOS_REDIS_URL` | 共享写入队列、会话锁与片段状态 |
 | `PERSONOS_ENV` | 共享 Redis 状态的命名空间 |
 
-未配置 Redis 时，队列与会话状态只在单个进程内有效。增加 worker 前，需要配置共享 MySQL 和 Redis。线程池大小与队列限制见 [`.env.example`](../.env.example)，接口路由和签名细节见 [HTTP API 参考](../server/api_doc.html)。
+未配置 Redis 时，队列与会话状态只在单个进程内有效。增加 worker 前，需要配置共享 MySQL 和 Redis。线程池大小与队列限制见 [`.env.example`](../.env.example)，运行中的服务在 `/docs` 提供与当前路由一致的 OpenAPI 文档，原有 `/` 和 `/api-doc` 地址重定向至此。签名与用户 token 细节见 [HTTP 鉴权说明](../server/authentication.md)。
 
 [← PersonOS](../README.zh-CN.md) · [English](usage.md) · [评测](evaluation.zh-CN.md)
