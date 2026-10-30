@@ -1,23 +1,16 @@
-<p align="center">
-  <a href="https://personos-ai.com/">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/wordmark-dark.svg">
-      <img src="docs/assets/brand/wordmark.svg" alt="PersonOS" width="280">
-    </picture>
-  </a>
+<picture>
+  <source media="(max-width: 600px) and (prefers-color-scheme: dark)" srcset="docs/assets/brand/readme-hero-mobile-dark.svg">
+  <source media="(max-width: 600px)" srcset="docs/assets/brand/readme-hero-mobile.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/readme-hero-dark.svg">
+  <img src="docs/assets/brand/readme-hero.svg" alt="PersonOS — Long-term memory for personal agents" width="100%">
+</picture>
+
+<p>
+  <a href="#quick-start"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/nav-start-dark.svg"><img src="docs/assets/brand/nav-start.svg" alt="Quick start" width="124" height="44"></picture></a>
+  <a href="docs/usage.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/nav-docs-dark.svg"><img src="docs/assets/brand/nav-docs.svg" alt="Docs" width="124" height="44"></picture></a>
+  <a href="examples/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/nav-examples-dark.svg"><img src="docs/assets/brand/nav-examples.svg" alt="Examples" width="124" height="44"></picture></a>
+  <a href="README.zh-CN.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/nav-language-dark.svg"><img src="docs/assets/brand/nav-language.svg" alt="简体中文" width="124" height="44"></picture></a>
 </p>
-
-<p align="center"><strong>Long-term memory for personal agents.</strong><br>Remember the person. Keep the evidence. Follow what changes.</p>
-
-<p align="center">
-  <a href="#quick-start">Quick start</a> ·
-  <a href="docs/usage.md">Documentation</a> ·
-  <a href="docs/framework.md">How it works</a> ·
-  <a href="examples/README.md">Examples</a> ·
-  <a href="README.zh-CN.md">简体中文</a>
-</p>
-
----
 
 PersonOS is an open-source Python memory framework for agents that get to know a person over time: their circumstances, preferences, relationships, goals and experiences. It preserves source records, organizes relevant episodes, and retrieves memories with evidence your application can inspect.
 

@@ -13,5 +13,11 @@ ELEVENLABS_API_KEY=... python docs/demo/anim/audio/gen.py          # voices + SF
 python docs/demo/anim/audio/mix.py          # -> out/halloween.mp4
 ```
 
-The end card uses `docs/assets/brand/lockup-tagline.svg`. The README uses the
-light and dark wordmarks from the same `docs/assets/brand/` directory.
+The end card preloads `docs/assets/brand/mark.svg` and `lockup-tagline.svg`.
+It draws the canonical particle mark with a short fade and settle, then holds
+the original geometry still. A missing brand asset rejects setup instead of
+silently producing a blank mark. The README uses the light and dark covers
+from the same `docs/assets/brand/` directory.
+
+These source changes affect future renders. Existing published videos retain
+their historical end cards until they are rendered and published again.
