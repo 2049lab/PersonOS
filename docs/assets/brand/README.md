@@ -15,6 +15,7 @@ paths and clipping geometry. Derived assets normalize that master to a
 | `wordmark.svg`, `wordmark-dark.svg` | Mark with outlined Inter lettering |
 | `readme-hero*.svg` | English/Chinese, desktop/mobile mastheads; charcoal in both themes |
 | `nav-*.svg` | Text-only labels inside real HTML links |
+| `readme/*.svg` | Content-fingerprinted copies used by both repository READMEs |
 | `favicon.svg`, `favicon-*.png`, `icon.svg` | Browser and application-size exports |
 | `lockup-tagline*.svg` | Animation end cards |
 | `social-preview.*` | Share artwork; uploading repository settings is separate |
@@ -65,6 +66,14 @@ Run from the repository root. The two raster export commands require
 exports are rendered from those canonical SVGs. `render_brand.py` exports icons,
 the compatibility mark and social preview; `banner/build.py` exports
 `docs/assets/banner.png` from `readme-hero.svg`.
+
+The generator also writes README artwork under `readme/`, with the first 12
+characters of its SHA-256 digest in each filename, and updates both READMEs'
+image references. Changed artwork gets a new URL so a cached image cannot be
+mixed with updated page text. Keep earlier fingerprints available for cached
+README pages. Stable filenames remain for the banner exporter and other consumers.
+Verify the default GitHub repository page after publishing, as well as any
+commit-specific preview.
 
 The animation source uses the canonical mark and lockup. Existing rendered
 videos remain separate artifacts until explicitly rendered again. Updating
