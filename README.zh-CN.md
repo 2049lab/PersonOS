@@ -5,27 +5,32 @@
   <img src="docs/assets/brand/readme-hero-zh.svg" alt="PersonOS — 面向个人 Agent 的长期记忆框架" width="100%">
 </picture>
 
-<p>
+<p align="center">
+  <br>
+  <a href="https://github.com/2049lab/PersonOS/actions/workflows/ci.yml"><img src="https://github.com/2049lab/PersonOS/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="pyproject.toml"><img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&amp;logo=python&amp;logoColor=white" alt="Python 3.10+"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-59636e?style=flat-square" alt="Apache 2.0 license"></a>
+  <a href="RELEASE.md"><img src="https://img.shields.io/badge/Status-Alpha-59636e?style=flat-square" alt="Alpha"></a>
+</p>
+
+
+<p align="center">
   <a href="#快速开始"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/nav-start-zh-dark.svg"><img src="docs/assets/brand/nav-start-zh.svg" alt="快速开始" width="124" height="44"></picture></a>
   <a href="docs/usage.zh-CN.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/nav-docs-zh-dark.svg"><img src="docs/assets/brand/nav-docs-zh.svg" alt="使用文档" width="124" height="44"></picture></a>
   <a href="examples/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/nav-examples-zh-dark.svg"><img src="docs/assets/brand/nav-examples-zh.svg" alt="示例" width="124" height="44"></picture></a>
   <a href="README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/nav-language-zh-dark.svg"><img src="docs/assets/brand/nav-language-zh.svg" alt="English" width="124" height="44"></picture></a>
 </p>
 
-PersonOS 是一个开源 Python 记忆框架，帮助 Agent 随着交流逐步了解一个人的处境、偏好、关系、目标与经历。它保存原始资料，将相关内容整理成情景记忆，并在检索时返回可供应用核对的证据。
+**PersonOS 是面向个人 Agent 的开源长期记忆框架。** 它将用户在不同对话中分享的偏好、关系、目标与经历组织成可检索的记忆，让 Agent 延续对用户的了解，同时保留信息的来源与变化过程。
 
-从文本和本地 SQLite 开始，再按需要接入图片理解、视频人物关联、共享存储或 HTTP 服务。
+框架提供 Python 接口与可选的 HTTP 服务。你可以从文本和本地 SQLite 开始，使用自己的对话模型与向量模型，再按需要接入共享存储、图片理解和视频人物关联。
 
-## 框架提供什么
+## 核心能力
 
-| 能力 | 具体行为 |
-|---|---|
-| **关于用户的记忆** | 提取与用户有关的信息。没有相关个人内容时，可以不生成情景或原子记忆，原始证据仍保留。 |
-| **事实的变化过程** | 新观察与旧记录同时保留，通过记忆链关联同一事项的不同陈述。 |
-| **溯源与浏览** | 返回原始证据引用；分页查看记忆和记忆链，无需调用模型。 |
-| **供 Agent 使用的召回** | `flash` 返回检索材料，`fast` 生成答案，可选的 `deep` 执行多步检索。 |
-| **用户画像** | 根据积累的情景记忆整理画像，供后续召回使用。 |
-| **可选多模态扩展** | 通过单独配置的后端接入图片描述和视频人物识别。 |
+- **围绕用户组织记忆** — 从交流中提取个人信息，保留完整情景，按用户与会话管理。
+- **召回时带上依据** — 返回相关记忆及原始证据，可直接为 Agent 提供材料，也可生成带引用的答案。
+- **保留上下文的变化** — 通过记忆链关联新旧陈述，保留历史，并从积累的情景中整理用户画像。
+- **按应用需要组合** — 支持 Python 与 HTTP 接入；模型、存储和召回方式可配置，多模态能力按需启用。
 
 ## 快速开始
 
@@ -71,16 +76,9 @@ with Memory() as memory:
 
 ## 记忆如何组织
 
-<picture>
-  <source media="(prefers-color-scheme: dark) and (max-width: 600px)" srcset="docs/assets/framework-mobile-dark.svg">
-  <source media="(max-width: 600px)" srcset="docs/assets/framework-mobile-light.svg">
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/framework-dark.svg">
-  <img src="docs/assets/framework-light.svg" alt="Evidence 保存原始证据，Episodes 保留情景，Atoms 支持检索，Chains 关联不同时间的相关陈述。" width="100%">
-</picture>
+原始陈述作为**证据**（evidence）保存；**情景**（episode）保留搬家的经过与上下文，**原子记忆**（atoms）让其中的事实可以被检索。查询找到原子记忆后，再读取对应情景。后续有新记录时，**记忆链**（chains）将相关陈述连接起来，旧记录仍可查看；**用户画像**（profile）则根据积累的情景单独整理。
 
-查询先检索**原子记忆（atoms）**，再读取对应的**情景（episodes）**作为上下文。**记忆链（chains）**将不同时期关于同一事项的陈述连接起来，旧记录仍可查看。用户画像根据积累的情景单独整理。
-
-文本写入关注用户本人。事实、计划和有依据的经历可以形成记忆；临时任务指令、助手建议与操作过程不会仅因出现在对话中就成为个人事实。提取依赖模型，核对结果时应查看原始证据。
+文本写入关注用户本人。事实、计划和有依据的经历可以形成记忆；临时任务指令、助手建议与操作过程不会仅因出现在对话中就成为个人事实。没有相关个人内容的片段可以只保留证据，不生成情景或原子记忆。提取依赖模型，核对结果时应查看原始证据。
 
 [框架设计与升级说明](docs/framework.zh-CN.md)解释了记忆范围、空结果和兼容性变化。
 
