@@ -3,13 +3,35 @@
 let paperG, grainC, outC, STORY = null, BUILDING = null, PASS = 'world';
 const OVER = [];                                          // overlay draw calls queued by the scene for the 2D compositor
 
+function loadBrandImage(filename) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    const fail = () => reject(new Error(`Cannot load PersonOS brand asset: ${filename}`));
+    const timer = setTimeout(fail, 15000);
+    image.onload = () => {
+      clearTimeout(timer);
+      if (image.naturalWidth && image.naturalHeight) resolve(image);
+      else fail();
+    };
+    image.onerror = () => { clearTimeout(timer); fail(); };
+    image.src = `../../assets/brand/${filename}`;
+  });
+}
+
 async function setup() {
   createCanvas(W, H, WEBGL); pixelDensity(1); noLoop();
   brush.scaleBrushes(5); defineBrushes();
   paperG = makePaper(); grainC = makeGrain();
   outC = document.getElementById('out'); ctx = outC.getContext('2d');
   STORY = await (await fetch('story.json')).json();
-  LOCKUP = await new Promise((res) => { const im = new Image(); im.onload = () => res(im); im.src = '../../assets/brand/lockup-tagline.svg?v=' + Date.now(); });
+  try {
+    [LOCKUP, BRAND_MARK] = await Promise.all([
+      loadBrandImage('lockup-tagline.svg'), loadBrandImage('mark.svg')
+    ]);
+  } catch (error) {
+    window.setupError = error.message;
+    throw error;
+  }
   window.DEBUG_IDS = new URLSearchParams(location.search).has('debug');
   await Promise.all([document.fonts.load("600 40px 'Caveat'"), document.fonts.load("700 40px 'Caveat'"), document.fonts.load("400 30px 'LXGW WenKai'", '谁吃了糖果')]);
   await document.fonts.ready;

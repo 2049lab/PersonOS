@@ -1,23 +1,16 @@
-<p align="center">
-  <a href="https://personos-ai.com/">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/wordmark-dark.svg">
-      <img src="docs/assets/brand/wordmark.svg" alt="PersonOS" width="280">
-    </picture>
-  </a>
+<picture>
+  <source media="(max-width: 600px) and (prefers-color-scheme: dark)" srcset="docs/assets/brand/readme-hero-zh-mobile-dark.svg">
+  <source media="(max-width: 600px)" srcset="docs/assets/brand/readme-hero-zh-mobile.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/readme-hero-zh-dark.svg">
+  <img src="docs/assets/brand/readme-hero-zh.svg" alt="PersonOS — 面向个人 Agent 的长期记忆框架" width="100%">
+</picture>
+
+<p>
+  <a href="#快速开始"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/nav-start-zh-dark.svg"><img src="docs/assets/brand/nav-start-zh.svg" alt="快速开始" width="124" height="44"></picture></a>
+  <a href="docs/usage.zh-CN.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/nav-docs-zh-dark.svg"><img src="docs/assets/brand/nav-docs-zh.svg" alt="使用文档" width="124" height="44"></picture></a>
+  <a href="examples/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/nav-examples-zh-dark.svg"><img src="docs/assets/brand/nav-examples-zh.svg" alt="示例" width="124" height="44"></picture></a>
+  <a href="README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/nav-language-zh-dark.svg"><img src="docs/assets/brand/nav-language-zh.svg" alt="English" width="124" height="44"></picture></a>
 </p>
-
-<p align="center"><strong>面向个人 Agent 的长期记忆框架</strong><br>保存关于用户的记忆、原始依据与变化过程。</p>
-
-<p align="center">
-  <a href="#快速开始">快速开始</a> ·
-  <a href="docs/usage.zh-CN.md">使用文档</a> ·
-  <a href="docs/framework.zh-CN.md">工作原理</a> ·
-  <a href="examples/README.md">示例</a> ·
-  <a href="README.md">English</a>
-</p>
-
----
 
 PersonOS 是一个开源 Python 记忆框架，帮助 Agent 随着交流逐步了解一个人的处境、偏好、关系、目标与经历。它保存原始资料，将相关内容整理成情景记忆，并在检索时返回可供应用核对的证据。
 
