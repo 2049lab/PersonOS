@@ -1,8 +1,8 @@
 <picture>
-  <source media="(max-width: 600px) and (prefers-color-scheme: dark)" srcset="docs/assets/brand/readme-hero-mobile-dark.svg">
-  <source media="(max-width: 600px)" srcset="docs/assets/brand/readme-hero-mobile.svg">
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/readme-hero-dark.svg">
-  <img src="docs/assets/brand/readme-hero.svg" alt="PersonOS — Long-term memory for personal agents" width="100%">
+  <source media="(max-width: 600px) and (prefers-color-scheme: dark)" srcset="docs/assets/brand/readme/readme-hero-mobile-dark.cf5ac925233e.svg">
+  <source media="(max-width: 600px)" srcset="docs/assets/brand/readme/readme-hero-mobile.cf5ac925233e.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/readme/readme-hero-dark.2757218c7ac3.svg">
+  <img src="docs/assets/brand/readme/readme-hero.2757218c7ac3.svg" alt="PersonOS — Long-term memory for personal agents" width="100%">
 </picture>
 
 <p align="center">
@@ -15,10 +15,10 @@
 
 
 <p align="center">
-  <a href="#quick-start"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/nav-start-dark.svg"><img src="docs/assets/brand/nav-start.svg" alt="Quick start" width="124" height="44"></picture></a>
-  <a href="docs/usage.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/nav-docs-dark.svg"><img src="docs/assets/brand/nav-docs.svg" alt="Docs" width="124" height="44"></picture></a>
-  <a href="examples/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/nav-examples-dark.svg"><img src="docs/assets/brand/nav-examples.svg" alt="Examples" width="124" height="44"></picture></a>
-  <a href="README.zh-CN.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/nav-language-dark.svg"><img src="docs/assets/brand/nav-language.svg" alt="简体中文" width="124" height="44"></picture></a>
+  <a href="#quick-start"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/readme/nav-start-dark.50bb96215a52.svg"><img src="docs/assets/brand/readme/nav-start.343fbd58477f.svg" alt="Quick start" width="124" height="44"></picture></a>
+  <a href="docs/usage.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/readme/nav-docs-dark.a03b6071e2dc.svg"><img src="docs/assets/brand/readme/nav-docs.3d99e976bd14.svg" alt="Docs" width="124" height="44"></picture></a>
+  <a href="examples/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/readme/nav-examples-dark.c1d20b91a52f.svg"><img src="docs/assets/brand/readme/nav-examples.42237baff104.svg" alt="Examples" width="124" height="44"></picture></a>
+  <a href="README.zh-CN.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/readme/nav-language-dark.036846bf503b.svg"><img src="docs/assets/brand/readme/nav-language.156cea705907.svg" alt="简体中文" width="124" height="44"></picture></a>
 </p>
 
 **PersonOS is an open-source long-term memory framework for personal agents.** It organizes a person's preferences, relationships, goals and experiences into retrievable memories across conversations, preserving the original context and how information changes over time.

@@ -1,8 +1,8 @@
 <picture>
-  <source media="(max-width: 600px) and (prefers-color-scheme: dark)" srcset="docs/assets/brand/readme-hero-zh-mobile-dark.svg">
-  <source media="(max-width: 600px)" srcset="docs/assets/brand/readme-hero-zh-mobile.svg">
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/readme-hero-zh-dark.svg">
-  <img src="docs/assets/brand/readme-hero-zh.svg" alt="PersonOS — 面向个人 Agent 的长期记忆框架" width="100%">
+  <source media="(max-width: 600px) and (prefers-color-scheme: dark)" srcset="docs/assets/brand/readme/readme-hero-zh-mobile-dark.6a868792f7c2.svg">
+  <source media="(max-width: 600px)" srcset="docs/assets/brand/readme/readme-hero-zh-mobile.6a868792f7c2.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/readme/readme-hero-zh-dark.d70942d40cc0.svg">
+  <img src="docs/assets/brand/readme/readme-hero-zh.d70942d40cc0.svg" alt="PersonOS — 面向个人 Agent 的长期记忆框架" width="100%">
 </picture>
 
 <p align="center">
@@ -15,10 +15,10 @@
 
 
 <p align="center">
-  <a href="#快速开始"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/nav-start-zh-dark.svg"><img src="docs/assets/brand/nav-start-zh.svg" alt="快速开始" width="124" height="44"></picture></a>
-  <a href="docs/usage.zh-CN.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/nav-docs-zh-dark.svg"><img src="docs/assets/brand/nav-docs-zh.svg" alt="使用文档" width="124" height="44"></picture></a>
-  <a href="examples/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/nav-examples-zh-dark.svg"><img src="docs/assets/brand/nav-examples-zh.svg" alt="示例" width="124" height="44"></picture></a>
-  <a href="README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/nav-language-zh-dark.svg"><img src="docs/assets/brand/nav-language-zh.svg" alt="English" width="124" height="44"></picture></a>
+  <a href="#快速开始"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/readme/nav-start-zh-dark.9c69053f50d6.svg"><img src="docs/assets/brand/readme/nav-start-zh.7e4cabb03154.svg" alt="快速开始" width="124" height="44"></picture></a>
+  <a href="docs/usage.zh-CN.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/readme/nav-docs-zh-dark.cc00fa122fe2.svg"><img src="docs/assets/brand/readme/nav-docs-zh.3813641455ef.svg" alt="使用文档" width="124" height="44"></picture></a>
+  <a href="examples/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/readme/nav-examples-zh-dark.e7ee922d9ca5.svg"><img src="docs/assets/brand/readme/nav-examples-zh.190dbdb69ccf.svg" alt="示例" width="124" height="44"></picture></a>
+  <a href="README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/readme/nav-language-zh-dark.fc0ad94226a7.svg"><img src="docs/assets/brand/readme/nav-language-zh.0640c1394001.svg" alt="English" width="124" height="44"></picture></a>
 </p>
 
 **PersonOS 是面向个人 Agent 的开源长期记忆框架。** 它将用户在不同对话中分享的偏好、关系、目标与经历组织成可检索的记忆，让 Agent 延续对用户的了解，同时保留信息的来源与变化过程。

@@ -6,6 +6,7 @@ Run this file, then render_brand.py. See README.md in this directory.
 """
 from __future__ import annotations
 
+import hashlib
 import io
 import math
 import re
@@ -216,10 +217,43 @@ def build() -> dict[str, str]:
     return out
 
 
+def publish_readme_assets(assets: dict[str, str]) -> dict[str, str]:
+    """Give changed README artwork new URLs instead of reusing cached paths."""
+    published = HERE / "readme"
+    published.mkdir(exist_ok=True)
+    paths = {}
+    for name, content in assets.items():
+        if not name.startswith(("readme-hero", "nav-")):
+            continue
+        data = content.encode("utf-8")
+        digest = hashlib.sha256(data).hexdigest()[:12]
+        filename = f"{Path(name).stem}.{digest}.svg"
+        (published / filename).write_bytes(data)
+        paths[Path(name).stem] = f"docs/assets/brand/readme/{filename}"
+
+    # Older fingerprints remain available for readers with cached README HTML.
+    image_ref = re.compile(
+        r'((?:src|srcset)=")docs/assets/brand/(?:readme/)?'
+        r'([a-z-]+)(?:\.[0-9a-f]{12})?\.svg(")'
+    )
+    for name in ("README.md", "README.zh-CN.md"):
+        readme = HERE.parents[2] / name
+        source = readme.read_text(encoding="utf-8")
+        updated = image_ref.sub(
+            lambda match: (match[1] + paths[match[2]] + match[3]
+                           if match[2] in paths else match[0]), source
+        )
+        if updated != source:
+            readme.write_text(updated, encoding="utf-8")
+    return paths
+
+
 def main() -> None:
-    for name, content in build().items():
+    assets = build()
+    for name, content in assets.items():
         (HERE / name).write_text(content)
         print(name, len(content))
+    publish_readme_assets(assets)
 
 
 if __name__ == "__main__":
