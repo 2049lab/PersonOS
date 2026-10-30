@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 2,
+  "title": "Design System: PersonOS README",
+  "extensions": {
+    "breakpoints": [
+      {
+        "name": "readme-mobile-max",
+        "value": "600px"
+      }
+    ]
+  }
+}

@@ -112,29 +112,52 @@ def lettering(text: str, x: float, baseline: float, size: float, ink: str,
     return f'<path d="{path}" fill="{ink}"/>'
 
 
+def centered(text: str, cx: float, baseline: float, size: float, ink: str,
+             weight: int = 500, tracking: float = -.02) -> str:
+    if any(ord(c) > 127 for c in text):
+        return (f'<text x="{cx}" y="{baseline}" text-anchor="middle" fill="{ink}" '
+                f'font-size="{size}" font-weight="{weight}" font-family="Noto Sans CJK SC,'
+                f'PingFang SC,Microsoft YaHei,sans-serif">{escape(text)}</text>')
+    _, _, advance = text_path(text, x=0, baseline=0, size=size,
+                              wght=weight, tracking=tracking)
+    return lettering(text, cx-advance/2, baseline, size, ink, weight, tracking)
+
+
 def hero(*, dark: bool = False, mobile: bool = False, chinese: bool = False) -> str:
-    """A quiet editorial header: product name, actual purpose, shared particle mark."""
-    ink, secondary = (WHITE, "#ABB3BE") if dark else (INK, "#535C68")
-    background, stroke = ("#151B23", "#303842") if dark else (PAPER, "#E2E5E9")
-    width, height = (480, 280) if mobile else (1040, 300)
-    body = (f'<rect x=".5" y=".5" width="{width-1}" height="{height-1}" rx="18" '
-            f'fill="{background}" stroke="{stroke}"/>')
+    """A centered masthead; one visible mark-and-name group, one message."""
+    width, height = (480, 320) if mobile else (1040, 348)
+    background, foreground, secondary = "#191B1D", "#F4F2ED", "#C1C1BD"
+    body = f'<rect width="{width}" height="{height}" rx="4" fill="{background}"/>'
+    size, mark_width, gap = (74, 58, 20) if mobile else (110, 88, 26)
+    baseline, mark_top = (112, 55) if mobile else (162, 80)
+    _, _, advance = text_path("PersonOS", x=0, baseline=0, size=size,
+                              wght=650, tracking=-.035)
+    start = (width-mark_width-gap-advance)/2
+    # Master visible bounds: x=6.125..58, y=7.25..56.75 in normalized units.
+    # Center the visible ink, not the SVG's transparent padding.
+    scale = mark_width / 51.875
+    body += (f'<g transform="translate({start-6.125*scale} {mark_top-7.25*scale}) '
+             f'scale({scale})">{mark_group(foreground)}</g>')
+    body += lettering("PersonOS", start+mark_width+gap, baseline, size,
+                      foreground, 650, -.035)
     if mobile:
-        body += lettering("PersonOS", 28, 76, 52, ink, 600, -.035)
-        lines = ("面向个人 Agent", "的长期记忆框架") if chinese else (
-            "Long-term memory", "for personal agents.")
+        lines = ("让 Agent 记住你，", "也记住你的变化。") if chinese else (
+            "Memory that grows", "with a person.")
         for index, line in enumerate(lines):
-            body += lettering(line, 30, 122 + index * 35, 24, secondary, 450)
-        body += f'<g transform="translate(286 100) scale({190/64})">{mark_group(ink)}</g>'
+            body += centered(line, width/2, 178+index*36, 28, foreground, 450)
+        lines = ("面向个人 Agent", "的开源长期记忆框架") if chinese else (
+            "An open-source memory framework", "for personal agents.")
+        for index, line in enumerate(lines):
+            body += centered(line, width/2, 260+index*32, 24, secondary, 400)
     else:
-        body += lettering("PersonOS", 52, 117, 76, ink, 600, -.035)
-        lines = ("面向个人 Agent", "的长期记忆框架") if chinese else (
-            "Long-term memory", "for personal agents.")
-        for index, line in enumerate(lines):
-            body += lettering(line, 55, 181 + index * 40, 30, secondary, 450)
-        body += f'<g transform="translate(692 8) scale({284/64})">{mark_group(ink)}</g>'
-    label = "PersonOS — 面向个人 Agent 的长期记忆框架" if chinese else (
-        "PersonOS — Long-term memory for personal agents")
+        message = "让 Agent 记住你，也记住你的变化。" if chinese else (
+            "Memory that grows with a person.")
+        subtitle = "面向个人 Agent 的开源长期记忆框架" if chinese else (
+            "An open-source memory framework for personal agents.")
+        body += centered(message, width/2, 239, 28, foreground, 450)
+        body += centered(subtitle, width/2, 276, 18, secondary, 400)
+    label = "PersonOS — 面向个人 Agent 的开源长期记忆框架" if chinese else (
+        "PersonOS — An open-source memory framework for personal agents")
     return svg(width, height, body, label)
 
 
@@ -147,37 +170,13 @@ NAV = {
 
 
 def navigation(key: str, *, dark: bool = False, chinese: bool = False) -> str:
-    """Keep a readable action area and dissolve only the terminal into particles."""
+    """Quiet typographic links, grouped on the masthead's center axis."""
     en, zh, width = NAV[key]
     label = zh if chinese else en
-    primary = key == "start"
-    ink = (INK if dark else WHITE) if primary else (WHITE if dark else INK)
-    fill = (WHITE if dark else INK) if primary else ("#1C2430" if dark else "#F1F3F5")
-    stroke = fill if primary else ("#3B4654" if dark else "#CDD3DB")
-    particle = fill if primary else ("#6D7B8E" if dark else "#A7AFBA")
-    # A fixed, sparse continuation of the mark's rightward square fragments.
-    # The first 100 units remain intact so decoration cannot cross the label.
-    cutouts = [(105, 5, 3), (102, 10, 2), (107, 15, 3), (104, 20, 2),
-               (108, 25, 3), (102, 30, 2), (106, 35, 3), (104, 40, 2)]
-    fragments = [(111, 7, 2), (115, 11, 1.5), (110, 15, 2.5),
-                 (114, 19, 2), (120, 21, 1.5), (111, 24, 2),
-                 (117, 28, 2), (111, 31, 2.5), (121, 33, 1),
-                 (115, 36, 1.5), (110, 39, 2), (118, 41, 1)]
-    holes = ''.join(f'<rect x="{x}" y="{y}" width="{s}" height="{s}" fill="#000"/>'
-                    for x, y, s in cutouts)
-    body = ('<defs><mask id="edge" maskUnits="userSpaceOnUse" x="0" y="0" width="124" height="44">'
-            f'<rect width="124" height="44" fill="#fff"/>{holes}</mask></defs>'
-            '<rect x=".5" y=".5" width="108" height="43" rx="7" '
-            f'fill="{fill}" stroke="{stroke}" mask="url(#edge)"/>')
-    body += ''.join(f'<rect x="{x}" y="{y}" width="{s}" height="{s}" fill="{particle}"/>'
-                    for x, y, s in fragments)
-    if any(ord(c) > 127 for c in label):
-        text_width = len(label) * 14
-    else:
-        _, _, text_width = text_path(label, x=0, baseline=0, size=14,
-                                    wght=500, tracking=-.01)
-    body += lettering(label, (104-text_width)/2, 27, 14, ink, 500, -.01)
+    ink = WHITE if dark else INK
+    body = centered(label, width/2, 27, 14, ink, 600 if key == "start" else 500, -.01)
     return svg(width, 44, body, label)
+
 
 
 def build() -> dict[str, str]:
@@ -209,12 +208,11 @@ def build() -> dict[str, str]:
             for key in NAV:
                 out[f"nav-{key}{language}{tone}.svg"] = navigation(
                     key, dark=dark, chinese=chinese)
+    cover = hero()
     out["social-preview.svg"] = svg(1280, 640,
-        f'<rect width="1280" height="640" fill="{PAPER}"/>'
-        + lettering("PersonOS", 80, 285, 98, INK, 600, -.035)
-        + lettering("Long-term memory", 84, 363, 32, "#535C68", 450)
-        + lettering("for personal agents.", 84, 409, 32, "#535C68", 450)
-        + f'<g transform="translate(820 140) scale(5.5)">{mark_group()}</g>')
+        '<rect width="1280" height="640" fill="#191B1D"/>'
+        + '<g transform="translate(0 106) scale(1.230769)">'
+        + cover[cover.index('>')+1:cover.rindex('</svg>')] + '</g>')
     return out
 
 

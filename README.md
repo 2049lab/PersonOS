@@ -5,27 +5,32 @@
   <img src="docs/assets/brand/readme-hero.svg" alt="PersonOS — Long-term memory for personal agents" width="100%">
 </picture>
 
-<p>
+<p align="center">
+  <br>
+  <a href="https://github.com/2049lab/PersonOS/actions/workflows/ci.yml"><img src="https://github.com/2049lab/PersonOS/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="pyproject.toml"><img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&amp;logo=python&amp;logoColor=white" alt="Python 3.10+"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-59636e?style=flat-square" alt="Apache 2.0 license"></a>
+  <a href="RELEASE.md"><img src="https://img.shields.io/badge/Status-Alpha-59636e?style=flat-square" alt="Alpha"></a>
+</p>
+
+
+<p align="center">
   <a href="#quick-start"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/nav-start-dark.svg"><img src="docs/assets/brand/nav-start.svg" alt="Quick start" width="124" height="44"></picture></a>
   <a href="docs/usage.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/nav-docs-dark.svg"><img src="docs/assets/brand/nav-docs.svg" alt="Docs" width="124" height="44"></picture></a>
   <a href="examples/README.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/nav-examples-dark.svg"><img src="docs/assets/brand/nav-examples.svg" alt="Examples" width="124" height="44"></picture></a>
   <a href="README.zh-CN.md"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/nav-language-dark.svg"><img src="docs/assets/brand/nav-language.svg" alt="简体中文" width="124" height="44"></picture></a>
 </p>
 
-PersonOS is an open-source Python memory framework for agents that get to know a person over time: their circumstances, preferences, relationships, goals and experiences. It preserves source records, organizes relevant episodes, and retrieves memories with evidence your application can inspect.
+**PersonOS is an open-source long-term memory framework for personal agents.** It organizes a person's preferences, relationships, goals and experiences into retrievable memories across conversations, preserving the original context and how information changes over time.
 
-Start with text and local SQLite. Add image understanding, video person association, shared storage or an HTTP service when your application needs them.
+Use it through Python or the optional HTTP service. Start with text and local SQLite, bring your own chat and embedding models, and add shared storage, image understanding or video person association when your application needs them.
 
-## What the framework does
+## Core capabilities
 
-| Capability | Behavior |
-|---|---|
-| **Personal memory** | Extracts information about the user. A conversation with no relevant personal content can produce no episode or atoms; its source evidence is retained. |
-| **Changing facts** | Keeps new observations alongside earlier ones and links related statements into memory chains. |
-| **Evidence and inspection** | Returns source references; browse memories and chains with bounded pages, without calling a model. |
-| **Recall for agents** | Returns retrieved material with `flash`, an answer with `fast`, or multi-step retrieval with the optional `deep` mode. |
-| **User profiles** | Consolidates accumulated episodes into a profile that can inform later recall. |
-| **Optional multimodal memory** | Adds image descriptions and video identity processing through separately configured backends. |
+- **Memory organized around people** — Extract personal information from conversations, retain its context, and scope memories by user and session.
+- **Recall with evidence** — Retrieve relevant memories and their sources as material for your agent, or generate answers with citations.
+- **Context that keeps its history** — Connect new and earlier statements through memory chains, retain past records, and consolidate episodes into user profiles.
+- **Composable integration** — Use Python or HTTP, configure models, storage and retrieval behavior, and enable multimodal backends as needed.
 
 ## Quick start
 
@@ -71,16 +76,9 @@ with Memory() as memory:
 
 ## How memory is organized
 
-<picture>
-  <source media="(prefers-color-scheme: dark) and (max-width: 600px)" srcset="docs/assets/framework-mobile-dark.svg">
-  <source media="(max-width: 600px)" srcset="docs/assets/framework-mobile-light.svg">
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/framework-dark.svg">
-  <img src="docs/assets/framework-light.svg" alt="Evidence preserves the source; episodes keep context; atoms support retrieval; chains connect related observations." width="100%">
-</picture>
+The original statement is kept as **evidence**. An **episode** preserves the move and its context; **atoms** make individual facts retrievable. Queries find those atoms and read the corresponding episodes. As new observations arrive, **chains** connect related statements while keeping earlier records available. A separate **profile** consolidates the accumulated episodes.
 
-Queries retrieve **atoms**, then use their **episodes** as context. **Chains** connect statements about the same subject across time; old statements remain available. Profiles are derived separately from the accumulated episodes.
-
-The text write path focuses on the person. Facts, plans and grounded experiences can become memory; task instructions, assistant suggestions and procedural exchanges do not become personal facts merely because they appear in a conversation. Extraction is model-driven, so inspect evidence when correctness matters.
+The text write path focuses on the person. Facts, plans and grounded experiences can become memory; task instructions, assistant suggestions and procedural exchanges do not become personal facts merely because they appear in a conversation. A segment without relevant personal content may retain evidence without producing an episode or atoms. Extraction is model-driven, so inspect evidence when correctness matters.
 
 Read the [framework design and upgrade notes](docs/framework.md) for the memory boundary, empty results and compatibility changes.
 
