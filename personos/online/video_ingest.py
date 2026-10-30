@@ -439,7 +439,7 @@ def finalize_video(deps: VideoDeps, *, session_id: str) -> Optional[CellBuild]:
     logger.info(f"video session end session={session_id} cost total={time.monotonic() - t_all:.1f}s "
                 f"{_fmt(costs)} | chains={len(report['by_chain'])} "
                 f"clips={len(draft.clip_keys(session_id))} "
-                f"memcell={cb.cell.id if cb else '-'} atoms={len(cb.atoms) if cb else 0}")
+                f"memcell={cb.cell.id if cb and cb.cell else '-'} atoms={len(cb.atoms) if cb else 0}")
     # Final review succeeded -> clear the session draft (matching seg_store.clear; the people are now
     # persisted as characters in the store, so a later clip in the same session starts a fresh chain
     # and is recognized as an existing acquaintance through adjudication). `clear` is a method both

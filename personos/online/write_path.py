@@ -25,6 +25,7 @@ from ..models import (
     EvidenceRef,
     MemCell,
     MemoryAtom,
+    _ulid,
     ensure_aware,
     normalize_domains,
     normalize_kind,
@@ -40,18 +41,17 @@ from . import chain_build
 from .events import EVENT_ADD, emit
 from .llm import ChatLLM, chat_json, with_scenario
 
-# Directives for caller-scenario injection (they only tune attention and level of detail; facts are
-# never altered, invented, or omitted) -- see with_scenario
+# A caller may narrow personal-memory scope, but cannot turn task output into user facts.
 _SCEN_DIR_BOUNDARY = ("Use it as background for the caller's typical dialogue rhythm and what counts "
                       "as one coherent topic; it informs the judgment below but never overrides the "
                       "priority rules.")
-_SCEN_DIR_EPISODE = ("Narrate the facts this caller cares about more fully and faithfully. This sets "
-                     "emphasis (level of detail) only — still cover the whole segment, never drop a "
-                     "stated fact.")
-_SCEN_DIR_ATOM = ("Facts matching this focus are high-value retrieval anchors: make sure each DISTINCT "
-                  "one is covered by an atom. This only raises priority within what is worth "
-                  "remembering; it never licenses inventing facts absent from the transcript, dropping "
-                  "other worth-remembering facts, nor logging restatements as separate atoms.")
+_SCEN_DIR_EPISODE = ("Within the user-memory scope below, emphasize the caller's focus and leave out "
+                     "what the caller excludes. If nothing about the user remains, skip the segment. "
+                     "The caller can only narrow or re-weight this scope, never extend it to task "
+                     "payload, assistant work or unrelated world knowledge. Never invent facts.")
+_SCEN_DIR_ATOM = ("Cover each distinct user fact within the caller's focus; excluded content gets no "
+                  "atom. The caller can only narrow or re-weight the user-memory scope below, never "
+                  "extend it to non-user content. Never invent facts.")
 
 
 class Embedder(Protocol):
@@ -76,9 +76,9 @@ def append_utterance(
     evidence_store: EvidenceStore, *, session_id: str, speaker: str, text: str,
     now_dt: Optional[datetime] = None,
     modality: str = "text", content_ref: Optional[str] = None, sha256: str = "",
-    source_extra: Optional[dict] = None,
+    source_extra: Optional[dict] = None, evidence_id: Optional[str] = None,
 ) -> str:
-    rec = EvidenceRecord(holder=speaker, content_inline=text,
+    rec = EvidenceRecord(id=evidence_id or _ulid("ev"), holder=speaker, content_inline=text,
                          modality=modality, content_ref=content_ref, sha256=sha256,
                          source={"session_id": session_id, **(source_extra or {})},
                          captured_at=now_dt or now())
@@ -174,126 +174,133 @@ def detect_boundary(
 @dataclass
 class CellBuild:
     """What generating one cell produced (including traceability)."""
-    cell: MemCell
+    cell: MemCell | None
     atoms: list[MemoryAtom]
     gen: dict = field(default_factory=dict)   # {call1: {system,user,raw}, call2: {...}}, for workbench inspection
     chain_assign: "chain_build.ChainAssignResult | None" = None   # the W2.5 chain-assignment product (disabled or failed = None, or everything free-floating)
+    skipped: bool = False
+    skip_reason: str = ""
+
+
+# Shared by episode and atom extraction so their scope cannot silently diverge.
+_SUBJECT_LENS = """# Personal-memory scope
+Remember the user as a person: their circumstances, relationships, experiences, routines, tastes,
+needs, goals, commitments, values, ways of working and communicating, abilities and self-understanding.
+A project, the user's role in it, a problem they face or a result they achieved can be personal memory.
+Keep precise names, dates, places and amounts when they describe the user's life.
+
+## Attribution
+- The human this memory belongs to is the user. Speaker "user" refers to that person. A named
+  participant's statements belong to that participant; do not assume every speaker is the user.
+- An intermediary's message counts as the user's statement only where it explicitly attributes it
+  to the user. Assistants, agents and tools provide context; their own work, suggestions, instructions
+  and reports are not facts about the user. A suggestion becomes relevant when the user adopts it
+  or expresses a preference about it.
+- People in the user's life may be remembered with their actual holder, without transferring their
+  experiences or attributes to the user.
+
+## Exclusions
+Leave out task payload: code, technical parameters, draft text, calculations, tool output, process
+steps, revision history and temporary instructions about an artifact. This also applies when the
+user supplied the instructions. Leave out unrelated world knowledge, recommendations the user did
+not adopt, greetings and filler.
+For task discussions, keep only what is grounded about the user: their activity, role, goal, concern,
+choice or working preference. If no such information remains, produce no personal memory.
+
+## Facts and insights
+Stated facts, events, plans and opinions must keep their attribution and uncertainty. An insight may
+be inferred only from specific behavior or choices in this segment; describe that basis rather than
+inventing a personality label. Inferred atoms must use object_type="claim" and explicitly include
+"(inferred)" in the dialogue's language. Never infer unstated sensitive attributes such as health
+conditions, sexual orientation, religion, political views or ethnicity. Episodes contain no inference.
+
+## Synthetic examples
+- "Set the button padding to 12 pixels" is task payload. "I prefer compact interfaces" is a stated
+  preference; do not turn the padding value into a personal trait.
+- An assistant lists restaurants; the user chooses one and asks for vegetarian food. Keep the
+  choice and stated dietary preference, not the other recommendations.
+- "Explain mortgage rates" alone gives no personal fact. "I am buying my first home next spring"
+  gives a grounded plan; retain its date and uncertainty.
+- A tool reports that a build passed. The report alone is not a user memory.
+
+Before returning, check each sentence: does it describe the user or their life, and is it supported
+by this segment? Remove task-specific values; preserve exact values belonging to the user's life."""
 
 
 _EPISODE_SYSTEM = """# Role
-You are the episode weaver in a memory write pipeline: weave one topic segment of dialogue into a
-third-person narrative, plus a one-sentence topic and life-domain codes.
+You are the episode weaver in a personal memory pipeline. Produce an evidence-grounded narrative
+about the user, or skip a segment that contains no personal-memory content.
+
+""" + _SUBJECT_LENS + """
 
 # Task (on the FULL segment transcript provided)
-1. topic: one sentence stating what this segment is about — WHO is doing WHAT + key proper nouns kept
-   verbatim (names/brands/places/numbers), no pronouns, no generalization (e.g. "Caroline preparing a
-   joint exhibition with Rob"). The topic is this segment's retrieval face and material header — word
-   it so a later search can hit it.
-2. episode: a third-person narrative covering the whole segment in dialogue order — this is the primary
-   material for all future answering.
-3. domains: life-domain codes for this segment (0-3 D-axis codes).
+First apply the personal-memory scope above. If nothing about the user remains, return the skip
+object below. Otherwise produce:
+1. topic: a self-contained sentence identifying who is doing what, with relevant names retained.
+2. episode: a third-person narrative of the user's facts in this segment, in dialogue order.
+3. domains: 0-3 life-domain codes from the vocabulary below.
 
-# Hard constraints on episode (detail preservation carries most of the retrieval & answering score)
-- Coverage first: before writing, walk the transcript utterance by utterance — every fact-bearing
-  line (a date, time, amount, count, name, address, or one-off mention) must appear in the
-  episode. Never trade a "small" fact (a departure day, a ticket price, a one-time plan) for
-  narrative flow: write "departed on July 11", never "departed in mid-July".
-- Full names, never pronouns: "Caroline and Rob", not "she and her friend".
-- Proper nouns verbatim: brands, place names, book titles, restaurant names enter the text as-is.
-- Numbers exact: "3 pizzas" not "some pizzas"; frequency specific: "every Tue & Thu" not "often".
-- Dates/times of departures, appointments and deadlines, amounts, and identifiers enter the episode
-  verbatim — a bare date is often the entire answer to a later question.
-- Specific activities stay specific: "hot yoga" not "exercise".
-- Dual time format: relative wording + absolute date written together — "last week (2026-08-18)".
-- Complete when/who/where/how bounds: state clearly who did what and when; every qualifier present in
-  the source (where / with whom / how / how often / until when) enters the narrative — never drop a
-  stated qualifier, never invent an unstated dimension.
-- Attribution explicit: make clear who said/did what; with multiple speakers, keep each person's
-  matters distinct.
-- Language follows the source dialogue: write topic and episode in the SAME language as the dialogue.
-- Only what was said in this segment: no inference, no addition; every narrative sentence must trace
-  back to the transcript.
+# Evidence and detail
+- After excluding non-user content, walk the transcript utterance by utterance to cover the remaining
+  user facts. Keep exact personal dates and amounts: a bare date is often the entire answer to a
+  later question. Write "departed on July 11", never "departed in mid-July".
+- Preserve names, activities and their stated qualifiers: who, where, with whom, how often and until
+  when. Do not add unstated dimensions. Task parameters and artifact details remain excluded.
+- Resolve relative dates against transcript timestamps and include an absolute date alongside the
+  original wording, such as "last week (2026-08-18)". Do not invent a date when it is unknown.
+- Attribute facts explicitly. Use names where pronouns would be ambiguous. Preserve plans as plans,
+  opinions as opinions, and uncertainty as uncertainty. No inference in the episode.
+- Use the language of the dialogue. Every sentence must be supported by the original transcript.
 
 """ + _D_MENU + """
 
 # Output (JSON only)
-{"topic": "...", "episode": "...", "domains": ["D13"]}"""
+{"topic": "...", "episode": "...", "domains": ["D13"]}
+Nothing about the user remains:
+{"skip": true, "reason": "one short explanation"}
+When skipping, return only the skip object, even if an additional classification field is requested."""
 
 
 _ATOM_SYSTEM = """# Role
-You are the atomic-memory extractor in a memory write pipeline: batch-extract atomic facts (atoms)
-from one dialogue segment.
+You are the atomic-memory extractor in a personal memory pipeline. Extract grounded facts and
+explicitly marked insights about the user.
+
+""" + _SUBJECT_LENS + """
 
 # Input
-An episode (narrative — navigate by it) plus the FULL segment transcript (the ground truth — decide by
-it): speaker attribution, times and numbers are always settled from the transcript.
+An episode is a navigation aid; the FULL original transcript is the ground truth for attribution,
+times, numbers and evidence. Do not treat the episode as an independent source.
 
-# What to extract
-- Worth remembering: stable identity & attributes / long-term preferences & habits / relationships /
-  goals, plans, commitments & schedules (clear intent or a time attached — including near-term
-  bookings, useful until they happen) / constraints & rules / important events & experiences / stable
-  facts about the people and things that matter to someone / concrete items of interest (books read,
-  places visited, activities enjoyed, family members' likes — record even passing mentions).
-- Not worth remembering: passing whims & momentary desires / small talk / immediate instructions about
-  the current task / transition chatter.
-- Read question-and-answer exchanges as a whole: "guess where I live" + "Shanghai?" + "yes" → "lives
-  in Shanghai" holds. The assistant's words are context only — its suggestions/guesses count as fact
-  only when the user explicitly endorses them.
-- Multiple speakers: attribute every statement to its owner — holder is the speaker the proposition
-  TRULY belongs to (the name used in the dialogue; the person talking to the assistant is "user").
-  Never attribute someone else's experience to user.
-- A question or follow-up is not itself a fact; an unanswered cliffhanger is not extracted.
-
-# Coverage as retrieval anchors (atoms ARE the retrieval face — the episode already carries the full
-# narrative for answering; atoms exist so a later query can FIND this segment, NOT to re-log every line)
-- One atom per DISTINCT fact: give each distinct worth-remembering thing exactly ONE atom. Together the
-  atoms are MECE — no two restate the same fact, and collectively they cover every distinct
-  worth-remembering point in the segment. Do NOT chase completeness by adding near-duplicate atoms.
-- Merge repetition; never one atom per utterance: the same fact stated, rephrased, reacted to or argued
-  over across many lines is still ONE atom. Blow-by-blow narration — every gesture, each repeated
-  complaint, the back-and-forth bickering, momentary reactions — belongs in the EPISODE, not in atoms.
-- **Always return at least one atom — an empty list is never a valid answer.** How many is decided by
-  the segment itself: one atom per DISTINCT worth-remembering fact. When the segment genuinely carries
-  no durable fact (pure greetings, acknowledgements), return exactly ONE atom that states in one
-  sentence what happened in this segment. An argument is still a source of facts — what got damaged,
-  who owns what, stated numbers, majors, habits — extract those even when the surrounding lines are
-  repetitive bickering. Reason: atoms are the ONLY retrieval entry to this segment; return none and
-  the whole segment becomes permanently unreachable, however rich its episode is.
-- Skip process trivia: small talk, filler, transient reactions, and repeated micro-actions get NO atom;
-  they are neither searched for nor worth remembering.
-- Distinct items & attributes DO each get their own atom — they are separate search anchors, NOT
-  repetition. A list of things (bought / visited / people present) → one atom each. Parallel attributes
-  of one subject that are each asked about on their own — schedule, venue, coach, price, a stated
-  frequency/count ("every Tue & Thu", "the third time") — → separate atoms; a bare name / address /
-  number is often exactly what gets looked up later. This is coverage of distinct facts, the opposite
-  of logging restatements. (A qualifier bounding one occurrence — its when/where — stays inside its atom.)
+# Coverage as retrieval anchors
+- One atom per DISTINCT fact: cover distinct personal facts, events, relationships, preferences,
+  constraints and grounded plans. A near-term commitment may matter even if it will later expire.
+- Merge repetition; never one atom per utterance: repeated statements of one fact get one atom.
+- Skip process trivia: no task payload, assistant work, filler or unsupported guesses.
+- Distinct items & attributes DO each get their own atom when they are independently useful user
+  facts. Keep a fact's qualifiers together; do not split one occurrence into overlapping fragments.
+- A valid empty list is expected when there are no grounded personal facts. Never manufacture a
+  summary atom merely to make the episode searchable.
+- Read question and answer together. Assistant suggestions count only when explicitly adopted by
+  the user. An unanswered question does not itself establish a fact.
 
 # Fields per atom
-- text: follow the spec below (third-person single sentence, self-contained subject-verb-object, dual
-  time format, proper nouns & numbers verbatim).
-- object_type (epistemic state; shapes future answer wording): fact = normalized persistent state
-  ("Caroline lives in Shanghai"); claim = opinion/intention/plan/hearsay (always attributed wording,
-  e.g. "Caroline said she plans to hold the exhibition next month"); event = a one-time occurrence
-  with a definite moment ("Caroline sprained her right ankle last week (2026-08-18)").
-- holder: who said it / whose attribute (the name from the dialogue, or "user").
-- kind: one K-axis code.
-- domains: 0-3 D-axis codes.
-- when: the date the fact itself happened or holds (ISO yyyy-MM-dd, e.g. "2026-08-18") — the day it
-  HAPPENED, not the day it was talked about. Resolve relative words (yesterday / last Wednesday /
-  next month) into absolute dates against the transcript timestamps. Anchor to the time the fact
-  refers to, NOT the dialogue day: "made a limited edition line last week" said on 2023-08-23 → when
-  is a date within 08-16 ~ 08-22 (the week BEFORE the dialogue), never 08-23. For persistent states
-  with no intrinsic date, give null (code falls back to the dialogue date, meaning "already true as
-  of that day").
-- quote: the atom's single most relevant source sentence, a CONTIGUOUS SUBSTRING copied verbatim from
-  the transcript (used only to link back to the evidence — an anchor, NOT required to cover the whole
-  atom text; when the atom merges several lines, pick the one line that best evidences it). Never
-  rewrite it; if no single line fits, leave it empty.
+- text: a self-contained third-person sentence following the specification below.
+- object_type: fact for a stated persistent state; claim for an attributed opinion, plan, hearsay
+  or explicitly marked inference; event for a one-time occurrence. An inference is never a fact.
+- holder: the actual person whose attribute or experience this is, or "user" for the memory owner.
+- kind: one K-axis code; domains: 0-3 D-axis codes.
+- when: when the fact happened or holds, in ISO yyyy-MM-dd. Resolve relative dates from transcript
+  timestamps. "last week" said on 2023-08-23 means the week BEFORE the dialogue, not 2023-08-23.
+  For persistent states without an intrinsic date, return null; the dialogue date is then the
+  observation date, not a fabricated date of origin.
+- quote: one relevant CONTIGUOUS SUBSTRING copied verbatim from an original utterance. Never rewrite
+  a quote or quote the episode. If no single source sentence fits, leave it empty.
 
 """ + ATOM_TEXT_SPEC + "\n\n" + AXIS_MENU + """
 
-# Output (JSON only; output {"atoms":[]} when nothing is worth remembering)
-{"atoms":[{"text":"...","object_type":"fact","holder":"user","kind":"K01","domains":["D01"],"when":"2026-08-18","quote":"..."}]}"""
+# Output (JSON only)
+{"atoms":[{"text":"...","object_type":"fact","holder":"user","kind":"K01","domains":["D01"],"when":"2026-08-18","quote":"..."}]}
+Nothing about the user remains: {"atoms":[]}"""
 
 
 def _match_evidence_refs(records: list[EvidenceRecord], quote: str) -> list[EvidenceRef]:
@@ -336,13 +343,16 @@ def build_cell(
     """W2: one closed segment of raw utterances -> a MemCell (topic / episode / domains) + atoms,
     embedded in one batch and persisted.
 
-    Call 1 failing degrades to using the raw transcript as the episode (no information is lost, only
-    the formatting); call 2 failing persists the cell with no atoms (a missed extraction heals itself
-    later through the deep track's remember or a subsequent dream pass, see D3/D8).
+    No user content, an empty episode or a failed first call produces a skipped result: no cell,
+    atoms or vectors are written, while the original evidence remains available. A valid empty atom
+    extraction is accepted without a retry or synthetic fallback. A failed second call preserves
+    the grounded episode with no atoms.
     After the atoms are persisted, W2.5 chain assignment runs (deriving chain_store from atom_store
     when it was not injected); a failed assignment is non-blocking — this cell's atoms are left
     free-floating and the already-persisted cell and atoms are never touched.
     """
+    if not records:
+        raise ValueError("Cannot build a memory from an empty segment")
     transcript = _transcript(records)
     gen: dict = {}
 
@@ -358,22 +368,35 @@ def build_cell(
                          scenario, _SCEN_DIR_EPISODE)
     sys1 += (_CLASSIFY_SUFFIX.format(types=types) if types else "")
     topic, episode, cell_domains, episode_type = "", "", [], "unknown"
+    skip_reason = ""
     try:
         data, raw = chat_json(llm, [{"role": "system", "content": sys1},
                                     {"role": "user", "content": user1}], max_tokens=3000,
                               stage="episode_weave")
         topic = str(data.get("topic") or "").strip()
-        episode = str(data.get("episode") or "").strip()
+        episode = data.get("episode")
+        if episode is not None and not isinstance(episode, str):
+            raise ValueError("episode must be a string when present")
+        episode = episode.strip() if isinstance(episode, str) else ""
+        if not episode:
+            skip_reason = str(data.get("reason") or "").strip() or "No personal episode was produced"
+        elif data.get("skip") is True:
+            # Preserve actual generated content when the model contradicts its own skip flag.
+            logger.warning("W2(1) returned both an episode and skip=true; keeping the episode")
         cell_domains = normalize_domains(data.get("domains"))[:3]
         if types:   # only honoured when a vocabulary was passed: the LLM's output must be in the list, otherwise it falls back to unknown (nothing is force-fitted)
             et = str(data.get("episode_type") or "").strip()
             episode_type = et if et in set(types) else "unknown"
         gen["call1"] = {"system": sys1, "user": user1, "raw": raw}
-    except Exception as e:   # noqa: BLE001  a parse failure or network hiccup degrades to the raw transcript as the episode (no information lost, only the formatting)
-        logger.warning(f"W2(1) failed, degrading the episode to the raw transcript: {e}")
-        topic = topic_hint or (records[0].content_inline or "")[:50]
-        episode = transcript
+    except Exception as e:   # noqa: BLE001  retain evidence, never promote an unfiltered transcript to memory
+        logger.error(f"W2(1) failed; preserving evidence without creating an episode: {e}")
+        skip_reason = "Episode generation failed"
         gen["call1"] = {"system": sys1, "user": user1, "raw": str(e)}
+
+    if skip_reason:
+        gen["skip"] = skip_reason
+        logger.info(f"W2 segment skipped session={session_id} reason={skip_reason!r}")
+        return CellBuild(cell=None, atoms=[], gen=gen, skipped=True, skip_reason=skip_reason)
 
     cell = MemCell(session_id=session_id, topic=topic, episode=episode, domains=cell_domains,
                    episode_type=episode_type,
@@ -387,11 +410,8 @@ def build_cell(
     sys2 = with_scenario(_ATOM_SYSTEM, "# Input", scenario, _SCEN_DIR_ATOM)
     seg_date = records[0].captured_at
 
-    def _extract(nudge: str = "") -> tuple[list[MemoryAtom], str]:
+    def _extract() -> tuple[list[MemoryAtom], str]:
         msgs = [{"role": "system", "content": sys2}, {"role": "user", "content": user2}]
-        if nudge:   # append a correction when re-extracting: resending the identical request just rolls the same empty-biased dice again
-            msgs += [{"role": "assistant", "content": '{"atoms":[]}'},
-                     {"role": "user", "content": nudge}]
         data, raw_out = chat_json(llm, msgs, max_tokens=4000, num_tries=3, stage="atom_extract")
         out: list[MemoryAtom] = []
         for item in (data.get("atoms") or []):
@@ -414,52 +434,10 @@ def build_cell(
 
     try:
         atoms, raw = _extract()
-        # Zero atoms means extracting once more: atoms are the **retrieval antennae**, and having none
-        # makes this cell unreachable by any query — an island (the episode is still there, but
-        # nothing can find it). chat_json's num_tries only covers JSON parse failures, so a
-        # well-formed {"atoms":[]} sails straight through. In practice the same input has returned 0
-        # in one process and 2 in another, which says an empty result is quite likely a missed
-        # extraction rather than "there really is nothing to remember". If the second attempt is also
-        # empty, we accept that there really is nothing to remember.
-        if not atoms:
-            logger.warning(f"W2(2) extracted 0 atoms, re-extracting with a correction note turns={len(records)} topic={topic[:30]!r}")
-            atoms, raw = _extract(
-                "You returned an empty list last time. Re-read the segment: even when it is "
-                "mostly argument or small talk, any **persistent facts** it mentions "
-                "(someone's belongings, explicit numbers, identity/profession/habits, "
-                "concrete events that happened) must still be extracted. Only return an "
-                "empty list when the segment is truly nothing but greetings and replies "
-                "with no fact worth remembering. Output the JSON body only.")
         gen["call2"] = {"system": sys2, "user": user2, "raw": raw}
     except Exception as e:   # noqa: BLE001  a parse failure or network hiccup -> persist the cell with no atoms (a later re-extraction heals it, see D3/D8)
         logger.warning(f"W2(2) failed, atoms left empty: {e}")
         gen["call2"] = {"system": sys2, "user": user2, "raw": str(e)}
-
-    # -- Backstop: a memcell must have at least one retrieval antenna --
-    # The fast path's R1 (retrieval.search_atoms) only searches **atom** vectors; a cell's
-    # topic_embedding is used only by the deep track, over an already-selected subset of cells. So a
-    # cell with zero atoms is **completely unreachable** on the fast path — its episode is still in
-    # the store, but no phrasing of a query can retrieve it (four phrasings were tried, all missed).
-    # However thin a segment is, it deserves one summary sentence as an antenna rather than vanishing
-    # entirely. The topic is already a one-sentence summary of "who is doing what", so it is used
-    # directly as this atom's body; evidence_refs points at the whole segment, keeping traceability
-    # intact.
-    # Marking source="w2_fallback" makes it easy to count afterwards how often this path fires (the
-    # normal path is always "w2").
-    if not atoms:
-        summary = (topic or "").strip() or (episode or "").strip()[:120]
-        if summary:
-            atoms = [MemoryAtom(
-                memcell_id=cell.id, object_type="event", text=summary,
-                holder="user",          # a segment summary belongs to no single person, so use the default holder
-                kind="K04",             # event/experience: what happened during this segment
-                domains=cell_domains, occurrence_time=seg_date, source="w2_fallback",
-                evidence_refs=[EvidenceRef(evidence_id=r.id) for r in records])]
-            logger.warning(f"W2(2) still 0 atoms after re-extraction -> synthesizing 1 summary atom as a "
-                           f"backstop (otherwise this cell is permanently unrecallable) "
-                           f"turns={len(records)} text={summary[:60]!r}")
-        else:
-            logger.error(f"W2(2) 0 atoms and both topic and episode are empty, this cell will be unrecallable cell={cell.id}")
 
     # Batch embed: one topic + one per atom (the only two kinds of vector in the whole store) in a
     # single call; an empty topic takes no slot
@@ -619,9 +597,17 @@ class SessionWriter:
         return content_ref, sha256, img_text
 
     def _prepare(self, m: FeedMsg, *, now_dt: datetime,
-                 source_extra: dict | None, context: list[EvidenceRecord]) -> EvidenceRecord:
+                 source_extra: dict | None, context: list[EvidenceRecord],
+                 evidence_id: str | None = None) -> EvidenceRecord:
         """W0: one message -> evidence persisted + an in-memory record. A message with an image first
         goes through storing and viewing it (failures degrade and never block)."""
+        if evidence_id:
+            existing = self.evidence_store.get(evidence_id)
+            if existing is not None:
+                if (existing.source or {}).get("session_id") != self.session_id:
+                    raise ValueError("Evidence identity belongs to a different session")
+                # A retry must retain the first timestamp and image interpretation.
+                return existing
         modality, content_ref, sha256 = "text", None, ""
         content_inline = m.text
         if m.image:
@@ -639,7 +625,7 @@ class SessionWriter:
         evidence_id = append_utterance(self.evidence_store, session_id=self.session_id,
                                        speaker=m.speaker, text=content_inline, now_dt=now_dt,
                                        modality=modality, content_ref=content_ref, sha256=sha256,
-                                       source_extra=source_extra)
+                                       source_extra=source_extra, evidence_id=evidence_id)
         return EvidenceRecord(id=evidence_id, holder=m.speaker, content_inline=content_inline,
                               modality=modality, content_ref=content_ref, sha256=sha256,
                               source={"session_id": self.session_id, **(source_extra or {})},
@@ -649,7 +635,7 @@ class SessionWriter:
                    now_dt: Optional[datetime] = None,
                    source_extra: dict | None = None,
                    task_type: list[str] | None = None,
-                   scenario: str = "") -> BatchStepResult:
+                   scenario: str = "", evidence_ids: list[str] | None = None) -> BatchStepResult:
         """Feed one whole batch (atomically): W0 persists the whole batch as evidence -> (when the
         segment is non-empty) W1 judges the batch as a whole -> W2 runs if it closes -> the batch
         joins the segment.
@@ -659,14 +645,29 @@ class SessionWriter:
         split. Messages with images are stored and viewed one by one, and the viewing context
         includes the utterances of this batch prepared so far.
         """
+        if evidence_ids is not None:
+            if (len(evidence_ids) != len(msgs)
+                    or any(not isinstance(eid, str) or not eid.strip() or len(eid) > 64
+                           for eid in evidence_ids)
+                    or len(set(evidence_ids)) != len(evidence_ids)):
+                raise ValueError("evidence_ids must contain one distinct nonempty ID per message (max 64 characters)")
         now_dt = now_dt or now()
         recs: list[EvidenceRecord] = []
         # During W0 the segment cannot change (the write lock is held), so one read is enough; the
         # image-viewing context is the current segment plus the utterances of this batch prepared so far
         ctx_seg = self.seg_store.load(self.user_id, self.session_id)
-        for m in msgs:
+        for i, m in enumerate(msgs):
             recs.append(self._prepare(m, now_dt=now_dt, source_extra=source_extra,
-                                      context=ctx_seg + recs))
+                                      context=ctx_seg + recs,
+                                      evidence_id=evidence_ids[i] if evidence_ids is not None else None))
+
+        all_recs = recs
+        buffered_ids = {r.id for r in ctx_seg}
+        recs = [r for r in all_recs if r.id not in buffered_ids]
+        if not recs:
+            # Segment save may have succeeded before a queue cursor/ack failed.
+            # Replaying such a batch must not duplicate buffered utterances or close it again.
+            return BatchStepResult(evidence_ids=[r.id for r in all_recs], records=all_recs)
 
         seg = ctx_seg   # W0 only writes to the evidence store and does not touch the segment, so reuse it
         boundary, forced, closed = None, False, None
@@ -686,10 +687,11 @@ class SessionWriter:
                                     topic_hint=boundary.topic_summary if boundary else "",
                                     chain_store=self.chain_store, task_type=task_type,
                                     scenario=scenario)
-                self.cells.append(closed)
+                if not closed.skipped:
+                    self.cells.append(closed)
                 seg = []                             # closing clears the segment; the save below overwrites the key wholesale
         self.seg_store.save(self.user_id, self.session_id, seg + recs)
-        return BatchStepResult(evidence_ids=[r.id for r in recs], records=recs,
+        return BatchStepResult(evidence_ids=[r.id for r in all_recs], records=all_recs,
                                boundary=boundary, forced_close=forced, closed_cell=closed)
 
     def feed(self, speaker: str, text: str, *,
@@ -716,7 +718,8 @@ class SessionWriter:
                                 self.cell_store, self.atom_store, seg,
                                 session_id=self.session_id, chain_store=self.chain_store,
                                 task_type=task_type, scenario=scenario)
-            self.cells.append(closed)
+            if not closed.skipped:
+                self.cells.append(closed)
             self.seg_store.clear(self.user_id, self.session_id)
             logger.info(f"session end forced close session={self.session_id} cells={len(self.cells)}")
         return self.cells

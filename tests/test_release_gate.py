@@ -42,3 +42,14 @@ def test_internal_identifier_and_domain_lookalikes_are_blocked(tmp_path, monkeyp
     hits = gate.scan()
     assert len(hits) == 1
     assert next(iter(hits.values())) == [(Path("provider.py"), 1, text[:110])]
+
+
+def test_tracked_json_is_included_in_the_release_scan(tmp_path, monkeypatch):
+    """Storyboards and manifests can carry private identifiers just like source code."""
+    source = tmp_path / "story.json"
+    source.write_text('{"caller":"' + ''.join(('ro', 'kid')) + '"}', encoding="utf-8")
+    monkeypatch.setattr(gate, "ROOT", tmp_path)
+    monkeypatch.setattr(gate.subprocess, "run", lambda *a, **kw: type(
+        "Listing", (), {"stdout": "story.json\0"})())
+    assert gate._files() == [source]
+    assert gate.scan()

@@ -811,3 +811,46 @@ def test_run_recall_auto_ok_does_not_escalate(db, evidence_store):
                    session_id="s1", query="画展什么时候", now_dt=_T, mode="auto")
     assert not o.escalated and o.deep is None and not o.retried
     assert o.ans.answer == "展期在 2026-09。"
+
+
+def test_remember_preserves_claim_type_and_rejects_invalid_type(db):
+    env = Env(db)
+    cell = env.add_cell(topic="Travel plans", episode="The user is considering a trip.",
+                        evidence=[("user", "I plan to visit Oslo next month")])
+    deps = env.deps(ZeroEmbedder())
+    handle = deps.reg.ensure(cell.id)
+    result = tool_remember(deps, c=handle, text="The user plans to visit Oslo next month.",
+                           quote="I plan to visit Oslo next month", object_type="claim")
+    assert "Written back" in result
+    saved = env.atoms.list_by_cell(cell.id)
+    assert len(saved) == 1 and saved[0].object_type == "claim"
+    assert saved[0].evidence_refs
+    result = tool_remember(deps, c=handle, text="Unsupported type", object_type="certain")
+    assert "object_type must be" in result
+    assert len(env.atoms.list_by_cell(cell.id)) == 1
+
+
+def test_deep_model_receives_shared_scope_and_narrower_writeback_rules(db):
+    from personos.online.deep_recall import _REMEMBER_SCOPE
+    from personos.online.write_path import _SUBJECT_LENS
+
+    prompts = []
+
+    class InspectPrompt:
+        def chat(self, messages, **kwargs):
+            prompts.append(messages[0]["content"])
+            return ('```json\n{"thought":"No source needed", "action":"Final Answer",'
+                    '"action_input":{"answer":"No supported personal fact.","cited":[]}}\n```')
+
+    env = Env(db)
+    result = run_deep(InspectPrompt(), ZeroEmbedder(), env.atoms, env.cells, env.ev,
+                      query="What is known?", now_dt=_T, deep_write=True,
+                      scenario="Focus on the user's plans; exclude {work}.")
+    assert result.ans.answer == "No supported personal fact."
+    assert len(prompts) == 1
+    assert _SUBJECT_LENS in prompts[0]
+    assert _REMEMBER_SCOPE in prompts[0]
+    assert "Do not write new inferences through this tool, including episode_append" in prompts[0]
+    assert "cannot expand it to non-user content" in prompts[0]
+    assert "exclude {work}" in prompts[0]  # scenario braces survive template formatting
+    assert env.atoms.list() == []

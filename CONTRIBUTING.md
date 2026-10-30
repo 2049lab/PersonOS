@@ -1,65 +1,56 @@
 # Contributing
 
-## Setup
+[← PersonOS](README.md) · [Framework design](docs/framework.md)
+
+Contributions should keep the core usable with local SQLite and configurable model providers. Application-specific infrastructure and heavy optional dependencies belong behind adapters.
+
+## Set up
+
+Requires Python 3.10+.
 
 ```bash
-pip install -e ".[dev]"
-pytest -q          # ~600 tests, under 20 seconds, no network, no database
+git clone https://github.com/2049lab/PersonOS.git
+cd PersonOS
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -e '.[dev]'
 ```
 
-The suite runs against in-memory SQLite. Nothing external is required, and
-nothing you run locally can touch a shared system.
+The default test suite uses in-memory SQLite and fake model responses. It needs no model credentials or shared database. Leave `PERSONOS_TEST_BACKEND` unset for local tests.
 
-To run the same suite against MySQL — which is how the SQL dialect translation
-is shown to be behaviour-preserving — set `PERSONOS_TEST_BACKEND=mysql` plus
-`PERSONOS_DB_URL`.
-
-## The checks, and why each exists
+## Check a change
 
 ```bash
-python scripts/check_cold_start.py         # importing works with no configuration
-python scripts/check_clean_install.py      # the core installs without the extras
-python scripts/check_no_internal_refs.py   # no internal identifiers ship
-python scripts/check_translation_safe.py   # a comment-only change really is one
+python -m ruff check .
+python -m pytest -q
+python scripts/check_cold_start.py
+python scripts/check_no_internal_refs.py
+python scripts/check_clean_install.py
 ```
 
-They are cheap and they each caught something real:
+- **Tests** exercise storage, ingestion, recall, API behavior and user isolation. The normal database fixture wraps each test in a rollback scope and rejects writes outside that scope. Dedicated tests of database behavior can use their own temporary databases.
+- **Cold start** checks that representative modules import without configuration or network connections.
+- **Internal-reference check** scans tracked files for private dependencies and deployment identifiers. Stage intended new files before the final scan so they are included.
+- **Clean install** checks that the text core runs without optional dependencies.
 
-- **Cold start** — a module that reads a secret while being imported breaks
-  `from personos import Memory` for anyone without that secret, and the failure
-  lands at import time, the least debuggable place. Note it imports several
-  modules explicitly: checking only `import personos` was permanently green and
-  caught nothing, because the package `__init__` is nearly empty.
-- **Clean install** — declaring a small dependency list is easy; keeping it true
-  is not. One module-level import of an optional package silently turns an extra
-  into a requirement, and only the minimal installer ever sees it.
-- **Translation safety** — prompt constants are English strings that models
-  read. Editing one changes pipeline output with no test failure to show for it.
-  This parses before and after, strips docstrings, and compares the AST.
+For changes limited to comments and docstrings, `python scripts/check_translation_safe.py` can compare the executable AST. It is not a gate for an intentional prompt or code change.
 
-## What the tests are for
+The suite can also target MySQL by setting `PERSONOS_TEST_BACKEND=mysql` and `PERSONOS_DB_URL`. Use a disposable database. SQLite tests alone do not validate a deployment's MySQL version, permissions or connection settings.
 
-Most test names describe a *failure mode*, not a function. The docstrings say
-why the assertion is what it is — often reconstructing an incident. Keep that
-habit: a test that says `test_rerank` teaches nothing when it breaks at 2am.
+## Memory behavior
 
-When touching retrieval or writing, the useful question is not "do the tests
-pass" but "did the structure of the answer change". The suite cannot see that
-on its own, because the pipeline is driven by a language model. There is a
-record-and-replay harness in `scripts/baseline/` for exactly this: it freezes
-one real run and replays it offline, comparing structural fingerprints rather
-than answer text.
+Keep source evidence, user isolation and empty-result semantics intact. A segment may contain no personal memory. Do not turn assistant output, task instructions or failed extraction into fallback user facts.
 
-## Style
+Test observable outcomes and failure modes: repeated input, cross-user references, malformed model responses, unavailable optional providers and pagination during concurrent changes. Use neutral synthetic inputs. Do not publish private conversations, credentials or captured model responses containing personal data.
 
-- Comments explain **why**, not what. The code already says what.
-- Prefer stating the trade-off you rejected. "8 rather than 50 because the
-  bottleneck is upstream latency, not local CPU" is worth five lines; "the
-  concurrency limit" is worth none.
-- Line length 100, `ruff` enforces the rest.
+Prompt changes need more than green unit tests to establish model quality. Use the [evaluation tools](scripts/bench/README.md) and record the models, configuration and dataset scope for any performance claim. The optional [record/replay harness](scripts/baseline/) helps compare structural behavior when suitable fixtures are available.
 
-## Adding a provider
+## Code and documentation
 
-One entry in `personos/providers/registry.py` and one class. The registry
-imports by dotted path on demand, which is what lets heavy dependencies stay
-optional — so do not import your SDK at module level.
+Explain the reason for non-obvious code, keep public behavior backward compatible where practical, and document intentional changes. The lint configuration in `pyproject.toml` defines the code style.
+
+New providers register in [`personos/providers/registry.py`](personos/providers/registry.py). Import optional SDKs lazily so adding an integration does not enlarge the required core.
+
+Keep the English and Chinese READMEs aligned. Put setup details and API examples in the usage guides; keep the repository homepage focused on what the framework does and how to start. New public methods need examples and a clear account of model calls, user scope and failure behavior.
+
+Use [GitHub Issues](https://github.com/2049lab/PersonOS/issues) for reproducible bugs and focused proposals. Report vulnerabilities through [SECURITY.md](SECURITY.md).

@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="440" height="370" viewBox="0 0 440 370" role="img" aria-labelledby="title desc">
+<title id="title">The four layers of PersonOS memory</title>
+<desc id="desc">Evidence preserves source records. Episodes keep personal context. Atoms support retrieval. Chains connect related observations over time.</desc>
+<rect x="0.5" y="0.5" width="439" height="369" rx="14" fill="#fafaf9" stroke="#d8dde3"/>
+<g font-family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif">
+<rect x="20" y="20" width="192" height="156" rx="8" fill="#ffffff" stroke="#d8dde3"/>
+<text x="36" y="45" font-size="16" font-weight="600" fill="#356be2">01</text>
+<text x="36" y="83" font-size="25" font-weight="600" fill="#182029">Evidence</text>
+<text x="36" y="118" font-size="18" fill="#182029">Original words</text>
+<text x="36" y="143" font-size="18" fill="#69727e">and media</text>
+<rect x="228" y="20" width="192" height="156" rx="8" fill="#ffffff" stroke="#d8dde3"/>
+<text x="244" y="45" font-size="16" font-weight="600" fill="#356be2">02</text>
+<text x="244" y="83" font-size="25" font-weight="600" fill="#182029">Episodes</text>
+<text x="244" y="118" font-size="18" fill="#182029">Personal events</text>
+<text x="244" y="143" font-size="18" fill="#69727e">in context</text>
+<rect x="20" y="194" width="192" height="156" rx="8" fill="#ffffff" stroke="#d8dde3"/>
+<text x="36" y="219" font-size="16" font-weight="600" fill="#356be2">03</text>
+<text x="36" y="257" font-size="25" font-weight="600" fill="#182029">Atoms</text>
+<text x="36" y="292" font-size="18" fill="#182029">Facts for retrieval</text>
+<text x="36" y="317" font-size="18" fill="#69727e">linked to episodes</text>
+<rect x="228" y="194" width="192" height="156" rx="8" fill="#ffffff" stroke="#d8dde3"/>
+<text x="244" y="219" font-size="16" font-weight="600" fill="#356be2">04</text>
+<text x="244" y="257" font-size="25" font-weight="600" fill="#182029">Chains</text>
+<text x="244" y="292" font-size="18" fill="#182029">Related records</text>
+<text x="244" y="317" font-size="18" fill="#69727e">across time</text>
+</g></svg>

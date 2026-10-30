@@ -1,3 +1,7 @@
+from datetime import datetime, timezone
+
+import pytest
+
 from personos.models import EvidenceRecord
 from personos.storage.evidence_store import EvidenceStore, sha256_of
 
@@ -12,10 +16,10 @@ def test_append_and_get(db):
     assert got.sha256 == sha256_of("上周三打篮球扭了下右腿")  # the hash is filled in automatically
 
 
-def test_dedup_by_sha256(db):
+def test_content_dedup_is_explicit_opt_in(db):
     store = EvidenceStore(db)
-    a = store.append(EvidenceRecord(content_inline="同样的话"))
-    b = store.append(EvidenceRecord(content_inline="同样的话"))
+    a = store.append(EvidenceRecord(content_inline="同样的话"), dedup_by_sha=True)
+    b = store.append(EvidenceRecord(content_inline="同样的话"), dedup_by_sha=True)
     assert a == b  # identical content is deduplicated and returns the same id
     assert len(store.list()) == 1
 
@@ -51,3 +55,35 @@ def test_search_keyword_holder_filter_and_like_escape(db):
     assert [r.holder for r in store.search_keyword(["bowl"], holder="Melanie")] == ["Melanie"]
     # % is not treated as a wildcard; it matches literally.
     assert len(store.search_keyword(["100%"])) == 2
+
+
+def test_same_words_keep_message_session_speaker_and_time(db):
+    store = EvidenceStore(db, "alice")
+    first = EvidenceRecord(holder="user", content_inline="Yes", source={"session_id": "one"},
+                           captured_at=datetime(2026, 1, 1, tzinfo=timezone.utc))
+    second = EvidenceRecord(holder="assistant", content_inline="Yes", source={"session_id": "two"},
+                            captured_at=datetime(2026, 1, 2, tzinfo=timezone.utc))
+    assert store.append(first) != store.append(second)
+    assert len(store.list()) == 2
+    assert store.get(first.id).model_dump() == first.model_dump()
+    assert store.get(second.id).model_dump() == second.model_dump()
+
+
+def test_replay_same_id_preserves_immutable_record(db):
+    store = EvidenceStore(db, "alice")
+    original = EvidenceRecord(content_inline="I live in Oslo", source={"session_id": "one"})
+    assert store.append(original) == original.id
+    retry = original.model_copy(update={"content_inline": "Changed payload"})
+    assert store.append(retry) == original.id
+    assert len(store.list()) == 1
+    assert store.get(original.id).content_inline == "I live in Oslo"
+
+
+def test_same_id_cannot_claim_other_users_evidence(db):
+    alice, bob = EvidenceStore(db, "alice"), EvidenceStore(db, "bob")
+    original = EvidenceRecord(content_inline="Alice's original")
+    alice.append(original)
+    with pytest.raises(ValueError, match="unavailable"):
+        bob.append(original.model_copy(update={"content_inline": "Bob's replacement"}))
+    assert bob.list() == [] and bob.get(original.id) is None
+    assert alice.get(original.id).content_inline == "Alice's original"

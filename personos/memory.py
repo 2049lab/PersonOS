@@ -56,6 +56,7 @@ from .storage.chain_store import ChainStore
 from .storage.db import Database
 from .storage.evidence_store import EvidenceStore
 from .storage.media import media_store_from_settings
+from .storage.memory_query import MemoryQuery
 from .storage.msg_queue import EnqueueBusy, MemoryMsgQueue, MsgQueue, RedisMsgQueue
 from .storage.profile_store import ProfileStore
 from .storage.redis_client import get_redis
@@ -614,8 +615,8 @@ class Memory:
         **Non-blocking, same contract as the HTTP ``/ingest``.** The batch goes
         into the session's durable ordered queue and this call returns an
         ``AddReceipt`` immediately; the background dispatcher consumes it FIFO.
-        Ordering is guaranteed per session — batches are consumed exactly once,
-        in the order they were added — but the memories exist only once the
+        Batches are consumed in session order; failed work may be retried.
+        The memories exist only once the
         queue has been drained. Call ``flush()`` (or pass ``sync=True``) when
         you need to read your own writes, e.g. before ``search()`` in a script.
 
@@ -691,7 +692,7 @@ class Memory:
             out = writer.feed_batch(msgs, now_dt=now_dt, source_extra=source_extra,
                                     task_type=task_type, scenario=scenario)
         out.warnings.extend(warn)
-        if out.closed_cell is not None:
+        if out.closed_cell is not None and out.closed_cell.cell is not None:
             self.trigger_profile(user_id, session_id, scenario)
         return out
 
@@ -875,7 +876,10 @@ class Memory:
         """Answer a question from memory.
 
         ``mode`` is ``auto`` (fast path, escalating to the deep agent when the
-        answer is judged insufficient), ``fast``, or ``deep``.
+        answer is judged insufficient), ``fast``, ``deep``, or ``flash``.
+        Flash returns retrieved source episodes without a generated answer or
+        review. It needs embeddings, and uses the configured reranker, but no
+        chat model. It accepts text queries only and ignores rewrite/profile.
 
         Returns a ``RecallOutcome``: the answer plus how it was reached — the
         rewritten query, the retrieved atoms, the ranked materials, the
@@ -883,9 +887,16 @@ class Memory:
         """
         from .errors import no_deep_track, visual_recall_unavailable
         from .models import now as _now
-        from .online.recall_flow import run_recall
+        from .online.recall_flow import run_recall, validate_recall
 
-        self._require_core()
+        validate_recall(query, mode, top_k, has_image=image is not None)
+        if mode == "flash":
+            from .errors import no_embedder
+
+            if not getattr(self.embedder, "available", True):
+                raise no_embedder()
+        else:
+            self._require_core()
         self._check_ids(user_id, session_id or None)
         warn: list[str] = []
         if mode == "deep" and not _deep_available():
@@ -896,7 +907,7 @@ class Memory:
 
         ctx = self.for_user(user_id)
         profile_full = profile_traits = ""
-        if with_profile:
+        if with_profile and mode != "flash":
             profile_full, profile_traits = self._profile_strings(user_id)
 
         # Face matching needs the identity backend; the default (unconfigured)
@@ -921,6 +932,37 @@ class Memory:
             profile_full=profile_full, profile_traits=profile_traits, scenario=scenario)
         out.warnings.extend(warn)
         return out
+
+    def list_memories(self, *, user_id: str = "default", session_id: str | None = None,
+                      object_type: str | None = None, holder: str | None = None,
+                      kind: str | None = None, domain: str | None = None,
+                      query: str | None = None, limit: int = 20, offset: int = 0) -> dict:
+        """Browse stored atoms and source evidence without calling a model.
+
+        Filters are combined with AND. ``query`` matches a literal substring,
+        not semantic similarity. Pages use descending IDs; concurrent writes
+        can shift offset pages. ``limit`` is 1..100, ``offset`` is 0..100000.
+        """
+        self._check_ids(user_id, session_id)
+        return MemoryQuery(self.db, user_id).memories(
+            session_id=session_id, object_type=object_type, holder=holder,
+            kind=kind, domain=domain, query=query, limit=limit, offset=offset)
+
+    def list_chains(self, *, user_id: str = "default", limit: int = 20,
+                    offset: int = 0) -> dict:
+        """Browse chain titles, counts and dates without loading their histories."""
+        self._check_ids(user_id)
+        return MemoryQuery(self.db, user_id).chains(limit=limit, offset=offset)
+
+    def get_chain(self, chain_id: str, *, user_id: str = "default", limit: int = 20,
+                  cursor: str | None = None) -> dict | None:
+        """Read one page in chain order; unknown or other-user IDs return None.
+
+        Follow ``next_cursor`` while ``state`` is ``more``. ``changed`` asks
+        the caller to restart; ``incomplete`` exposes a damaged chain index.
+        """
+        self._check_ids(user_id)
+        return MemoryQuery(self.db, user_id).chain(chain_id, limit=limit, cursor=cursor)
 
     def profile(self, *, user_id: str = "default") -> dict:
         """The distilled profile as a plain dict.

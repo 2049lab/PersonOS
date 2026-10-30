@@ -4,6 +4,8 @@
 
 This page records project-reported results for PersonOS on multimodal and text-memory benchmarks. All scores are percentages (%).
 
+These are historical results, not measurements of the current source revision. The [framework refresh](framework.md#framework-refresh) changes personal-memory extraction and empty-result behavior; these scores have not been re-established after those changes.
+
 | Benchmark | Reported overall (%) | Scope |
 |---|---:|---|
 | [M3-Bench-robot](https://github.com/bytedance-seed/m3-agent) | **61.5** | Robot-view multimodal memory |

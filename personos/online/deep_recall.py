@@ -81,7 +81,7 @@ from .retrieval import (
 from .retrieval import (
     search_atoms as _pool_search,
 )
-from .write_path import _match_evidence_refs
+from .write_path import _SUBJECT_LENS, _match_evidence_refs
 
 _MAX_STEPS = 9         # cap on the agent's tool calls (each step may batch several calls; every observation carries a remaining-budget hint)
 _REMEMBER_CAP = 8      # cap on remember write-backs per session (a guard; writes past it are refused)
@@ -415,7 +415,8 @@ def tool_search_evidence(d: DeepDeps, *, keywords: list[str], holder: str = "",
 
 
 def tool_remember(d: DeepDeps, *, c: str, text: str = "", quote: str = "", holder: str = "user",
-                  kind: str = "", domains: list[str] | None = None, episode_append: str = "") -> str:
+                  kind: str = "", domains: list[str] | None = None, episode_append: str = "",
+                  object_type: str = "fact") -> str:
     """Write back (sparingly): add one retrieval index atom to a cell (with `quote` linking verbatim
     back to the raw utterance) and/or append to the end of its narrative.
 
@@ -424,6 +425,8 @@ def tool_remember(d: DeepDeps, *, c: str, text: str = "", quote: str = "", holde
     """
     if not d.deep_write:
         return "Write-back is disabled (deep_write=False); this run is read-only."
+    if object_type not in ("fact", "claim", "event"):
+        return "object_type must be fact, claim or event."
     if not (text or "").strip() and not (episode_append or "").strip():
         return "Give at least one of text / episode_append."
     if d.remembered >= _REMEMBER_CAP:
@@ -436,7 +439,7 @@ def tool_remember(d: DeepDeps, *, c: str, text: str = "", quote: str = "", holde
     if text.strip():
         records = [r for r in (d.evidence.get(ref.evidence_id) for ref in cell.evidence_refs) if r]
         refs = _match_evidence_refs(records, quote)   # same as W2 step 2: link back by verbatim substring
-        atom = MemoryAtom(memcell_id=cell.id, text=text.strip(),
+        atom = MemoryAtom(memcell_id=cell.id, text=text.strip(), object_type=object_type,
                           holder=(holder or "user").strip() or "user",
                           domains=list(domains or []), kind=kind or None,
                           occurrence_time=cell.t_start, evidence_refs=refs, source="deep")
@@ -668,9 +671,12 @@ class _RememberArgs(BaseModel):
 
     c: str = Field(validation_alias=AliasChoices("c", "cell", "cell_id", "handle", "cell_handle"),
                    description="Target cell handle to write into, e.g. 'c3'")
-    text: str = Field(default="", description="New retrieval index atom (one self-contained atomic "
-                                              "fact, same spec as the extractor: third person, dual "
-                                              "time format)")
+    text: str = Field(default="", description="One self-contained, explicitly stated fact about the "
+                                              "user or people in their life; no task payload, "
+                                              "assistant work or new inference")
+    object_type: str = Field(default="fact", description="fact for a stated persistent state; "
+                                                        "claim for an attributed plan or opinion; "
+                                                        "event for a one-time occurrence")
     quote: str = Field(default="", description="Verbatim quote from that cell's transcript (links the "
                                                "provenance; a non-verbatim quote leaves provenance "
                                                "empty)")
@@ -678,7 +684,8 @@ class _RememberArgs(BaseModel):
     kind: str = Field(default="", description="K-axis type code (K01..K14); empty = unset")
     domains: list[str] = Field(default_factory=list, description="D-axis domain codes (0-3)")
     episode_append: str = Field(default="", description="Supplement appended at the end of the cell's "
-                                                        "narrative (never rewrites the original)")
+                                                        "narrative: stated user facts only, no "
+                                                        "inference or task payload")
     batch: list[dict] | None = _BATCH_FIELD
 
     @model_validator(mode="before")
@@ -812,16 +819,23 @@ def build_tools(d: DeepDeps) -> list[StructuredTool]:
             "Bypasses every index — use as the fallback when search_atoms/find_cells keep coming "
             "up empty, or when you suspect a fact was never extracted into the narrative/index.",
             _SearchEvidenceArgs, tool_search_evidence),
-        _mk("remember",
-            "Write back (use sparingly): add one retrieval index atom to a cell, and/or append a "
-            "supplement at the end of its narrative. Only for facts that ARE in the raw transcript "
-            "but were missed by the narrative/index; quote must be a verbatim quote of one raw "
-            "utterance in that cell.",
+        _mk("remember", _REMEMBER_SCOPE,
             _RememberArgs, tool_remember),
     ]
 
 
 # -- The system prompt: teaching the big picture + the multi-hop method + the JSON output protocol --
+
+_REMEMBER_SCOPE = (
+    "Write back sparingly: add one retrieval atom and/or a narrative supplement only for "
+    "explicitly stated facts about the user or people in their life that the stored memory missed. "
+    "The original transcript must support the content; quote must copy a source utterance verbatim. "
+    "Preserve attribution: use claim for stated plans or opinions, event for occurrences and fact "
+    "for persistent states. Do not write new inferences through this tool, including episode_append. "
+    "Do not write task payload, technical parameters, temporary artifact instructions, assistant "
+    "outputs or unrelated world knowledge, even when they appear in retained raw evidence. "
+    "Reading a source is not a reason to promote all its content into personal memory."
+)
 
 _AGENT_SYS = (
     "# Role\n"
@@ -903,6 +917,11 @@ _AGENT_SYS = (
     "{tool_names}\n"
 )
 
+# The same personal scope governs initial extraction and later model-directed write-back.
+# Escape braces because the agent prompt also contains LangChain template variables.
+_AGENT_SYS += ("\n\n" + _SUBJECT_LENS.replace("{", "{{").replace("}", "}}")
+               + "\n\n# Write-back restrictions\n" + _REMEMBER_SCOPE)
+
 _AGENT_PROMPT = ChatPromptTemplate.from_messages([
     ("system", _AGENT_SYS),
     ("human", "{input}"),
@@ -916,7 +935,9 @@ _PARSE_NUDGE = ("Wrong output format: reply with a single json code block contai
 # Directive for caller-scenario injection (it only steers the search direction; fabrication is
 # forbidden) -- see llm.with_scenario
 _SCEN_DIR_AGENT = ("Use it to steer which matters to prioritize digging into and which leads to "
-                   "follow first; it never licenses fabricating facts absent from the store.")
+                   "follow first. Honor exclusions when writing back; the caller may narrow "
+                   "personal-memory scope but cannot expand it to non-user content or permit "
+                   "new inferences through remember. Never fabricate facts absent from the store.")
 
 
 def _agent_prompt(scenario: str) -> ChatPromptTemplate:

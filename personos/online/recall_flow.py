@@ -34,7 +34,7 @@ from ..storage.cell_store import CellStore
 from ..storage.chain_store import ChainStore
 from ..storage.evidence_store import EvidenceStore
 from .arbitrate import ReviewResult, review_answer
-from .chain_face import UnitAssembly, assemble_units
+from .chain_face import UnitAssembly, assemble_units, retrieval_units
 from .rerank import NoopReranker, Reranker, rerank_cells
 from .retrieval import (
     AtomHit,
@@ -53,7 +53,19 @@ if TYPE_CHECKING:
 
 # Three public modes: auto (escalates automatically) | fast (fast path only) | deep (straight to the
 # deep track, for standalone benchmarking)
-PUBLIC_MODES = ("auto", "fast", "deep")
+PUBLIC_MODES = ("auto", "fast", "deep", "flash")
+
+
+def validate_recall(query: str, mode: str, top_k: int, *, has_image: bool = False) -> None:
+    """Reject invalid retrieval requests before any provider or storage work."""
+    if mode not in PUBLIC_MODES:
+        raise ValueError(f"mode must be one of {PUBLIC_MODES}")
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError("query must be a non-empty string")
+    if isinstance(top_k, bool) or not isinstance(top_k, int) or not 1 <= top_k <= 100:
+        raise ValueError("top_k must be an integer between 1 and 100")
+    if mode == "flash" and has_image:
+        raise ValueError("flash supports text queries only; use fast or auto for an image")
 
 
 def _fmt_day(dt) -> str:
@@ -158,7 +170,7 @@ class RecallOutcome:
             if self.deep and self.ans and self.ans.cited_cells:
                 for cid in self.ans.cited_cells:
                     picked.extend(atoms.list_by_cell(cid))
-            elif verdict is not None:
+            elif verdict is not None or self.mode == "flash":
                 for hit in self.ranked[:max_memories]:
                     picked.extend(a.atom for a in hit.atoms)
             mem = [memory_view(a, evidence, media_store)
@@ -177,6 +189,17 @@ class RecallOutcome:
             "cited_cells": [] if insufficient else (self.ans.cited_cells if self.ans else []),
             "memories": mem,
         }
+        if self.mode == "flash":
+            # These are retrieved sources, not reviewed claims or answer citations.
+            out["materials"] = [
+                {"cell_id": hit.cell.id, "session_id": hit.cell.session_id,
+                 "topic": hit.cell.topic, "episode": hit.cell.episode,
+                 "t_start": hit.cell.t_start.isoformat() if hit.cell.t_start else None,
+                 "t_end": hit.cell.t_end.isoformat() if hit.cell.t_end else None,
+                 "atom_ids": [item.atom.id for item in hit.atoms],
+                 "evidence_refs": [ref.evidence_id for ref in hit.cell.evidence_refs]}
+                for hit in self.ranked[:max_memories]
+            ]
         if self.warnings:
             out["warnings"] = list(self.warnings)
         # Only when an image was actually sent. Without this a caller cannot
@@ -215,12 +238,25 @@ def run_recall(
     all units) -> R5 draft -> R3' adjudication (draft + the same materials). mode=deep goes straight
     to the deep track; in auto mode an answer defect is re-answered once, and a remaining defect or
     insufficient material escalates to the deep track, which overrides the final answer."""
+    validate_recall(query, mode, top_k, has_image=image is not None)
     out = RecallOutcome(query=query, mode=mode,
                         _atoms=atoms, _evidence=evidence, _media_store=media_store)
     t0 = time.perf_counter()
 
     def mark(stage: str):
         out.secs[stage] = round(time.perf_counter() - t0, 3)   # cumulative anchors: each stage's cost is a difference between two of them
+
+    if mode == "flash":
+        # An agent already has its dialogue and will compose its own response.
+        # Skip history summarization, rewriting, weaving, answering and review.
+        out.rw = QueryRewrite(original=query, resolved=query)
+        pool = search_atoms(embedder, atoms, rewrite=out.rw, top_n=top_k)
+        out.hits = pool.atoms
+        mark("R1")
+        out.asm = retrieval_units(out.hits, cells)
+        out.ranked = rerank_cells(reranker or NoopReranker(), query, out.asm.units)
+        mark("R2")
+        return out
 
     # The basis for reference resolution (the rolling summary + the last few turns). Passing `cells`
     # folds video segments into their episode instead of 20+ lines of verbatim dialogue.

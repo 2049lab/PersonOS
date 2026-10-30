@@ -31,7 +31,7 @@ class FakeWriter:
         self._key = key
         self._barrier = barrier
 
-    def feed_batch(self, msgs, *, now_dt=None, source_extra=None, task_type=None, scenario=""):
+    def feed_batch(self, msgs, *, now_dt=None, source_extra=None, task_type=None, scenario="", evidence_ids=None):
         if self._barrier is not None:
             self._barrier.wait(2.0)
         for m in msgs:
@@ -143,7 +143,7 @@ def test_transient_failure_retries_not_lost():
     calls = {"n": 0}
 
     class FlakyWriter:
-        def feed_batch(self, msgs, *, now_dt=None, source_extra=None, task_type=None, scenario=""):
+        def feed_batch(self, msgs, *, now_dt=None, source_extra=None, task_type=None, scenario="", evidence_ids=None):
             calls["n"] += 1
             if calls["n"] == 1:
                 raise RuntimeError("simulated transient failure, e.g. a blip on the model gateway")
@@ -171,7 +171,7 @@ def test_poison_message_skipped_after_max_retries():
 
     class PoisonWriter:
         """The first (poison) message always blows up; the rest are handled normally."""
-        def feed_batch(self, msgs, *, now_dt=None, source_extra=None, task_type=None, scenario=""):
+        def feed_batch(self, msgs, *, now_dt=None, source_extra=None, task_type=None, scenario="", evidence_ids=None):
             if msgs[0].text == "毒":
                 raise ValueError("a poison message that always fails")
             for m in msgs:
@@ -227,7 +227,7 @@ def test_heartbeat_renews_lock_during_long_apply():
 
     def wf(u, s):
         class W:
-            def feed_batch(self, msgs, *, now_dt=None, source_extra=None, task_type=None, scenario=""):
+            def feed_batch(self, msgs, *, now_dt=None, source_extra=None, task_type=None, scenario="", evidence_ids=None):
                 time.sleep(0.15)                           # one very long message (longer than the renew interval)
             def end_session(self, *, task_type=None, scenario=""):
                 pass
@@ -378,7 +378,7 @@ def test_two_consumers_single_flight_cross_pod():
 
     def wf(u, s):
         class W:
-            def feed_batch(self, msgs, *, now_dt=None, source_extra=None, task_type=None, scenario=""):
+            def feed_batch(self, msgs, *, now_dt=None, source_extra=None, task_type=None, scenario="", evidence_ids=None):
                 time.sleep(0.002)                      # widen the concurrency window
                 with guard:
                     for m in msgs:
@@ -432,3 +432,95 @@ def test_dispatcher_backpressure_when_pool_full():
     disp = Dispatcher(mq, consumer, _NoLeavePool(), cap=1)
     assert disp.run_once() == 1                        # one dispatch fills the pool
     assert disp.run_once() == 0                        # still full, nothing can be dispatched
+
+
+def test_queue_message_identity_is_stable_and_scoped():
+    from personos.storage.msg_queue import Envelope
+
+    calls = []
+
+    class RecordingWriter:
+        def feed_batch(self, msgs, **kwargs):
+            calls.append(kwargs["evidence_ids"])
+
+    consumer = SessionConsumer(MemoryMsgQueue(), MemorySessionLock(), lambda u, s: RecordingWriter())
+    payload = {"messages": [{"text": "Yes"}, {"text": "Yes"}]}
+    first = Envelope(msg_id="batch-1", seq=1, kind="ingest", payload=payload)
+    other = Envelope(msg_id="batch-2", seq=2, kind="ingest", payload=payload)
+    consumer._do_write("alice", "one", first)
+    consumer._do_write("alice", "one", first)
+    consumer._do_write("alice", "one", other)
+    consumer._do_write("bob", "one", first)
+    consumer._do_write("alice", "two", first)
+    assert calls[0] == calls[1]
+    assert len(set(calls[0])) == 2
+    assert len({item for group in [calls[0], *calls[2:]] for item in group}) == 8
+
+
+def _real_consumer(db, monkeypatch):
+    from personos.online.write_path import SessionWriter
+    from personos.storage.atom_store import AtomStore
+    from personos.storage.cell_store import CellStore
+    from personos.storage.evidence_store import EvidenceStore
+    from personos.storage.seg_store import MemorySegStore
+
+    from .fakes import FakeEmbedder, FakeLLM
+
+    evidence = EvidenceStore(db, "alice")
+    segments = MemorySegStore()
+    mq = MemoryMsgQueue()
+    llm = FakeLLM([])  # replaying an already buffered batch must not invoke any model
+
+    def writer_for(user, session):
+        return SessionWriter(llm, FakeEmbedder(), evidence, CellStore(db, user), AtomStore(db, user),
+                             session_id=session, user_id=user, seg_store=segments)
+
+    consumer = SessionConsumer(mq, MemorySessionLock(), writer_for)
+    return mq, consumer, evidence, segments
+
+
+def test_retry_after_partial_evidence_write_keeps_original_identity(db, monkeypatch):
+    mq, consumer, evidence, segments = _real_consumer(db, monkeypatch)
+    append = evidence.append
+    failed = False
+
+    def persist_then_fail(rec, *args, **kwargs):
+        nonlocal failed
+        result = append(rec, *args, **kwargs)
+        if not failed:
+            failed = True
+            raise RuntimeError("connection lost after evidence commit")
+        return result
+
+    monkeypatch.setattr(evidence, "append", persist_then_fail)
+    mq.enqueue("alice", "one", {"messages": [{"text": "Yes"}, {"text": "Yes"}]})
+    assert consumer.drain_session("alice", "one").applied == 0
+    original = evidence.list()[0]
+    assert segments.load("alice", "one") == []
+    assert consumer.drain_session("alice", "one").applied == 1
+    assert len(evidence.list()) == 2
+    assert evidence.get(original.id).model_dump() == original.model_dump()
+    assert len(segments.load("alice", "one")) == 2
+
+
+def test_retry_after_segment_save_does_not_duplicate_buffer(db, monkeypatch):
+    mq, consumer, evidence, segments = _real_consumer(db, monkeypatch)
+    cursor_set = mq.cursor_set
+    failed = False
+
+    def lose_cursor_once(user, session, seq):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise RuntimeError("cursor write failed after segment save")
+        return cursor_set(user, session, seq)
+
+    monkeypatch.setattr(mq, "cursor_set", lose_cursor_once)
+    mq.enqueue("alice", "one", _p("I live in Oslo"))
+    assert consumer.drain_session("alice", "one").applied == 0
+    original = evidence.list()[0]
+    assert consumer.drain_session("alice", "one").applied == 1
+    assert len(evidence.list()) == 1
+    buffered = segments.load("alice", "one")
+    assert len(buffered) == 1 and buffered[0].id == original.id
+    assert buffered[0].captured_at == original.captured_at

@@ -46,7 +46,7 @@ class RecordingWriter:
         self._inflight_guard = inflight_guard
         self._violations = violations
 
-    def feed_batch(self, msgs, *, now_dt=None, source_extra=None, task_type=None, scenario=""):
+    def feed_batch(self, msgs, *, now_dt=None, source_extra=None, task_type=None, scenario="", evidence_ids=None):
         with self._inflight_guard:                      # single-flight probe: +1 on entry; a value >1 means concurrent consumption
             self._inflight[self._key] += 1
             if self._inflight[self._key] > 1:
@@ -167,7 +167,7 @@ def test_stress_no_session_starvation():
         def __init__(self, key):
             self._key = key
 
-        def feed_batch(self, msgs, *, now_dt=None, source_extra=None, task_type=None, scenario=""):
+        def feed_batch(self, msgs, *, now_dt=None, source_extra=None, task_type=None, scenario="", evidence_ids=None):
             with seen_guard:
                 first_seen.setdefault(self._key, time.monotonic() - t0)
             time.sleep(0.03)                            # slow consumption, to amplify any starvation
@@ -208,7 +208,7 @@ def test_stress_poison_under_concurrency():
         def __init__(self, key):
             self._key = key
 
-        def feed_batch(self, msgs, *, now_dt=None, source_extra=None, task_type=None, scenario=""):
+        def feed_batch(self, msgs, *, now_dt=None, source_extra=None, task_type=None, scenario="", evidence_ids=None):
             if msgs[0].text == "POISON":
                 raise ValueError("poison message")
             with guard:

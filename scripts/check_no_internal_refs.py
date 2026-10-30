@@ -42,6 +42,7 @@ PATTERNS: dict[str, str] = {
     r"\bapollo\b|pyapollo": "internal configuration service",
     r"xray-langfuse|xray": "internal observability platform",
     r"mneme|meme-backend|wallace": "internal project codenames",
+    r"\brokid\b|\brokit\b": "application-specific integration identifiers",
     r"DMS 工单|内部系统开发安全规范": "internal process / policy document names",
 }
 
@@ -53,7 +54,7 @@ PATTERNS: dict[str, str] = {
 # gitignored anyway so they never reach the file list.
 SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", "data", "logs",
              ".venv", "venv", "node_modules", ".idea"}
-SKIP_SUFFIX = {".pyc", ".gz", ".png", ".jpg", ".jpeg", ".ico", ".lock", ".json"}
+SKIP_SUFFIX = {".pyc", ".gz", ".png", ".jpg", ".jpeg", ".ico", ".lock"}
 SKIP_FILES = {"check_no_internal_refs.py"}
 
 
